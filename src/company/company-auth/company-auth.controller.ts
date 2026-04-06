@@ -18,10 +18,14 @@ import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { AccountStatusGuard } from './guards/account-status.guard';
+import { RegistrationMastersService } from '../registration-masters/registration-masters.service';
 
 @Controller('api/company/auth')
 export class CompanyAuthController {
-  constructor(private readonly companyAuthService: CompanyAuthService) {}
+  constructor(
+    private readonly companyAuthService: CompanyAuthService,
+    private readonly registrationMastersService: RegistrationMastersService,
+  ) {}
 
   @Post('register')
   @UsePipes(
@@ -47,6 +51,33 @@ export class CompanyAuthController {
   )
   async register(@Body() registerDto: RegisterDto) {
     return this.companyAuthService.register(registerDto);
+  }
+
+  /**
+   * GET /api/company/auth/register
+   * Returns registration master data for frontend form load on the same route path.
+   */
+  @Get('register')
+  async getRegisterMasters() {
+    const masters = await this.registrationMastersService.getRegistrationMasters();
+    return {
+      status: 'success',
+      message: 'Registration form data',
+      data: {
+        payload: {
+          email: '',
+          company_name: '',
+          mobileno: '',
+          assessment: 'cii',
+          selectfacilitator: '',
+        },
+        assessment_options: [
+          { id: 'cii', name: 'cii' },
+          { id: 'facilitator', name: 'facilitator' },
+        ],
+        ...masters.data,
+      },
+    };
   }
 
   @Post('login')
@@ -112,6 +143,24 @@ export class CompanyAuthController {
   @Get('companies-list')
   async getCompaniesList(@Query('name') name?: string) {
     return this.companyAuthService.getCompaniesList(name);
+  }
+
+  /**
+   * GET /api/company/auth/register-info
+   * Auth namespace endpoint for registration masters.
+   */
+  @Get('register-info')
+  async getRegisterInfo() {
+    return this.registrationMastersService.getRegistrationMasters();
+  }
+
+  /**
+   * GET /api/company/auth/registration-info
+   * Alias endpoint for frontend consistency.
+   */
+  @Get('registration-info')
+  async getRegistrationInfo() {
+    return this.registrationMastersService.getRegistrationMasters();
   }
 }
 

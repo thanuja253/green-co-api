@@ -24,6 +24,7 @@ import { AssessorGrade, AssessorGradeSchema } from '../schemas/assessor-grade.sc
   ],
   controllers: [RegistrationMastersController],
   providers: [RegistrationMastersService],
+  exports: [RegistrationMastersService],
 })
 export class RegistrationMastersModule {}
 

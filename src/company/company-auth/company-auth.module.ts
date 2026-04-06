@@ -22,6 +22,7 @@ import {
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { MailModule } from '../../mail/mail.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { RegistrationMastersModule } from '../registration-masters/registration-masters.module';
 
 @Module({
   imports: [
@@ -45,6 +46,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
     ]),
     MailModule,
     NotificationsModule,
+    RegistrationMastersModule,
   ],
   controllers: [CompanyAuthController],
   providers: [CompanyAuthService, JwtStrategy],
