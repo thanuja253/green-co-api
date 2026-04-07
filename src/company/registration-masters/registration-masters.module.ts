@@ -20,6 +20,7 @@ import { Facilitator, FacilitatorSchema } from '../schemas/facilitator.schema';
   ],
   controllers: [RegistrationMastersController],
   providers: [RegistrationMastersService],
+  exports: [RegistrationMastersService],
 })
 export class RegistrationMastersModule {}
 
