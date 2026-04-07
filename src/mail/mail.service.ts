@@ -6,13 +6,25 @@ export class MailService {
   private transporter: nodemailer.Transporter;
 
   constructor() {
+    const smtpHost = process.env.MAIL_HOST || process.env.SMTP_SERVER_HOST || 'smtp.gmail.com';
+    const smtpPort = parseInt(process.env.MAIL_PORT || process.env.SMTP_SERVER_PORT || '587');
+    const smtpUser = process.env.MAIL_USERNAME || process.env.SMTP_SERVER_USER;
+    const rawPass = process.env.MAIL_PASSWORD || process.env.SMTP_SERVER_PASS || '';
+    const smtpPass = rawPass.replace(/\s+/g, '');
+    const smtpSecure =
+      (process.env.MAIL_SECURE || process.env.SMTP_SERVER_SECURE || 'false') ===
+      'true';
+
     this.transporter = nodemailer.createTransport({
-      host: process.env.MAIL_HOST || 'smtp.gmail.com',
-      port: parseInt(process.env.MAIL_PORT || '587'),
-      secure: false,
+      host: smtpHost,
+      port: smtpPort,
+      secure: smtpSecure,
+      ...(process.env.SMTP_SERVER_SERVICE
+        ? { service: process.env.SMTP_SERVER_SERVICE }
+        : {}),
       auth: {
-        user: process.env.MAIL_USERNAME,
-        pass: process.env.MAIL_PASSWORD,
+        user: smtpUser,
+        pass: smtpPass,
       },
       connectionTimeout: 10000, // 10 seconds
       greetingTimeout: 10000, // 10 seconds
