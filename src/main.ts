@@ -5,6 +5,7 @@ import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { join } from 'path';
 import * as express from 'express';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
@@ -112,6 +113,16 @@ async function bootstrap() {
       },
     }),
   );
+
+  // Swagger docs
+  const swaggerConfig = new DocumentBuilder()
+    .setTitle('Green Co API')
+    .setDescription('Green Co backend API documentation')
+    .setVersion('1.0')
+    .addBearerAuth()
+    .build();
+  const swaggerDocument = SwaggerModule.createDocument(app, swaggerConfig);
+  SwaggerModule.setup('api/docs', app, swaggerDocument);
 
   // Set timeout for requests (30 seconds)
   const server = app.getHttpServer();
