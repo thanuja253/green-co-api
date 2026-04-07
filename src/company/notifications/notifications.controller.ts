@@ -30,7 +30,6 @@ export class NotificationsController {
     };
   }
 
-  /** PATCH /api/company/notifications/seen – mark all as seen */
   @Patch('seen')
   @UseGuards(JwtAuthGuard, AccountStatusGuard)
   async markAllSeen(@Request() req) {
