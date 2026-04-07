@@ -7,40 +7,52 @@ export class MailService {
 
   constructor() {
     const smtpHost = process.env.MAIL_HOST || process.env.SMTP_SERVER_HOST || 'smtp.gmail.com';
-    const smtpPort = parseInt(process.env.MAIL_PORT || process.env.SMTP_SERVER_PORT || '587');
-    const smtpUser = process.env.MAIL_USERNAME || process.env.SMTP_SERVER_USER;
+    const smtpPort = parseInt(process.env.MAIL_PORT || process.env.SMTP_SERVER_PORT || '587', 10);
+    const smtpUser = (process.env.MAIL_USERNAME || process.env.SMTP_SERVER_USER || '').trim();
     const rawPass = process.env.MAIL_PASSWORD || process.env.SMTP_SERVER_PASS || '';
     const smtpPass = rawPass.replace(/\s+/g, '');
-    const smtpSecure =
+    let smtpSecure =
       (process.env.MAIL_SECURE || process.env.SMTP_SERVER_SECURE || 'false') ===
       'true';
+    if (smtpPort === 465) {
+      smtpSecure = true;
+    }
+
+    const timeoutMs = parseInt(process.env.MAIL_SMTP_TIMEOUT_MS || '25000', 10);
 
     this.transporter = nodemailer.createTransport({
       host: smtpHost,
       port: smtpPort,
       secure: smtpSecure,
-      ...(process.env.SMTP_SERVER_SERVICE
-        ? { service: process.env.SMTP_SERVER_SERVICE }
-        : {}),
       auth: {
         user: smtpUser,
         pass: smtpPass,
       },
-      connectionTimeout: 10000, // 10 seconds
-      greetingTimeout: 10000, // 10 seconds
-      socketTimeout: 10000, // 10 seconds
+      tls: {
+        minVersion: 'TLSv1.2',
+      },
+      connectionTimeout: timeoutMs,
+      greetingTimeout: timeoutMs,
+      socketTimeout: timeoutMs,
     });
 
-    // Log basic transporter verification on startup so you can see immediately
-    // if SMTP credentials or host/port are wrong.
-    this.transporter
-      .verify()
-      .then(() => {
-        console.log('[MailService] SMTP connection verified successfully.');
-      })
-      .catch((err) => {
-        console.error('[MailService] SMTP connection verification failed:', err);
-      });
+    // On Render and many cloud hosts, outbound SMTP to Gmail often times out (ETIMEDOUT).
+    // Startup verify() only adds noise and does not fix delivery. Opt in when debugging locally.
+    const verifyOnStart = process.env.MAIL_SMTP_VERIFY_ON_START === 'true';
+    if (verifyOnStart) {
+      this.transporter
+        .verify()
+        .then(() => {
+          console.log('[MailService] SMTP connection verified successfully.');
+        })
+        .catch((err) => {
+          console.error('[MailService] SMTP connection verification failed:', err);
+        });
+    } else {
+      console.log(
+        '[MailService] SMTP verify on start skipped (set MAIL_SMTP_VERIFY_ON_START=true to enable).',
+      );
+    }
   }
 
   async sendCompanyRegistrationEmail(
