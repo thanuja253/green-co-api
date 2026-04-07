@@ -1,18 +1,40 @@
 import { Injectable } from '@nestjs/common';
 import * as nodemailer from 'nodemailer';
+import { Resend } from 'resend';
 
 @Injectable()
 export class MailService {
-  private transporter: nodemailer.Transporter;
+  private transporter?: nodemailer.Transporter;
+  private resend?: Resend;
+  private fromAddress =
+    process.env.MAIL_FROM_ADDRESS ||
+    process.env.SMTP_FROM_ADDRESS ||
+    process.env.SMTP_SERVER_USER ||
+    'noreply@greenco.com';
 
   constructor() {
+    const resendApiKey = process.env.RESEND_API_KEY;
+    if (resendApiKey) {
+      this.resend = new Resend(resendApiKey);
+      console.log('[MailService] Using Resend API transport.');
+      return;
+    }
+
+    const smtpHost = process.env.MAIL_HOST || process.env.SMTP_SERVER_HOST || 'smtp.gmail.com';
+    const smtpPort = parseInt(process.env.MAIL_PORT || process.env.SMTP_SERVER_PORT || '587');
+    const smtpUser = process.env.MAIL_USERNAME || process.env.SMTP_SERVER_USER;
+    const smtpPass = process.env.MAIL_PASSWORD || process.env.SMTP_SERVER_PASS;
+    const secure = (process.env.MAIL_SECURE || process.env.SMTP_SERVER_SECURE || 'false') === 'true';
     this.transporter = nodemailer.createTransport({
-      host: process.env.MAIL_HOST || 'smtp.gmail.com',
-      port: parseInt(process.env.MAIL_PORT || '587'),
-      secure: false,
+      host: smtpHost,
+      port: smtpPort,
+      secure,
+      ...(process.env.SMTP_SERVER_SERVICE
+        ? { service: process.env.SMTP_SERVER_SERVICE }
+        : {}),
       auth: {
-        user: process.env.MAIL_USERNAME,
-        pass: process.env.MAIL_PASSWORD,
+        user: smtpUser,
+        pass: smtpPass,
       },
       connectionTimeout: 10000, // 10 seconds
       greetingTimeout: 10000, // 10 seconds
@@ -29,6 +51,36 @@ export class MailService {
       .catch((err) => {
         console.error('[MailService] SMTP connection verification failed:', err);
       });
+  }
+
+  private async sendMail(mailOptions: nodemailer.SendMailOptions) {
+    if (this.resend) {
+      const to = mailOptions.to
+        ? Array.isArray(mailOptions.to)
+          ? mailOptions.to.map(String)
+          : String(mailOptions.to)
+        : undefined;
+      const cc = mailOptions.cc
+        ? Array.isArray(mailOptions.cc)
+          ? mailOptions.cc.map(String)
+          : String(mailOptions.cc)
+        : undefined;
+
+      await this.resend.emails.send({
+        from: String(mailOptions.from || this.fromAddress),
+        to,
+        cc,
+        subject: String(mailOptions.subject || ''),
+        text: mailOptions.text ? String(mailOptions.text) : undefined,
+        html: mailOptions.html ? String(mailOptions.html) : undefined,
+      });
+      return null;
+    }
+
+    if (!this.transporter) {
+      throw new Error('Mail transport is not initialized');
+    }
+    return this.transporter.sendMail(mailOptions);
   }
 
   async sendCompanyRegistrationEmail(
@@ -116,7 +168,7 @@ export class MailService {
     // Basic logging so you can see in the Nest console whether the mail was attempted / failed
     try {
       console.log('[MailService] Sending registration email to:', email);
-      await this.transporter.sendMail(mailOptions);
+      await this.sendMail(mailOptions);
       console.log('[MailService] Registration email sent successfully to:', email);
     } catch (err) {
       console.error('[MailService] Failed to send registration email to:', email, 'Error:', err);
@@ -211,19 +263,21 @@ export class MailService {
       `,
     };
 
-    const info = await this.transporter.sendMail(mailOptions);
-    console.log('[MailService] Forgot password mail response:', {
-      to: email,
-      accepted: info.accepted,
-      rejected: info.rejected,
-      messageId: info.messageId,
-      response: info.response,
-    });
-    if (
-      Array.isArray(info.rejected) &&
-      info.rejected.map(String).includes(email)
-    ) {
-      throw new Error(`SMTP rejected recipient: ${email}`);
+    const info = await this.sendMail(mailOptions);
+    if (info) {
+      console.log('[MailService] Forgot password mail response:', {
+        to: email,
+        accepted: info.accepted,
+        rejected: info.rejected,
+        messageId: info.messageId,
+        response: info.response,
+      });
+      if (
+        Array.isArray(info.rejected) &&
+        info.rejected.map(String).includes(email)
+      ) {
+        throw new Error(`SMTP rejected recipient: ${email}`);
+      }
     }
   }
 
@@ -296,20 +350,22 @@ export class MailService {
       `,
     };
 
-    const info = await this.transporter.sendMail(mailOptions);
-    console.log('[MailService] Admin forgot password mail response:', {
-      to: email,
-      cc: backupEmail && backupEmail !== email ? backupEmail : null,
-      accepted: info.accepted,
-      rejected: info.rejected,
-      messageId: info.messageId,
-      response: info.response,
-    });
-    if (
-      Array.isArray(info.rejected) &&
-      info.rejected.map(String).includes(email)
-    ) {
-      throw new Error(`SMTP rejected recipient: ${email}`);
+    const info = await this.sendMail(mailOptions);
+    if (info) {
+      console.log('[MailService] Admin forgot password mail response:', {
+        to: email,
+        cc: backupEmail && backupEmail !== email ? backupEmail : null,
+        accepted: info.accepted,
+        rejected: info.rejected,
+        messageId: info.messageId,
+        response: info.response,
+      });
+      if (
+        Array.isArray(info.rejected) &&
+        info.rejected.map(String).includes(email)
+      ) {
+        throw new Error(`SMTP rejected recipient: ${email}`);
+      }
     }
   }
 
@@ -390,7 +446,7 @@ export class MailService {
       `,
     };
 
-    await this.transporter.sendMail(mailOptions);
+    await this.sendMail(mailOptions);
   }
 
   /** Facilitator: you have been assigned to a company */
@@ -413,7 +469,7 @@ export class MailService {
         </div>
       `,
     };
-    await this.transporter.sendMail(mailOptions);
+    await this.sendMail(mailOptions);
   }
 
   /** Company: a facilitator has been assigned to your project */
@@ -437,7 +493,7 @@ export class MailService {
         </div>
       `,
     };
-    await this.transporter.sendMail(mailOptions);
+    await this.sendMail(mailOptions);
   }
 
   /** Assessor: you have been assigned to a company (site visit scheduling) */
@@ -460,7 +516,7 @@ export class MailService {
         </div>
       `,
     };
-    await this.transporter.sendMail(mailOptions);
+    await this.sendMail(mailOptions);
   }
 
   /** Admin: coordinator has submitted scoring */
@@ -478,7 +534,7 @@ export class MailService {
         </div>
       `,
     };
-    await this.transporter.sendMail(mailOptions);
+    await this.sendMail(mailOptions);
   }
 
   /** Company/Facilitator: checklist/assessment document not accepted */
@@ -502,7 +558,7 @@ export class MailService {
         </div>
       `,
     };
-    await this.transporter.sendMail(mailOptions);
+    await this.sendMail(mailOptions);
   }
 
   /** Company/Facilitator: primary data document not accepted */
@@ -526,7 +582,7 @@ export class MailService {
         </div>
       `,
     };
-    await this.transporter.sendMail(mailOptions);
+    await this.sendMail(mailOptions);
   }
 
   /** Company/Facilitator: primary data section accepted */
@@ -549,7 +605,7 @@ export class MailService {
         </div>
       `,
     };
-    await this.transporter.sendMail(mailOptions);
+    await this.sendMail(mailOptions);
   }
 
   /** Company/Facilitator: invoice (registration fee / proforma / tax) has been raised */
@@ -573,7 +629,7 @@ export class MailService {
         </div>
       `,
     };
-    await this.transporter.sendMail(mailOptions);
+    await this.sendMail(mailOptions);
   }
 
   /** Company/Facilitator: payment approved or disapproved */
@@ -596,7 +652,7 @@ export class MailService {
         </div>
       `,
     };
-    await this.transporter.sendMail(mailOptions);
+    await this.sendMail(mailOptions);
   }
 
   /** Company: site visit report has been uploaded (Launch & Training) */
@@ -618,7 +674,7 @@ export class MailService {
         </div>
       `,
     };
-    await this.transporter.sendMail(mailOptions);
+    await this.sendMail(mailOptions);
   }
 
   /** Payment reminder: unpaid invoice (e.g. 15 days after reminder_date) */
@@ -636,7 +692,7 @@ export class MailService {
         </div>
       `,
     };
-    await this.transporter.sendMail(mailOptions);
+    await this.sendMail(mailOptions);
   }
 
   /** Proposal document reminder */
@@ -654,7 +710,7 @@ export class MailService {
         </div>
       `,
     };
-    await this.transporter.sendMail(mailOptions);
+    await this.sendMail(mailOptions);
   }
 
   /** Certificate validity / expiry reminder */
@@ -672,7 +728,7 @@ export class MailService {
         </div>
       `,
     };
-    await this.transporter.sendMail(mailOptions);
+    await this.sendMail(mailOptions);
   }
 
   /** Sustenance reminder (1st) */
@@ -690,7 +746,7 @@ export class MailService {
         </div>
       `,
     };
-    await this.transporter.sendMail(mailOptions);
+    await this.sendMail(mailOptions);
   }
 
   /** Sustenance 2 reminder */
@@ -708,7 +764,7 @@ export class MailService {
         </div>
       `,
     };
-    await this.transporter.sendMail(mailOptions);
+    await this.sendMail(mailOptions);
   }
 
   /**
@@ -737,7 +793,7 @@ export class MailService {
         </div>
       `,
     };
-    await this.transporter.sendMail(mailOptions);
+    await this.sendMail(mailOptions);
   }
 }
 
