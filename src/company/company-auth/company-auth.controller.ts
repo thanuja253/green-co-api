@@ -137,6 +137,8 @@ export class CompanyAuthController {
   }
 
   @Get('companies-list')
+  @Get('submitted-companies')
+  @Get('submitted_companies')
   async getCompaniesList(@Query('name') name?: string) {
     return this.companyAuthService.getCompaniesList(name);
   }
