@@ -11,6 +11,8 @@ import { HelpDeskModule } from './company/help-desk/help-desk.module';
 import { RoleManagementModule } from './company/role-management/role-management.module';
 import { StaffManagementModule } from './company/staff-management/staff-management.module';
 import { LegacyDataModule } from './company/legacy-data/legacy-data.module';
+import { GroupManagementModule } from './company/group-management/group-management.module';
+import { SectorManagementModule } from './company/sector-management/sector-management.module';
 import { AppController } from './app.controller';
 
 @Module({
@@ -39,6 +41,8 @@ import { AppController } from './app.controller';
     RoleManagementModule,
     StaffManagementModule,
     LegacyDataModule,
+    GroupManagementModule,
+    SectorManagementModule,
   ],
   controllers: [AppController],
 })

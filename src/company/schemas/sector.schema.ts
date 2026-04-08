@@ -10,6 +10,9 @@ export class Sector {
 
   @Prop()
   group_name?: string;
+
+  @Prop({ default: '1' })
+  status?: string;
 }
 
 export const SectorSchema = SchemaFactory.createForClass(Sector);
