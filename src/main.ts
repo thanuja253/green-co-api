@@ -74,6 +74,8 @@ async function bootstrap() {
     'http://127.0.0.1:3001',
     'http://127.0.0.1:3002',
     'https://cursor-greenco-mern.vercel.app',
+    'https://cursor-greenco-admin.mern.vercel.app',
+    'https://greenco-admin.mern.vercel.app',
   ];
   const allowedOrigins = envOrigins.length > 0 ? envOrigins : defaultOrigins;
 
@@ -83,6 +85,7 @@ async function bootstrap() {
       // In development: allow every origin to rule out CORS as cause of network error
       if (!isProduction) return callback(null, true);
       if (allowedOrigins.includes(origin)) return callback(null, true);
+      if (/^https:\/\/[a-z0-9-]+\.vercel\.app$/i.test(origin)) return callback(null, true);
       if (origin.startsWith('http://localhost:') || origin.startsWith('https://localhost:')) return callback(null, true);
       if (origin.startsWith('http://127.0.0.1:') || origin.startsWith('https://127.0.0.1:')) return callback(null, true);
       callback(null, false);
