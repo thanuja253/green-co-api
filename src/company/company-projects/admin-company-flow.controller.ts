@@ -11,6 +11,7 @@ import { CreateAssessorDto } from './dto/create-assessor.dto';
 import { CreateAssessorProfileDto } from './dto/create-assessor-profile.dto';
 import { ListAssessorsQueryDto } from './dto/list-assessors-query.dto';
 import { UpdateAssessorApprovalDto } from './dto/update-assessor-approval.dto';
+import { ReportsQueryDto } from './dto/reports-query.dto';
 
 @Controller()
 export class AdminCompanyFlowController {
@@ -355,6 +356,13 @@ export class AdminCompanyFlowController {
       dto.status,
       dto.remarks,
     );
+  }
+
+  @Get('api/admin/reports')
+  @Get('admin/reports')
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
+  async getReports(@Query() query: ReportsQueryDto): Promise<any> {
+    return this.companyProjectsService.getReportsAdminFlow(query);
   }
 }
 

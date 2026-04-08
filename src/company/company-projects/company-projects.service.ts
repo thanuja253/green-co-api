@@ -32,6 +32,7 @@ import { SubmitPaymentDto } from './dto/submit-payment.dto';
 import { UpdateInvoiceApprovalDto } from './dto/update-invoice-approval.dto';
 import { CreateAssessorProfileDto } from './dto/create-assessor-profile.dto';
 import { ListAssessorsQueryDto } from './dto/list-assessors-query.dto';
+import { ReportsQueryDto } from './dto/reports-query.dto';
 import { join } from 'path';
 import * as fs from 'fs';
 import { getCertificationType } from '../../helpers/certification.helper';
@@ -434,6 +435,166 @@ export class CompanyProjectsService {
       status: 'success',
       message: `Assessor ${approvalStatus.toLowerCase()} successfully`,
       data: this.mapAssessorResponse(assessor.toObject()),
+    };
+  }
+
+  async getReportsAdminFlow(query?: ReportsQueryDto) {
+    const parsedPage = Number.parseInt(String(query?.page ?? '1'), 10);
+    const parsedLimit = Number.parseInt(String(query?.limit ?? '10'), 10);
+    const page = Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1;
+    const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : 10;
+    const cappedLimit = Math.min(limit, 100);
+
+    const registerThroughInput = String(query?.register_through || '').trim().toLowerCase();
+    const processType =
+      registerThroughInput === 'cii' || registerThroughInput === 'c'
+        ? 'c'
+        : registerThroughInput === 'facilitator' || registerThroughInput === 'f'
+          ? 'f'
+          : '';
+
+    const projectFilter: Record<string, any> = {};
+    if (processType) {
+      projectFilter.process_type = processType;
+    }
+
+    if (query?.year?.trim() && /^\d{4}$/.test(query.year.trim())) {
+      const year = Number.parseInt(query.year.trim(), 10);
+      projectFilter.createdAt = {
+        $gte: new Date(year, 0, 1),
+        $lt: new Date(year + 1, 0, 1),
+      };
+    }
+
+    const projects = await this.projectModel
+      .find(projectFilter)
+      .select('_id company_id process_type createdAt')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    if (!projects.length) {
+      return {
+        status: 'success',
+        message: 'Reports fetched successfully',
+        data: [],
+        pagination: {
+          page,
+          limit: cappedLimit,
+          total: 0,
+          total_pages: 1,
+          has_next_page: false,
+          has_prev_page: false,
+        },
+        applied_filters: {
+          year: query?.year ?? '',
+          name: query?.name ?? '',
+          company_status: query?.company_status ?? '',
+          register_through: query?.register_through ?? '',
+          email: query?.email ?? '',
+          facilitator: query?.facilitator ?? '',
+          assessor: query?.assessor ?? '',
+          coordinator: query?.coordinator ?? '',
+        },
+      };
+    }
+
+    const projectIds = projects.map((p: any) => p._id);
+    const companyIds = [...new Set(projects.map((p: any) => String(p.company_id)))];
+
+    const [companies, facilitatorAssignments, assessorAssignments, coordinatorAssignments] = await Promise.all([
+      this.companyModel.find({ _id: { $in: companyIds } }).select('_id name email account_status reg_id').lean(),
+      this.companyFacilitatorModel
+        .find({ project_id: { $in: projectIds } })
+        .populate('facilitator_id', 'name')
+        .select('project_id facilitator_id')
+        .lean(),
+      this.companyAssessorModel
+        .find({ project_id: { $in: projectIds } })
+        .populate('assessor_id', 'name')
+        .select('project_id assessor_id')
+        .lean(),
+      this.companyCoordinatorModel
+        .find({ project_id: { $in: projectIds } })
+        .populate('coordinator_id', 'name')
+        .select('project_id coordinator_id')
+        .lean(),
+    ]);
+
+    const companyById = new Map(companies.map((c: any) => [String(c._id), c]));
+    const facilitatorByProjectId = new Map(
+      facilitatorAssignments.map((r: any) => [String(r.project_id), (r.facilitator_id as any)?.name || '']),
+    );
+    const assessorByProjectId = new Map(
+      assessorAssignments.map((r: any) => [String(r.project_id), (r.assessor_id as any)?.name || '']),
+    );
+    const coordinatorByProjectId = new Map(
+      coordinatorAssignments.map((r: any) => [String(r.project_id), (r.coordinator_id as any)?.name || '']),
+    );
+
+    const rows = projects.map((p: any) => {
+      const company = companyById.get(String(p.company_id)) || {};
+      return {
+        project_id: String(p._id),
+        company_id: String(p.company_id),
+        year: p.createdAt ? new Date(p.createdAt).getFullYear().toString() : '',
+        register_through: p.process_type === 'f' ? 'Facilitator' : 'CII',
+        company_name: (company as any).name || '',
+        company_status: (company as any).account_status === '1' ? 'Active' : 'Inactive',
+        company_status_value: (company as any).account_status || '',
+        email: (company as any).email || '',
+        reg_id: (company as any).reg_id || '',
+        facilitator: facilitatorByProjectId.get(String(p._id)) || '',
+        assessor: assessorByProjectId.get(String(p._id)) || '',
+        coordinator: coordinatorByProjectId.get(String(p._id)) || '',
+        created_at: p.createdAt || null,
+      };
+    });
+
+    const contains = (value: string, needle: string) =>
+      String(value || '').toLowerCase().includes(String(needle || '').trim().toLowerCase());
+
+    const filtered = rows.filter((r) => {
+      if (query?.name?.trim() && !contains(r.company_name, query.name)) return false;
+      if (query?.email?.trim() && !contains(r.email, query.email)) return false;
+      if (query?.facilitator?.trim() && query.facilitator !== 'All' && !contains(r.facilitator, query.facilitator)) return false;
+      if (query?.assessor?.trim() && query.assessor !== 'All' && !contains(r.assessor, query.assessor)) return false;
+      if (query?.coordinator?.trim() && query.coordinator !== 'All' && !contains(r.coordinator, query.coordinator)) return false;
+      if (query?.company_status?.trim() && query.company_status !== 'All') {
+        const normalized = query.company_status.trim().toLowerCase();
+        if (normalized === 'active' && r.company_status_value !== '1') return false;
+        if (normalized === 'inactive' && r.company_status_value === '1') return false;
+        if (!['active', 'inactive'].includes(normalized) && r.company_status_value !== query.company_status.trim()) return false;
+      }
+      return true;
+    });
+
+    const total = filtered.length;
+    const totalPages = Math.max(1, Math.ceil(total / cappedLimit));
+    const start = (page - 1) * cappedLimit;
+    const data = filtered.slice(start, start + cappedLimit);
+
+    return {
+      status: 'success',
+      message: 'Reports fetched successfully',
+      data,
+      pagination: {
+        page,
+        limit: cappedLimit,
+        total,
+        total_pages: totalPages,
+        has_next_page: page < totalPages,
+        has_prev_page: page > 1,
+      },
+      applied_filters: {
+        year: query?.year ?? '',
+        name: query?.name ?? '',
+        company_status: query?.company_status ?? '',
+        register_through: query?.register_through ?? '',
+        email: query?.email ?? '',
+        facilitator: query?.facilitator ?? '',
+        assessor: query?.assessor ?? '',
+        coordinator: query?.coordinator ?? '',
+      },
     };
   }
 
