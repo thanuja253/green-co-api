@@ -1,56 +1,36 @@
 import { Injectable } from '@nestjs/common';
-import * as nodemailer from 'nodemailer';
+
+type MailPayload = {
+  from?: string;
+  to: string;
+  subject: string;
+  html: string;
+};
 
 @Injectable()
 export class MailService {
-  private transporter: nodemailer.Transporter;
+  private readonly transporter: { sendMail: (mailOptions: MailPayload) => Promise<void> };
+  private readonly mailProvider: string;
+  private readonly resendApiKey: string;
 
   constructor() {
-    const smtpHost = process.env.MAIL_HOST || process.env.SMTP_SERVER_HOST || 'smtp.gmail.com';
-    const smtpPort = parseInt(process.env.MAIL_PORT || process.env.SMTP_SERVER_PORT || '587', 10);
-    const smtpUser = (process.env.MAIL_USERNAME || process.env.SMTP_SERVER_USER || '').trim();
-    const rawPass = process.env.MAIL_PASSWORD || process.env.SMTP_SERVER_PASS || '';
-    const smtpPass = rawPass.replace(/\s+/g, '');
-    let smtpSecure =
-      (process.env.MAIL_SECURE || process.env.SMTP_SERVER_SECURE || 'false') ===
-      'true';
-    if (smtpPort === 465) {
-      smtpSecure = true;
+    this.mailProvider = (process.env.MAIL_PROVIDER || 'resend').toLowerCase();
+    this.resendApiKey = (process.env.RESEND_API_KEY || '').trim();
+
+    this.transporter = {
+      sendMail: async (mailOptions: MailPayload): Promise<void> => {
+        await this.sendViaResend(mailOptions);
+      },
+    };
+
+    if (this.mailProvider !== 'resend') {
+      console.warn(
+        `[MailService] Unsupported MAIL_PROVIDER=${this.mailProvider}. Falling back to resend.`,
+      );
     }
-
-    const timeoutMs = parseInt(process.env.MAIL_SMTP_TIMEOUT_MS || '25000', 10);
-
-    this.transporter = nodemailer.createTransport({
-      host: smtpHost,
-      port: smtpPort,
-      secure: smtpSecure,
-      auth: {
-        user: smtpUser,
-        pass: smtpPass,
-      },
-      tls: {
-        minVersion: 'TLSv1.2',
-      },
-      connectionTimeout: timeoutMs,
-      greetingTimeout: timeoutMs,
-      socketTimeout: timeoutMs,
-    });
-
-    // On Render and many cloud hosts, outbound SMTP to Gmail often times out (ETIMEDOUT).
-    // Startup verify() only adds noise and does not fix delivery. Opt in when debugging locally.
-    const verifyOnStart = process.env.MAIL_SMTP_VERIFY_ON_START === 'true';
-    if (verifyOnStart) {
-      this.transporter
-        .verify()
-        .then(() => {
-          console.log('[MailService] SMTP connection verified successfully.');
-        })
-        .catch((err) => {
-          console.error('[MailService] SMTP connection verification failed:', err);
-        });
-    } else {
-      console.log(
-        '[MailService] SMTP verify on start skipped (set MAIL_SMTP_VERIFY_ON_START=true to enable).',
+    if (!this.resendApiKey) {
+      console.warn(
+        '[MailService] RESEND_API_KEY is missing. Email sending will fail until this environment variable is set.',
       );
     }
   }
@@ -148,6 +128,49 @@ export class MailService {
     }
   }
 
+  private async sendViaResend(mailOptions: MailPayload): Promise<void> {
+    if (!this.resendApiKey) {
+      throw new Error('RESEND_API_KEY is not configured.');
+    }
+
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.resendApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: mailOptions.from || process.env.MAIL_FROM_ADDRESS || 'noreply@greenco.com',
+        to: [mailOptions.to],
+        subject: mailOptions.subject,
+        html: mailOptions.html,
+      }),
+    });
+
+    if (!response.ok) {
+      const responseText = await response.text();
+      throw new Error(`Resend API error ${response.status}: ${responseText}`);
+    }
+  }
+
+  private logSmtpErrorContext(error: unknown, recipient: string): void {
+    const err = error as NodeJS.ErrnoException & { responseCode?: number; command?: string };
+    const code = err?.code || 'UNKNOWN';
+    const message = err?.message || 'Unknown email provider error';
+    const responseCode = err?.responseCode ? ` responseCode=${err.responseCode}` : '';
+    const command = err?.command ? ` command=${err.command}` : '';
+
+    console.error(
+      `[MailService] Email send failed for provider=${this.mailProvider} recipient=${recipient} code=${code}${responseCode}${command} message="${message}"`,
+    );
+
+    if (code === 'ETIMEDOUT' || code === 'ESOCKET' || code === 'EHOSTUNREACH' || code === 'ECONNREFUSED') {
+      console.error(
+        '[MailService] Outbound network issue detected while sending email.',
+      );
+    }
+  }
+
   async sendForgotPasswordEmail(email: string, password: string): Promise<void> {
     const loginUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/company/login`;
     const brandName = 'Green Co';
@@ -234,7 +257,12 @@ export class MailService {
       `,
     };
 
-    await this.transporter.sendMail(mailOptions);
+    try {
+      await this.transporter.sendMail(mailOptions);
+    } catch (err) {
+      this.logSmtpErrorContext(err, email);
+      throw err;
+    }
   }
 
   async sendPasswordUpdateEmail(email: string, companyName: string): Promise<void> {
@@ -314,7 +342,12 @@ export class MailService {
       `,
     };
 
-    await this.transporter.sendMail(mailOptions);
+    try {
+      await this.transporter.sendMail(mailOptions);
+    } catch (err) {
+      this.logSmtpErrorContext(err, email);
+      throw err;
+    }
   }
 
   /** Facilitator: you have been assigned to a company */
@@ -337,7 +370,12 @@ export class MailService {
         </div>
       `,
     };
-    await this.transporter.sendMail(mailOptions);
+    try {
+      await this.transporter.sendMail(mailOptions);
+    } catch (err) {
+      this.logSmtpErrorContext(err, facilitatorEmail);
+      throw err;
+    }
   }
 
   /** Company: a facilitator has been assigned to your project */
@@ -361,7 +399,12 @@ export class MailService {
         </div>
       `,
     };
-    await this.transporter.sendMail(mailOptions);
+    try {
+      await this.transporter.sendMail(mailOptions);
+    } catch (err) {
+      this.logSmtpErrorContext(err, companyEmail);
+      throw err;
+    }
   }
 
   /** Assessor: you have been assigned to a company (site visit scheduling) */
@@ -384,7 +427,12 @@ export class MailService {
         </div>
       `,
     };
-    await this.transporter.sendMail(mailOptions);
+    try {
+      await this.transporter.sendMail(mailOptions);
+    } catch (err) {
+      this.logSmtpErrorContext(err, assessorEmail);
+      throw err;
+    }
   }
 
   /** Admin: coordinator has submitted scoring */
