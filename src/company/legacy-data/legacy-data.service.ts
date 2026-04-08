@@ -19,16 +19,35 @@ export class LegacyDataService {
   ) {}
 
   private mapRow(row: any) {
+    const companyName = row.company_name || '';
+    const level = row.level_of_certification || '';
+    const awardDate = row.date_of_award || '';
+    const expiryDate = row.expiry_date || '';
+    const sectorId = row.sector_id || '';
+    const sectorName = row.sector || '';
+    const email = row.email || '';
+    const phoneNo = row.phone_no || '';
+
     return {
       id: row._id?.toString?.() || row._id,
-      company_name: row.company_name || '',
-      level_of_certification: row.level_of_certification || '',
-      date_of_award: row.date_of_award || '',
-      expiry_date: row.expiry_date || '',
-      sector_id: row.sector_id || '',
-      sector: row.sector || '',
-      email: row.email || '',
-      phone_no: row.phone_no || '',
+      company_name: companyName,
+      level_of_certification: level,
+      date_of_award: awardDate,
+      expiry_date: expiryDate,
+      sector_id: sectorId,
+      sector: sectorName,
+      email,
+      phone_no: phoneNo,
+      // Form-friendly aliases for direct prefill.
+      company: companyName,
+      level: level,
+      year: awardDate,
+      expiry: expiryDate,
+      type_of_sector: sectorId,
+      sector_name: sectorName,
+      email_address: email,
+      mobile_number: phoneNo,
+      phone_number: phoneNo,
       created_by: row.created_by || null,
       updated_by: row.updated_by || null,
       created_at: row.createdAt || null,
