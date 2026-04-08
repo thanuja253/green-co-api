@@ -8,6 +8,9 @@ import { FacilitatorsModule } from './company/facilitators/facilitators.module';
 import { RegistrationMastersModule } from './company/registration-masters/registration-masters.module';
 import { MailModule } from './mail/mail.module';
 import { HelpDeskModule } from './company/help-desk/help-desk.module';
+import { RoleManagementModule } from './company/role-management/role-management.module';
+import { StaffManagementModule } from './company/staff-management/staff-management.module';
+import { LegacyDataModule } from './company/legacy-data/legacy-data.module';
 import { AppController } from './app.controller';
 
 @Module({
@@ -33,6 +36,9 @@ import { AppController } from './app.controller';
     RegistrationMastersModule,
     MailModule,
     HelpDeskModule,
+    RoleManagementModule,
+    StaffManagementModule,
+    LegacyDataModule,
   ],
   controllers: [AppController],
 })

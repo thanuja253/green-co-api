@@ -55,6 +55,15 @@ export class CompanyInvoice {
   /** Approval status for display (COMPANY_APPROVAL_STATUS / APPROVAL_STATUS_COLORS) */
   @Prop({ default: 0 })
   approval_status?: number;
+
+  @Prop()
+  remarks?: string;
+
+  @Prop()
+  approved_by?: string;
+
+  @Prop()
+  approved_at?: Date;
 }
 
 export const CompanyInvoiceSchema = SchemaFactory.createForClass(CompanyInvoice);

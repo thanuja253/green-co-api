@@ -33,6 +33,15 @@ async function bootstrap() {
     return express.urlencoded({ extended: true })(req, res, next);
   });
 
+  // Backward compatibility: old frontend calls /admin/* while backend uses /api/admin/*.
+  app.use((req, res, next) => {
+    const url = req.url || '';
+    if (url.startsWith('/admin/')) {
+      req.url = `/api${url}`;
+    }
+    next();
+  });
+
   // Response time logging (skip static and health)
   app.use((req, res, next) => {
     const start = Date.now();
@@ -80,17 +89,20 @@ async function bootstrap() {
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'X-Requested-With'],
+    allowedHeaders: '*',
     optionsSuccessStatus: 200,
   });
 
   // Ensure OPTIONS (preflight) never returns 404: handle it early so browser gets 200 and sends the real request.
   app.use((req, res, next) => {
     if (req.method === 'OPTIONS') {
-      const origin = req.headers.origin || '*';
+      const origin = req.headers.origin || 'http://localhost:3000';
+      const reqHeaders = req.headers['access-control-request-headers'] || 'Content-Type, Authorization, Accept, X-Requested-With';
+      const reqMethod = req.headers['access-control-request-method'] || 'GET, POST, PUT, DELETE, PATCH, OPTIONS';
       res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, X-Requested-With');
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Methods', Array.isArray(reqMethod) ? reqMethod.join(', ') : reqMethod);
+      res.setHeader('Access-Control-Allow-Headers', Array.isArray(reqHeaders) ? reqHeaders.join(', ') : reqHeaders);
       res.setHeader('Access-Control-Allow-Credentials', 'true');
       res.status(200).end();
       return;

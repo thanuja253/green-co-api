@@ -16,6 +16,9 @@ export class CompanyAssessor {
 
   @Prop({ type: [String], default: [] })
   visit_dates?: string[];
+
+  @Prop({ default: 0 })
+  assessor_amount?: number;
 }
 
 export const CompanyAssessorSchema = SchemaFactory.createForClass(CompanyAssessor);

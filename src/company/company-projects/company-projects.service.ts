@@ -30,6 +30,8 @@ import {
 import { RegistrationInfoDto } from './dto/registration-info.dto';
 import { SubmitPaymentDto } from './dto/submit-payment.dto';
 import { UpdateInvoiceApprovalDto } from './dto/update-invoice-approval.dto';
+import { CreateAssessorProfileDto } from './dto/create-assessor-profile.dto';
+import { ListAssessorsQueryDto } from './dto/list-assessors-query.dto';
 import { join } from 'path';
 import * as fs from 'fs';
 import { getCertificationType } from '../../helpers/certification.helper';
@@ -98,6 +100,506 @@ export class CompanyProjectsService {
     private readonly notificationsService: NotificationsService,
     private readonly mailService: MailService,
   ) {}
+
+  private parseLegacyAssessorDates(value: string): string[] {
+    return [...new Set((value || '').split(',').map((d) => d.trim()).filter(Boolean))];
+  }
+
+  private parseDdMmYyyyToDate(value: string): Date | null {
+    const match = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(value);
+    if (!match) return null;
+    const day = Number(match[1]);
+    const month = Number(match[2]);
+    const year = Number(match[3]);
+    const date = new Date(year, month - 1, day);
+    if (
+      Number.isNaN(date.getTime()) ||
+      date.getFullYear() !== year ||
+      date.getMonth() !== month - 1 ||
+      date.getDate() !== day
+    ) {
+      return null;
+    }
+    return date;
+  }
+
+  private toBool(value: unknown): boolean {
+    if (typeof value === 'boolean') return value;
+    const normalized = String(value || '').trim().toLowerCase();
+    return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'y';
+  }
+
+  private toPublicFilePath(path?: string): string {
+    const raw = String(path || '').trim();
+    if (!raw) return '';
+    if (raw.startsWith('http://') || raw.startsWith('https://')) return raw;
+    return `/${raw.replace(/^\/+/, '')}`;
+  }
+
+  private toAbsoluteFileUrl(path?: string): string {
+    const normalized = this.toPublicFilePath(path);
+    if (!normalized) return '';
+    if (normalized.startsWith('http://') || normalized.startsWith('https://')) return normalized;
+    const baseUrl = (process.env.API_BASE_URL || 'http://localhost:3001').replace(/\/+$/, '');
+    return `${baseUrl}${normalized}`;
+  }
+
+  private getFixedAssessorUploadPath(): string {
+    return 'uploads/pic.jpeg';
+  }
+
+  private mapAssessorResponse(a: any) {
+    const profileImage = this.toPublicFilePath(a.profile_image);
+    const biodata = this.toPublicFilePath(a.biodata);
+    const vendorRegistrationForm = this.toPublicFilePath(a.vendor_registration_form);
+    const nonDisclosureAgreement = this.toPublicFilePath(a.non_disclosure_agreement);
+    const healthDeclaration = this.toPublicFilePath(a.health_declaration);
+    const gstDeclaration = this.toPublicFilePath(a.gst_declaration);
+    const panCard = this.toPublicFilePath(a.pan_card);
+    const cancelledCheque = this.toPublicFilePath(a.cancelled_cheque);
+
+    return {
+      id: a._id?.toString?.() || a._id,
+      name: a.name,
+      email: a.email,
+      mobile: a.mobile || '',
+      status: a.status ?? '1',
+      account_status: a.status ?? '1',
+      industry_category: a.industry_category || '',
+      alternate_mobile: a.alternate_mobile || '',
+      address_line_1: a.address_line_1 || '',
+      address_line_2: a.address_line_2 || '',
+      pincode: a.pincode || '',
+      city: a.city || '',
+      state: a.state || '',
+      pan_number: a.pan_number || '',
+      enrollment_date: a.enrollment_date || '',
+      gst_registered: !!a.gst_registered,
+      gst_number: a.gst_number || '',
+      lead_assessor: !!a.lead_assessor,
+      assessor_grade: a.assessor_grade || '',
+      emergency_contact_name: a.emergency_contact_name || '',
+      emergency_mobile: a.emergency_mobile || '',
+      emergency_address_line_1: a.emergency_address_line_1 || '',
+      emergency_address_line_2: a.emergency_address_line_2 || '',
+      emergency_city: a.emergency_city || '',
+      emergency_state: a.emergency_state || '',
+      emergency_pincode: a.emergency_pincode || '',
+      bank_name: a.bank_name || '',
+      account_number: a.account_number || '',
+      branch_name: a.branch_name || '',
+      ifsc_code: a.ifsc_code || '',
+      biodata,
+      vendor_registration_form: vendorRegistrationForm,
+      non_disclosure_agreement: nonDisclosureAgreement,
+      health_declaration: healthDeclaration,
+      gst_declaration: gstDeclaration,
+      pan_card: panCard,
+      cancelled_cheque: cancelledCheque,
+      profile_image: profileImage,
+      // Absolute URL aliases for frontend compatibility.
+      biodata_url: this.toAbsoluteFileUrl(a.biodata),
+      vendor_registration_form_url: this.toAbsoluteFileUrl(a.vendor_registration_form),
+      non_disclosure_agreement_url: this.toAbsoluteFileUrl(a.non_disclosure_agreement),
+      health_declaration_url: this.toAbsoluteFileUrl(a.health_declaration),
+      gst_declaration_url: this.toAbsoluteFileUrl(a.gst_declaration),
+      pan_card_url: this.toAbsoluteFileUrl(a.pan_card),
+      cancelled_cheque_url: this.toAbsoluteFileUrl(a.cancelled_cheque),
+      profile_image_url: this.toAbsoluteFileUrl(a.profile_image),
+      approval_status: a.approval_status || 'Pending',
+      approval_remarks: a.approval_remarks || '',
+      profile_status: a.profile_status || 'Incomplete',
+    };
+  }
+
+  async createAssessorAdminFlow(name: string, email: string, mobile: string) {
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!mobile || !mobile.trim()) {
+      throw new BadRequestException({
+        status: 'validations',
+        errors: {
+          mobile: ['mobile is required.'],
+        },
+      });
+    }
+    const existing = await this.assessorModel.findOne({ email: normalizedEmail }).lean();
+    if (existing) {
+      throw new BadRequestException({
+        status: 'validations',
+        errors: {
+          email: ['Assessor with this email already exists.'],
+        },
+      });
+    }
+
+    const assessor = await this.assessorModel.create({
+      name: name.trim(),
+      email: normalizedEmail,
+      mobile: mobile.trim(),
+      status: '1',
+    });
+
+    return {
+      status: 'success',
+      message: 'Assessor added successfully',
+      data: {
+        id: assessor._id.toString(),
+        name: assessor.name,
+        email: assessor.email,
+        mobile: (assessor as any).mobile,
+        status: assessor.status,
+      },
+    };
+  }
+
+  async listAssessorsAdminFlow(query?: ListAssessorsQueryDto) {
+    const parsedPage = Number.parseInt(String(query?.page ?? '1'), 10);
+    const parsedLimit = Number.parseInt(String(query?.limit ?? '10'), 10);
+    const page = Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1;
+    const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : 10;
+    const cappedLimit = Math.min(limit, 100);
+    const skip = (page - 1) * cappedLimit;
+
+    const filter: Record<string, any> = {};
+    if (query?.name?.trim()) {
+      filter.name = { $regex: query.name.trim(), $options: 'i' };
+    }
+    const phone = query?.phone?.trim() || query?.mobile?.trim();
+    if (phone) {
+      filter.mobile = { $regex: phone, $options: 'i' };
+    }
+    if (query?.email?.trim()) {
+      filter.email = { $regex: query.email.trim(), $options: 'i' };
+    }
+    if (query?.industry_category?.trim() && query.industry_category !== 'All') {
+      filter.industry_category = query.industry_category.trim();
+    }
+    if (query?.state?.trim() && query.state !== 'All') {
+      filter.state = query.state.trim();
+    }
+    if (query?.account_status?.trim() && query.account_status !== 'All') {
+      filter.status = query.account_status.trim();
+    }
+    if (query?.approval_status?.trim() && query.approval_status !== 'All') {
+      filter.approval_status = query.approval_status.trim();
+    }
+    if (query?.profile_status?.trim() && query.profile_status !== 'All') {
+      filter.profile_status = query.profile_status.trim();
+    }
+
+    const [assessors, total] = await Promise.all([
+      this.assessorModel
+        .find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(cappedLimit)
+        .lean(),
+      this.assessorModel.countDocuments(filter),
+    ]);
+
+    const totalPages = Math.max(1, Math.ceil(total / cappedLimit));
+
+    return {
+      status: 'success',
+      message: 'Assessors fetched successfully',
+      data: assessors.map((a: any) => this.mapAssessorResponse(a)),
+      pagination: {
+        page,
+        limit: cappedLimit,
+        total,
+        total_pages: totalPages,
+        has_next_page: page < totalPages,
+        has_prev_page: page > 1,
+      },
+      applied_filters: {
+        name: query?.name ?? '',
+        phone: query?.phone ?? query?.mobile ?? '',
+        email: query?.email ?? '',
+        industry_category: query?.industry_category ?? '',
+        state: query?.state ?? '',
+        account_status: query?.account_status ?? '',
+        approval_status: query?.approval_status ?? '',
+        profile_status: query?.profile_status ?? '',
+      },
+    };
+  }
+
+  async exportAssessorsAdminFlow(query?: ListAssessorsQueryDto) {
+    const filter: Record<string, any> = {};
+    if (query?.name?.trim()) {
+      filter.name = { $regex: query.name.trim(), $options: 'i' };
+    }
+    const phone = query?.phone?.trim() || query?.mobile?.trim();
+    if (phone) {
+      filter.mobile = { $regex: phone, $options: 'i' };
+    }
+    if (query?.email?.trim()) {
+      filter.email = { $regex: query.email.trim(), $options: 'i' };
+    }
+    if (query?.industry_category?.trim() && query.industry_category !== 'All') {
+      filter.industry_category = query.industry_category.trim();
+    }
+    if (query?.state?.trim() && query.state !== 'All') {
+      filter.state = query.state.trim();
+    }
+    if (query?.account_status?.trim() && query.account_status !== 'All') {
+      filter.status = query.account_status.trim();
+    }
+    if (query?.approval_status?.trim() && query.approval_status !== 'All') {
+      filter.approval_status = query.approval_status.trim();
+    }
+    if (query?.profile_status?.trim() && query.profile_status !== 'All') {
+      filter.profile_status = query.profile_status.trim();
+    }
+
+    const assessors = await this.assessorModel
+      .find(filter)
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const rows = assessors.map((a: any) => ({
+      ...this.mapAssessorResponse(a),
+      created_at: a.createdAt ? new Date(a.createdAt).toISOString() : '',
+    }));
+    const headers = [
+      'id',
+      'name',
+      'email',
+      'mobile',
+      'industry_category',
+      'state',
+      'account_status',
+      'approval_status',
+      'profile_status',
+      'created_at',
+    ];
+
+    const esc = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+    const csvLines = [
+      headers.join(','),
+      ...rows.map((r: any) =>
+        [
+          r.id,
+          r.name,
+          r.email,
+          r.mobile,
+          r.industry_category,
+          r.state,
+          r.account_status,
+          r.approval_status,
+          r.profile_status,
+          r.created_at || '',
+        ]
+          .map(esc)
+          .join(','),
+      ),
+    ];
+
+    return {
+      filename: `assessors-export-${Date.now()}.csv`,
+      content: csvLines.join('\n'),
+      total: rows.length,
+    };
+  }
+
+  async updateAssessorApprovalStatusAdminFlow(
+    assessorId: string,
+    statusInput?: string,
+    remarks?: string,
+  ) {
+    const assessor = await this.assessorModel.findById(assessorId);
+    if (!assessor) {
+      throw new NotFoundException({ status: 'error', message: 'Assessor not found' });
+    }
+
+    const normalized = String(statusInput || '')
+      .trim()
+      .toLowerCase();
+
+    let approvalStatus = 'Pending';
+    if (['1', 'approved', 'approve', 'yes'].includes(normalized)) {
+      approvalStatus = 'Approved';
+    } else if (['2', 'rejected', 'reject', 'disapproved', 'no'].includes(normalized)) {
+      approvalStatus = 'Rejected';
+    } else if (normalized) {
+      // keep compatibility with custom incoming statuses
+      approvalStatus = normalized.charAt(0).toUpperCase() + normalized.slice(1);
+    }
+
+    assessor.approval_status = approvalStatus;
+    assessor.approval_remarks = (remarks || '').trim();
+    await assessor.save();
+
+    return {
+      status: 'success',
+      message: `Assessor ${approvalStatus.toLowerCase()} successfully`,
+      data: this.mapAssessorResponse(assessor.toObject()),
+    };
+  }
+
+  async getAssessorAdminFlow(assessorId: string) {
+    const assessor = await this.assessorModel.findById(assessorId).lean();
+    if (!assessor) {
+      throw new NotFoundException({ status: 'error', message: 'Assessor not found' });
+    }
+
+    return {
+      status: 'success',
+      message: 'Assessor fetched successfully',
+      data: this.mapAssessorResponse(assessor),
+    };
+  }
+
+  async createAssessorProfileAdminFlow(
+    dto: CreateAssessorProfileDto,
+    files?: {
+      profile_image?: Express.Multer.File[];
+      biodata?: Express.Multer.File[];
+      vendor_registration_form?: Express.Multer.File[];
+      non_disclosure_agreement?: Express.Multer.File[];
+      health_declaration?: Express.Multer.File[];
+      gst_declaration?: Express.Multer.File[];
+      pan_card?: Express.Multer.File[];
+      cancelled_cheque?: Express.Multer.File[];
+    },
+  ) {
+    const normalizedEmail = dto.email.trim().toLowerCase();
+    const existing = await this.assessorModel.findOne({ email: normalizedEmail }).lean();
+    if (existing) {
+      throw new BadRequestException({
+        status: 'validations',
+        errors: { email: ['Assessor with this email already exists.'] },
+      });
+    }
+
+    const filePath = (f?: Express.Multer.File[]) => (f?.[0] ? this.getFixedAssessorUploadPath() : '');
+
+    const assessor = await this.assessorModel.create({
+      name: dto.name.trim(),
+      email: normalizedEmail,
+      mobile: dto.mobile.trim(),
+      status: (dto.status || '1').toString(),
+      approval_status: 'Pending',
+      profile_status: 'Complete',
+      industry_category: dto.industry_category || '',
+      alternate_mobile: dto.alternate_mobile || '',
+      address_line_1: dto.address_line_1 || '',
+      address_line_2: dto.address_line_2 || '',
+      pincode: dto.pincode || '',
+      city: dto.city || '',
+      state: dto.state || '',
+      pan_number: dto.pan_number || '',
+      enrollment_date: dto.enrollment_date || '',
+      gst_registered: this.toBool(dto.gst_registered),
+      gst_number: dto.gst_number || '',
+      lead_assessor: this.toBool(dto.lead_assessor),
+      assessor_grade: dto.assessor_grade || '',
+      emergency_contact_name: dto.emergency_contact_name || '',
+      emergency_mobile: dto.emergency_mobile || '',
+      emergency_address_line_1: dto.emergency_address_line_1 || '',
+      emergency_address_line_2: dto.emergency_address_line_2 || '',
+      emergency_city: dto.emergency_city || '',
+      emergency_state: dto.emergency_state || '',
+      emergency_pincode: dto.emergency_pincode || '',
+      bank_name: dto.bank_name || '',
+      account_number: dto.account_number || '',
+      branch_name: dto.branch_name || '',
+      ifsc_code: dto.ifsc_code || '',
+      biodata: filePath(files?.biodata),
+      vendor_registration_form: filePath(files?.vendor_registration_form),
+      non_disclosure_agreement: filePath(files?.non_disclosure_agreement),
+      health_declaration: filePath(files?.health_declaration),
+      gst_declaration: filePath(files?.gst_declaration),
+      pan_card: filePath(files?.pan_card),
+      cancelled_cheque: filePath(files?.cancelled_cheque),
+      profile_image: filePath(files?.profile_image),
+    });
+
+    return {
+      status: 'success',
+      message: 'Assessor profile saved successfully',
+      data: this.mapAssessorResponse(assessor),
+    };
+  }
+
+  async updateAssessorProfileAdminFlow(
+    assessorId: string,
+    dto: CreateAssessorProfileDto,
+    files?: {
+      profile_image?: Express.Multer.File[];
+      biodata?: Express.Multer.File[];
+      vendor_registration_form?: Express.Multer.File[];
+      non_disclosure_agreement?: Express.Multer.File[];
+      health_declaration?: Express.Multer.File[];
+      gst_declaration?: Express.Multer.File[];
+      pan_card?: Express.Multer.File[];
+      cancelled_cheque?: Express.Multer.File[];
+    },
+  ) {
+    const assessor = await this.assessorModel.findById(assessorId);
+    if (!assessor) {
+      throw new NotFoundException({ status: 'error', message: 'Assessor not found' });
+    }
+
+    const normalizedEmail = (dto.email || assessor.email).trim().toLowerCase();
+    const duplicate = await this.assessorModel
+      .findOne({ _id: { $ne: assessorId }, email: normalizedEmail })
+      .lean();
+    if (duplicate) {
+      throw new BadRequestException({
+        status: 'validations',
+        errors: { email: ['Assessor with this email already exists.'] },
+      });
+    }
+
+    const filePath = (f?: Express.Multer.File[]) => (f?.[0] ? this.getFixedAssessorUploadPath() : undefined);
+
+    assessor.name = (dto.name || assessor.name).trim();
+    assessor.email = normalizedEmail;
+    assessor.mobile = (dto.mobile || assessor.mobile).trim();
+    assessor.status = (dto.status || assessor.status || '1').toString();
+    assessor.industry_category = dto.industry_category ?? assessor.industry_category ?? '';
+    assessor.alternate_mobile = dto.alternate_mobile ?? assessor.alternate_mobile ?? '';
+    assessor.address_line_1 = dto.address_line_1 ?? assessor.address_line_1 ?? '';
+    assessor.address_line_2 = dto.address_line_2 ?? assessor.address_line_2 ?? '';
+    assessor.pincode = dto.pincode ?? assessor.pincode ?? '';
+    assessor.city = dto.city ?? assessor.city ?? '';
+    assessor.state = dto.state ?? assessor.state ?? '';
+    assessor.pan_number = dto.pan_number ?? assessor.pan_number ?? '';
+    assessor.enrollment_date = dto.enrollment_date ?? assessor.enrollment_date ?? '';
+    assessor.gst_registered = dto.gst_registered != null ? this.toBool(dto.gst_registered) : !!assessor.gst_registered;
+    assessor.gst_number = dto.gst_number ?? assessor.gst_number ?? '';
+    assessor.lead_assessor = dto.lead_assessor != null ? this.toBool(dto.lead_assessor) : !!assessor.lead_assessor;
+    assessor.assessor_grade = dto.assessor_grade ?? assessor.assessor_grade ?? '';
+    assessor.emergency_contact_name = dto.emergency_contact_name ?? assessor.emergency_contact_name ?? '';
+    assessor.emergency_mobile = dto.emergency_mobile ?? assessor.emergency_mobile ?? '';
+    assessor.emergency_address_line_1 = dto.emergency_address_line_1 ?? assessor.emergency_address_line_1 ?? '';
+    assessor.emergency_address_line_2 = dto.emergency_address_line_2 ?? assessor.emergency_address_line_2 ?? '';
+    assessor.emergency_city = dto.emergency_city ?? assessor.emergency_city ?? '';
+    assessor.emergency_state = dto.emergency_state ?? assessor.emergency_state ?? '';
+    assessor.emergency_pincode = dto.emergency_pincode ?? assessor.emergency_pincode ?? '';
+    assessor.bank_name = dto.bank_name ?? assessor.bank_name ?? '';
+    assessor.account_number = dto.account_number ?? assessor.account_number ?? '';
+    assessor.branch_name = dto.branch_name ?? assessor.branch_name ?? '';
+    assessor.ifsc_code = dto.ifsc_code ?? assessor.ifsc_code ?? '';
+
+    assessor.profile_image = filePath(files?.profile_image) ?? assessor.profile_image;
+    assessor.biodata = filePath(files?.biodata) ?? assessor.biodata;
+    assessor.vendor_registration_form = filePath(files?.vendor_registration_form) ?? assessor.vendor_registration_form;
+    assessor.non_disclosure_agreement = filePath(files?.non_disclosure_agreement) ?? assessor.non_disclosure_agreement;
+    assessor.health_declaration = filePath(files?.health_declaration) ?? assessor.health_declaration;
+    assessor.gst_declaration = filePath(files?.gst_declaration) ?? assessor.gst_declaration;
+    assessor.pan_card = filePath(files?.pan_card) ?? assessor.pan_card;
+    assessor.cancelled_cheque = filePath(files?.cancelled_cheque) ?? assessor.cancelled_cheque;
+
+    await assessor.save();
+
+    return {
+      status: 'success',
+      message: 'Assessor profile updated successfully',
+      data: this.mapAssessorResponse(assessor),
+    };
+  }
 
   /**
    * List projects for the logged-in company for the \"My Projects\" style listing.
@@ -3131,6 +3633,213 @@ export class CompanyProjectsService {
         },
         visit_dates: dates,
       },
+    };
+  }
+
+  /**
+   * Legacy Admin assessor flow:
+   * POST /api/admin/assign_assessor/:companyProjectId
+   */
+  async assignAssessorAdminFlow(
+    companyProjectId: string,
+    selectAssessor: string,
+    assessorDate: string,
+    assessorAmount: number,
+  ) {
+    const project = await this.projectModel.findById(companyProjectId);
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const companyId = (project as any).company_id?.toString?.() || (project as any).company_id;
+    const assessor = await this.assessorModel.findById(selectAssessor);
+    if (!assessor) {
+      throw new BadRequestException({
+        status: 'validations',
+        errors: { selectassessor: ['Invalid assessor selected.'] },
+      });
+    }
+
+    const dates = this.parseLegacyAssessorDates(assessorDate);
+    if (!dates.length) {
+      throw new BadRequestException({
+        status: 'validations',
+        errors: { assessor_date: ['assessor_date is required.'] },
+      });
+    }
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    for (const dateStr of dates) {
+      const parsed = this.parseDdMmYyyyToDate(dateStr);
+      if (!parsed) {
+        throw new BadRequestException({
+          status: 'validations',
+          errors: { assessor_date: [`Invalid date format "${dateStr}". Use d/m/Y.`] },
+        });
+      }
+      if (parsed < today) {
+        throw new BadRequestException({
+          status: 'validations',
+          errors: { assessor_date: [`Past date "${dateStr}" is not allowed.`] },
+        });
+      }
+    }
+
+    const hadAssessorBefore = (await this.companyAssessorModel.countDocuments({
+      company_id: companyId,
+      project_id: companyProjectId,
+    })) > 0;
+
+    const rowsToCreate: any[] = [];
+    for (const dateStr of dates) {
+      const assessorBusy = await this.companyAssessorModel.findOne({
+        assessor_id: selectAssessor,
+        visit_dates: dateStr,
+      });
+      if (assessorBusy) {
+        throw new BadRequestException({
+          status: 'validations',
+          errors: {
+            selectassessor: [
+              'Assessor has been given another assessment on the day selected. Please select another date for assessement.',
+            ],
+          },
+        });
+      }
+
+      const projectDateHasAnotherAssessor = await this.companyAssessorModel.findOne({
+        project_id: companyProjectId,
+        visit_dates: dateStr,
+        assessor_id: { $ne: selectAssessor },
+      });
+      if (projectDateHasAnotherAssessor) {
+        throw new BadRequestException({
+          status: 'validations',
+          errors: {
+            assessor_date: [
+              'Another Assessor has been assigned for assessment on the day selected. Please select another assessor.',
+            ],
+          },
+        });
+      }
+
+      rowsToCreate.push({
+        company_id: companyId,
+        project_id: companyProjectId,
+        assessor_id: selectAssessor,
+        visit_dates: [dateStr],
+        assessor_amount: Number(assessorAmount) || 0,
+      });
+    }
+
+    await this.companyAssessorModel.insertMany(rowsToCreate);
+
+    const company = await this.companyModel.findById(companyId).lean();
+    this.notificationsService
+      .create(
+        'GreenCo Team has assigned an Assessor for your project',
+        `Assessor ${assessor.name} has been assigned for your project by GreenCo Team. Check site visit details.`,
+        'C',
+        companyId,
+      )
+      .catch((err) => console.error('Notification to company failed:', err));
+
+    this.notificationsService
+      .create(
+        'Greenco Team has assigned an Assessor',
+        `You have been assigned to company ${company?.name || 'N/A'}.`,
+        'AS',
+        selectAssessor,
+      )
+      .catch((err) => console.error('Notification to assessor failed:', err));
+
+    this.mailService
+      .sendAssessorAssignedToCompanyEmail(
+        assessor.email,
+        assessor.name,
+        company?.name || 'Company',
+      )
+      .catch((err) => console.error('Assessor assignment email failed:', err));
+
+    if (!hadAssessorBefore) {
+      await this.companyActivityModel.create({
+        company_id: companyId,
+        project_id: companyProjectId,
+        description: 'CII Assigned an Assessor',
+        activity_type: 'cii',
+        milestone_flow: 13,
+        milestone_completed: true,
+      });
+      const currentNext = Number((project as any).next_activities_id || 0);
+      if (currentNext < 13) {
+        (project as any).next_activities_id = 13;
+        await project.save();
+      }
+    }
+
+    return {
+      status: 'success',
+      message: 'Assessor assigned Successfully!',
+    };
+  }
+
+  /**
+   * Legacy Admin payment status flow:
+   * POST /api/admin/payment_status/:companyProjectId
+   */
+  async paymentStatusAdminFlow(
+    companyProjectId: string,
+    paymentId: string,
+    status: number,
+    remarks?: string,
+  ) {
+    const project = await this.projectModel.findById(companyProjectId);
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const companyId = (project as any).company_id?.toString?.() || (project as any).company_id;
+    const invoice = await this.companyInvoiceModel.findOne({
+      _id: paymentId,
+      project_id: companyProjectId,
+      company_id: companyId,
+    });
+
+    if (!invoice) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Some Error Occurred. Please try again after sometime!',
+      });
+    }
+
+    invoice.approval_status = status;
+    (invoice as any).payment_status = status === 1 ? 1 : 2;
+    (invoice as any).remarks = remarks || '';
+    (invoice as any).approved_by = process.env.ADMIN_EMAIL || 'admin';
+    (invoice as any).approved_at = new Date();
+    await invoice.save();
+
+    const currentNext = Number((project as any).next_activities_id || 0);
+    const isSecondCycle = currentNext >= 18;
+    if (status === 1) {
+      (project as any).next_activities_id = isSecondCycle ? Math.max(currentNext, 19) : Math.max(currentNext, 8);
+    } else if (status === 2) {
+      (project as any).next_activities_id = isSecondCycle ? 18 : 7;
+      await this.companyActivityModel.create({
+        company_id: companyId,
+        project_id: companyProjectId,
+        description: 'Payment rejected by Admin',
+        activity_type: 'cii',
+        milestone_flow: isSecondCycle ? 18 : 7,
+        milestone_completed: false,
+      });
+    }
+    await project.save();
+
+    return {
+      status: 'success',
+      message: 'Status Changed Successfully!',
     };
   }
 

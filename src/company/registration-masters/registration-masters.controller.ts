@@ -49,6 +49,16 @@ export class RegistrationMastersController {
   async getAssessmentCategories() {
     return this.registrationMastersService.getAssessmentCategories();
   }
+
+  /**
+   * GET /api/company/assessor-grades
+   * Returns active assessor grades for frontend dropdown.
+   */
+  @Get('assessor-grades')
+  async getAssessorGrades() {
+    return this.registrationMastersService.getActiveAssessorGrades();
+  }
+
 }
 
 

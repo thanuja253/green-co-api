@@ -6,6 +6,10 @@ import { Entity, EntityDocument } from '../schemas/entity.schema';
 import { Sector, SectorDocument } from '../schemas/sector.schema';
 import { State, StateDocument } from '../schemas/state.schema';
 import { Facilitator, FacilitatorDocument } from '../schemas/facilitator.schema';
+import { AssessorGrade, AssessorGradeDocument } from '../schemas/assessor-grade.schema';
+import { CreateIndustryDto } from './dto/create-industry.dto';
+import { CreateStateDto } from './dto/create-state.dto';
+import { CreateAssessorGradeDto } from './dto/create-assessor-grade.dto';
 
 @Injectable()
 export class RegistrationMastersService {
@@ -20,6 +24,8 @@ export class RegistrationMastersService {
     private readonly stateModel: Model<StateDocument>,
     @InjectModel(Facilitator.name)
     private readonly facilitatorModel: Model<FacilitatorDocument>,
+    @InjectModel(AssessorGrade.name)
+    private readonly assessorGradeModel: Model<AssessorGradeDocument>,
   ) {}
 
   async getRegistrationMasters(): Promise<{
@@ -251,6 +257,275 @@ export class RegistrationMastersService {
       status: 'success',
       message: 'Assessment submittal categories',
       data: { categories },
+    };
+  }
+
+  async getAllAssessorGrades() {
+    const grades = await this.assessorGradeModel.find({}).sort({ name: 1 }).lean();
+    return {
+      status: 'success',
+      message: 'Assessor grades loaded',
+      data: {
+        grades: (grades as any[]).map((g) => ({
+          id: g._id.toString(),
+          name: g.name,
+          status: g.status ?? 1,
+        })),
+      },
+    };
+  }
+
+  async getActiveAssessorGrades() {
+    const active = await this.assessorGradeModel
+      .find({
+        $or: [{ status: 1 }, { status: '1' }, { status: { $exists: false } }],
+      })
+      .sort({ name: 1 })
+      .lean();
+    const grades =
+      active.length > 0
+        ? active
+        : await this.assessorGradeModel.find({}).sort({ name: 1 }).lean();
+    return {
+      status: 'success',
+      message: 'Assessor grades loaded',
+      data: {
+        grades: (grades as any[]).map((g) => ({
+          id: g._id.toString(),
+          name: g.name,
+          status: g.status ?? 1,
+        })),
+      },
+    };
+  }
+
+  async createAssessorGrade(dto: CreateAssessorGradeDto) {
+    const name = dto.name.trim().toUpperCase();
+    const existing = await this.assessorGradeModel.findOne({ name }).lean();
+    if (existing) {
+      return {
+        status: 'success',
+        message: 'Assessor grade already exists',
+        data: {
+          id: (existing as any)._id.toString(),
+          name: (existing as any).name,
+          status: (existing as any).status ?? 1,
+        },
+      };
+    }
+    const grade = await this.assessorGradeModel.create({
+      name,
+      status: dto.status ?? 1,
+    });
+    return {
+      status: 'success',
+      message: 'Assessor grade created successfully',
+      data: {
+        id: grade._id.toString(),
+        name: grade.name,
+        status: grade.status,
+      },
+    };
+  }
+
+  async createAssessorGradesBulk(items: CreateAssessorGradeDto[]) {
+    const inserted: any[] = [];
+    const skipped: string[] = [];
+    for (const item of items || []) {
+      const name = (item.name || '').trim().toUpperCase();
+      if (!name) continue;
+      const existing = await this.assessorGradeModel.findOne({ name }).lean();
+      if (existing) {
+        skipped.push(name);
+        continue;
+      }
+      const row = await this.assessorGradeModel.create({
+        name,
+        status: item.status ?? 1,
+      });
+      inserted.push({
+        id: row._id.toString(),
+        name: row.name,
+        status: row.status,
+      });
+    }
+    return {
+      status: 'success',
+      message: 'Assessor grades bulk processed',
+      data: {
+        inserted_count: inserted.length,
+        skipped_count: skipped.length,
+        inserted,
+        skipped,
+      },
+    };
+  }
+
+  async getAllIndustries() {
+    const industries = await this.industryModel.find({}).sort({ name: 1 }).lean();
+    return {
+      status: 'success',
+      message: 'Industries loaded',
+      data: {
+        industries: (industries as any[]).map((i) => ({
+          id: i._id.toString(),
+          name: i.name,
+          status: i.status ?? 1,
+        })),
+      },
+    };
+  }
+
+  async createIndustry(dto: CreateIndustryDto) {
+    const name = dto.name.trim();
+    const existing = await this.industryModel.findOne({ name: new RegExp(`^${name}$`, 'i') }).lean();
+    if (existing) {
+      return {
+        status: 'success',
+        message: 'Industry already exists',
+        data: {
+          id: (existing as any)._id.toString(),
+          name: (existing as any).name,
+          status: (existing as any).status ?? 1,
+        },
+      };
+    }
+
+    const industry = await this.industryModel.create({
+      name,
+      status: dto.status ?? 1,
+    });
+
+    return {
+      status: 'success',
+      message: 'Industry created successfully',
+      data: {
+        id: industry._id.toString(),
+        name: industry.name,
+        status: industry.status,
+      },
+    };
+  }
+
+  async createIndustriesBulk(items: CreateIndustryDto[]) {
+    const inserted: any[] = [];
+    const skipped: string[] = [];
+
+    for (const item of items || []) {
+      const name = (item.name || '').trim();
+      if (!name) continue;
+      const existing = await this.industryModel.findOne({ name: new RegExp(`^${name}$`, 'i') }).lean();
+      if (existing) {
+        skipped.push(name);
+        continue;
+      }
+      const row = await this.industryModel.create({
+        name,
+        status: item.status ?? 1,
+      });
+      inserted.push({
+        id: row._id.toString(),
+        name: row.name,
+        status: row.status,
+      });
+    }
+
+    return {
+      status: 'success',
+      message: 'Industries bulk processed',
+      data: {
+        inserted_count: inserted.length,
+        skipped_count: skipped.length,
+        inserted,
+        skipped,
+      },
+    };
+  }
+
+  async getAllStatesMaster() {
+    const states = await this.stateModel.find({}).sort({ name: 1 }).lean();
+    return {
+      status: 'success',
+      message: 'States loaded',
+      data: {
+        states: (states as any[]).map((s) => ({
+          id: s._id.toString(),
+          name: s.name,
+          code: s.code || '',
+          status: s.status ?? 1,
+        })),
+      },
+    };
+  }
+
+  async createState(dto: CreateStateDto) {
+    const name = dto.name.trim();
+    const existing = await this.stateModel.findOne({ name: new RegExp(`^${name}$`, 'i') }).lean();
+    if (existing) {
+      return {
+        status: 'success',
+        message: 'State already exists',
+        data: {
+          id: (existing as any)._id.toString(),
+          name: (existing as any).name,
+          code: (existing as any).code || '',
+          status: (existing as any).status ?? 1,
+        },
+      };
+    }
+
+    const state = await this.stateModel.create({
+      name,
+      code: dto.code?.trim() || undefined,
+      status: dto.status ?? 1,
+    });
+
+    return {
+      status: 'success',
+      message: 'State created successfully',
+      data: {
+        id: state._id.toString(),
+        name: state.name,
+        code: state.code || '',
+        status: state.status,
+      },
+    };
+  }
+
+  async createStatesBulk(items: CreateStateDto[]) {
+    const inserted: any[] = [];
+    const skipped: string[] = [];
+
+    for (const item of items || []) {
+      const name = (item.name || '').trim();
+      if (!name) continue;
+      const existing = await this.stateModel.findOne({ name: new RegExp(`^${name}$`, 'i') }).lean();
+      if (existing) {
+        skipped.push(name);
+        continue;
+      }
+      const row = await this.stateModel.create({
+        name,
+        code: item.code?.trim() || undefined,
+        status: item.status ?? 1,
+      });
+      inserted.push({
+        id: row._id.toString(),
+        name: row.name,
+        code: row.code || '',
+        status: row.status,
+      });
+    }
+
+    return {
+      status: 'success',
+      message: 'States bulk processed',
+      data: {
+        inserted_count: inserted.length,
+        skipped_count: skipped.length,
+        inserted,
+        skipped,
+      },
     };
   }
 }
