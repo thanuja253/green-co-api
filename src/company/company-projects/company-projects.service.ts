@@ -685,7 +685,7 @@ export class CompanyProjectsService {
 
   async updateAssessorProfileAdminFlow(
     assessorId: string,
-    dto: CreateAssessorProfileDto,
+    dto: Partial<CreateAssessorProfileDto>,
     files?: {
       profile_image?: Express.Multer.File[];
       biodata?: Express.Multer.File[];

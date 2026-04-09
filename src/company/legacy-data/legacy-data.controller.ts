@@ -1,8 +1,9 @@
-import { Body, Controller, Get, Param, Post, Query, UsePipes, ValidationPipe } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Put, Query, UsePipes, ValidationPipe } from '@nestjs/common';
 import { LegacyDataService } from './legacy-data.service';
 import { CreateLegacyDataDto } from './dto/create-legacy-data.dto';
 import { ListLegacyDataQueryDto } from './dto/list-legacy-data-query.dto';
 import { ImportLegacyDataDto } from './dto/import-legacy-data.dto';
+import { UpdateLegacyDataDto } from './dto/update-legacy-data.dto';
 
 @Controller()
 export class LegacyDataController {
@@ -69,6 +70,19 @@ export class LegacyDataController {
   @Get('admin/legacyData/:id')
   async getLegacyDataAdminCamel(@Param('id') id: string) {
     return this.legacyDataService.getLegacyDataById(id);
+  }
+
+  @Put('api/admin/legacy-data/:id')
+  @Put('admin/legacy-data/:id')
+  @Put('api/admin/legacyData/:id')
+  @Put('admin/legacyData/:id')
+  @Post('api/admin/legacy-data/:id/update')
+  @Post('admin/legacy-data/:id/update')
+  @Post('api/admin/legacyData/:id/update')
+  @Post('admin/legacyData/:id/update')
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
+  async updateLegacyData(@Param('id') id: string, @Body() dto: UpdateLegacyDataDto) {
+    return this.legacyDataService.updateLegacyDataById(id, dto);
   }
 }
 

@@ -42,6 +42,17 @@ async function bootstrap() {
     next();
   });
 
+  // Legacy assessor profile update aliases used by frontend:
+  // /api/admin/assessors/:id/profile and /api/admin/assessors/:id/public -> /api/admin/assessors/:id/edit
+  app.use((req, res, next) => {
+    const url = req.url || '';
+    const profileAlias = /^\/api\/admin\/assessors\/([^/]+)\/(profile|public)(\/?|\?.*)$/i;
+    if (profileAlias.test(url)) {
+      req.url = url.replace(profileAlias, '/api/admin/assessors/$1/edit$3');
+    }
+    next();
+  });
+
   // Response time logging (skip static and health)
   app.use((req, res, next) => {
     const start = Date.now();

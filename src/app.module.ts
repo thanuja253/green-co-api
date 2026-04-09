@@ -13,6 +13,8 @@ import { StaffManagementModule } from './company/staff-management/staff-manageme
 import { LegacyDataModule } from './company/legacy-data/legacy-data.module';
 import { GroupManagementModule } from './company/group-management/group-management.module';
 import { SectorManagementModule } from './company/sector-management/sector-management.module';
+import { ParameterManagementModule } from './company/parameter-management/parameter-management.module';
+import { CreditManagementModule } from './company/credit-management/credit-management.module';
 import { AppController } from './app.controller';
 
 @Module({
@@ -43,6 +45,8 @@ import { AppController } from './app.controller';
     LegacyDataModule,
     GroupManagementModule,
     SectorManagementModule,
+    ParameterManagementModule,
+    CreditManagementModule,
   ],
   controllers: [AppController],
 })

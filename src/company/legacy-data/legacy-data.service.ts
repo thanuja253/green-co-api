@@ -8,6 +8,7 @@ import { Sector, SectorDocument } from '../schemas/sector.schema';
 import { CreateLegacyDataDto } from './dto/create-legacy-data.dto';
 import { ListLegacyDataQueryDto } from './dto/list-legacy-data-query.dto';
 import { ImportLegacyDataDto } from './dto/import-legacy-data.dto';
+import { UpdateLegacyDataDto } from './dto/update-legacy-data.dto';
 
 @Injectable()
 export class LegacyDataService {
@@ -206,6 +207,55 @@ export class LegacyDataService {
       status: 'success',
       message: 'Legacy data fetched successfully',
       data: this.mapRow(row),
+    };
+  }
+
+  async updateLegacyDataById(id: string, dto: UpdateLegacyDataDto) {
+    const existing = await this.legacyDataModel.findById(id);
+    if (!existing) {
+      throw new NotFoundException({ status: 'error', message: 'Legacy data not found' });
+    }
+
+    const dtoObj = dto || {};
+    const has = (key: keyof UpdateLegacyDataDto) => Object.prototype.hasOwnProperty.call(dtoObj, key);
+
+    if (has('company_name')) {
+      const companyName = String(dto.company_name || '').trim();
+      if (!companyName) {
+        throw new BadRequestException({
+          status: 'validations',
+          errors: { company_name: ['company_name cannot be empty.'] },
+        });
+      }
+      existing.company_name = companyName;
+    }
+    if (has('level_of_certification')) existing.level_of_certification = String(dto.level_of_certification || '').trim();
+    if (has('date_of_award') || has('year')) existing.date_of_award = String(dto.date_of_award || dto.year || '').trim();
+    if (has('expiry_date')) existing.expiry_date = String(dto.expiry_date || '').trim();
+
+    if (has('sector_id') || has('sector')) {
+      const sectorId = has('sector_id') ? String(dto.sector_id || '').trim() : String(existing.sector_id || '').trim();
+      let sectorName = has('sector') ? String(dto.sector || '').trim() : String(existing.sector || '').trim();
+      if (sectorId && !sectorName) {
+        const sector = await this.sectorModel.findById(sectorId).lean();
+        if (sector) sectorName = sector.name || '';
+      }
+      existing.sector_id = sectorId;
+      existing.sector = sectorName;
+    }
+
+    if (has('email')) existing.email = String(dto.email || '').trim().toLowerCase();
+    if (has('phone_no') || has('phone_number')) {
+      existing.phone_no = String(dto.phone_no || dto.phone_number || '').trim();
+    }
+
+    existing.updated_by = process.env.ADMIN_EMAIL || existing.updated_by || null;
+    await existing.save();
+
+    return {
+      status: 'success',
+      message: 'Legacy data updated successfully',
+      data: this.mapRow(existing.toObject()),
     };
   }
 

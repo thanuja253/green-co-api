@@ -201,7 +201,68 @@ export class AdminCompanyFlowController {
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
   async updateAssessorProfile(
     @Param('assessorId') assessorId: string,
-    @Body() dto: CreateAssessorProfileDto,
+    @Body() dto: Partial<CreateAssessorProfileDto>,
+    @UploadedFiles()
+    files?: {
+      profile_image?: Express.Multer.File[];
+      biodata?: Express.Multer.File[];
+      vendor_registration_form?: Express.Multer.File[];
+      non_disclosure_agreement?: Express.Multer.File[];
+      health_declaration?: Express.Multer.File[];
+      gst_declaration?: Express.Multer.File[];
+      pan_card?: Express.Multer.File[];
+      cancelled_cheque?: Express.Multer.File[];
+    },
+  ): Promise<any> {
+    return this.companyProjectsService.updateAssessorProfileAdminFlow(assessorId, dto, files);
+  }
+
+  // Dedicated POST updater for legacy frontend forms (Nest cannot reliably mix PUT+POST decorators on one handler)
+  @Post('api/admin/assessors/:assessorId/edit')
+  @Post('api/admin/assessors/:assessorId/profile')
+  @Post('api/admin/assessors/:assessorId/public')
+  @Post('api/admin/assessor_profile/:assessorId')
+  @Post('admin/assessors/:assessorId/edit')
+  @Post('admin/assessors/:assessorId/profile')
+  @Post('admin/assessors/:assessorId/public')
+  @Post('admin/assessor_profile/:assessorId')
+  @Post('assessors/:assessorId/edit')
+  @Post('assessors/:assessorId/profile')
+  @Post('assessors/:assessorId/public')
+  @UseInterceptors(
+    FileFieldsInterceptor(
+      [
+        { name: 'profile_image', maxCount: 1 },
+        { name: 'biodata', maxCount: 1 },
+        { name: 'vendor_registration_form', maxCount: 1 },
+        { name: 'non_disclosure_agreement', maxCount: 1 },
+        { name: 'health_declaration', maxCount: 1 },
+        { name: 'gst_declaration', maxCount: 1 },
+        { name: 'pan_card', maxCount: 1 },
+        { name: 'cancelled_cheque', maxCount: 1 },
+      ],
+      {
+        storage: diskStorage({
+          destination: (req, file, cb) => {
+            const uploadPath = join(process.cwd(), 'uploads', 'assessors');
+            if (!fs.existsSync(uploadPath)) {
+              fs.mkdirSync(uploadPath, { recursive: true });
+            }
+            cb(null, uploadPath);
+          },
+          filename: (req, file, cb) => {
+            const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+            cb(null, `${file.fieldname}-${unique}${extname(file.originalname)}`);
+          },
+        }),
+        limits: { fileSize: 10 * 1024 * 1024 },
+      },
+    ),
+  )
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
+  async updateAssessorProfilePostAlias(
+    @Param('assessorId') assessorId: string,
+    @Body() dto: Partial<CreateAssessorProfileDto>,
     @UploadedFiles()
     files?: {
       profile_image?: Express.Multer.File[];
@@ -253,7 +314,7 @@ export class AdminCompanyFlowController {
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
   async updateAssessorProfileLegacy(
     @Param('assessorId') assessorId: string,
-    @Body() dto: CreateAssessorProfileDto,
+    @Body() dto: Partial<CreateAssessorProfileDto>,
     @UploadedFiles()
     files?: {
       profile_image?: Express.Multer.File[];
@@ -304,7 +365,7 @@ export class AdminCompanyFlowController {
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
   async updateAssessorProfileApiLegacy(
     @Param('assessorId') assessorId: string,
-    @Body() dto: CreateAssessorProfileDto,
+    @Body() dto: Partial<CreateAssessorProfileDto>,
     @UploadedFiles()
     files?: {
       profile_image?: Express.Multer.File[];
