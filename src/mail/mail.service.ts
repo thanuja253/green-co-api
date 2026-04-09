@@ -110,6 +110,19 @@ export class MailService {
       from: process.env.MAIL_FROM_ADDRESS || 'noreply@greenco.com',
       to: email,
       subject: 'Welcome to Green Co - Registration Successful',
+      text: `Welcome to Green Co
+
+Hello ${companyName},
+
+Your company account has been created successfully.
+
+Login credentials:
+Email: ${email}
+Temporary password: ${password}
+
+Login URL: ${loginUrl}
+
+For security, change the password after your first login.`,
       html: `
 <!DOCTYPE html>
 <html>
@@ -184,7 +197,22 @@ export class MailService {
     // Basic logging so you can see in the Nest console whether the mail was attempted / failed
     try {
       console.log('[MailService] Sending registration email to:', email);
-      await this.sendMail(mailOptions);
+      const info = await this.sendMail(mailOptions);
+      if (info) {
+        console.log('[MailService] Registration mail response:', {
+          to: email,
+          accepted: info.accepted,
+          rejected: info.rejected,
+          messageId: info.messageId,
+          response: info.response,
+        });
+        if (
+          Array.isArray(info.rejected) &&
+          info.rejected.map(String).includes(email)
+        ) {
+          throw new Error(`SMTP rejected recipient: ${email}`);
+        }
+      }
       console.log('[MailService] Registration email sent successfully to:', email);
     } catch (err) {
       console.error('[MailService] Failed to send registration email to:', email, 'Error:', err);
