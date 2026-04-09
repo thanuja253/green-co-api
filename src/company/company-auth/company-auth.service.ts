@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  InternalServerErrorException,
   Injectable,
   NotFoundException,
   UnauthorizedException,
@@ -105,49 +106,89 @@ export class CompanyAuthService {
     // Hash password
     const hashedPassword = await bcrypt.hash(generatedPassword, 10);
 
-    // Create company
-    const company = new this.companyModel({
-      email: registerDto.email.toLowerCase(),
-      password: hashedPassword,
-      mobile: registerDto.mobileno,
-      name: registerDto.company_name,
-      account_status: '1',
-      verified_status: '0',
-    });
+    let savedCompany: CompanyDocument | null = null;
+    let savedProject: CompanyProjectDocument | null = null;
+    let facilitatorAssigned = false;
+    try {
+      // Create company
+      const company = new this.companyModel({
+        email: registerDto.email.toLowerCase(),
+        password: hashedPassword,
+        mobile: registerDto.mobileno,
+        name: registerDto.company_name,
+        account_status: '1',
+        verified_status: '0',
+      });
+      savedCompany = await company.save();
 
-    const savedCompany = await company.save();
+      // Create project
+      const project = new this.companyProjectModel({
+        company_id: savedCompany._id,
+        process_type: registerDto.assessment === 'cii' ? 'c' : 'f',
+        next_activities_id: 1,
+      });
+      savedProject = await project.save();
 
-    // Create project
-    const project = new this.companyProjectModel({
-      company_id: savedCompany._id,
-      process_type: registerDto.assessment === 'cii' ? 'c' : 'f',
-      next_activities_id: 1,
-    });
-
-    const savedProject = await project.save();
-
-    // Log initial CII activity: Milestone 1 completed (registration)
-    await this.companyActivityModel.create({
-      company_id: savedCompany._id,
-      project_id: savedProject._id,
-      description: 'Plant registers for GreenCo Rating Online',
-      activity_type: 'cii',
-      milestone_flow: 1,
-      milestone_completed: true,
-    });
-
-    // Set next milestone to step 2 (GreenCo Launch & Handholding)
-    savedProject.next_activities_id = 2;
-    await savedProject.save();
-
-    // Create facilitator assignment if assessment is facilitator
-    if (registerDto.assessment === 'facilitator' && registerDto.selectfacilitator) {
-      const facilitator = new this.companyFacilitatorModel({
+      // Log initial CII activity: Milestone 1 completed (registration)
+      await this.companyActivityModel.create({
         company_id: savedCompany._id,
         project_id: savedProject._id,
-        facilitator_id: new Types.ObjectId(registerDto.selectfacilitator),
+        description: 'Plant registers for GreenCo Rating Online',
+        activity_type: 'cii',
+        milestone_flow: 1,
+        milestone_completed: true,
       });
-      await facilitator.save();
+
+      // Set next milestone to step 2 (GreenCo Launch & Handholding)
+      savedProject.next_activities_id = 2;
+      await savedProject.save();
+
+      // Create facilitator assignment if assessment is facilitator
+      if (registerDto.assessment === 'facilitator' && registerDto.selectfacilitator) {
+        const facilitator = new this.companyFacilitatorModel({
+          company_id: savedCompany._id,
+          project_id: savedProject._id,
+          facilitator_id: new Types.ObjectId(registerDto.selectfacilitator),
+        });
+        await facilitator.save();
+        facilitatorAssigned = true;
+      }
+
+      // Make registration email mandatory for successful registration response.
+      await this.mailService.sendCompanyRegistrationEmail(
+        savedCompany.email,
+        savedCompany.name,
+        generatedPassword,
+      );
+    } catch (error) {
+      // Rollback data created during this request so user can retry registration safely.
+      if (savedProject?._id) {
+        await this.companyActivityModel
+          .deleteMany({ project_id: savedProject._id })
+          .catch((cleanupErr) => console.error('Cleanup companyActivity failed:', cleanupErr));
+      }
+      if (facilitatorAssigned && savedProject?._id) {
+        await this.companyFacilitatorModel
+          .deleteMany({ project_id: savedProject._id })
+          .catch((cleanupErr) => console.error('Cleanup companyFacilitator failed:', cleanupErr));
+      }
+      if (savedProject?._id) {
+        await this.companyProjectModel
+          .deleteOne({ _id: savedProject._id })
+          .catch((cleanupErr) => console.error('Cleanup companyProject failed:', cleanupErr));
+      }
+      if (savedCompany?._id) {
+        await this.companyModel
+          .deleteOne({ _id: savedCompany._id })
+          .catch((cleanupErr) => console.error('Cleanup company failed:', cleanupErr));
+      }
+
+      console.error('Registration failed, rolled back company data:', error);
+      throw new InternalServerErrorException({
+        status: 'error',
+        message:
+          'Registration email could not be sent. Please verify mail configuration and try again.',
+      });
     }
 
     // In-app: notify Admin (New Company Registered)
@@ -169,18 +210,6 @@ export class CompanyAuthService {
         savedCompany._id.toString(),
       )
       .catch((err) => console.error('Notification to company failed:', err));
-
-    // Send registration email in background (non-blocking)
-    this.mailService
-      .sendCompanyRegistrationEmail(
-        savedCompany.email,
-        savedCompany.name,
-        generatedPassword,
-      )
-      .catch((error) => {
-        console.error('Error sending registration email:', error);
-        // Don't fail registration if email fails
-      });
 
     return {
       status: 'success',
