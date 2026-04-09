@@ -66,13 +66,29 @@ export class MailService {
           : String(mailOptions.cc)
         : undefined;
 
-      await this.resend.emails.send({
+      const resendResponse = await this.resend.emails.send({
         from: String(mailOptions.from || this.fromAddress),
         to,
         cc,
         subject: String(mailOptions.subject || ''),
         text: mailOptions.text ? String(mailOptions.text) : undefined,
         html: mailOptions.html ? String(mailOptions.html) : undefined,
+      });
+
+      if (resendResponse?.error) {
+        throw new Error(
+          `[MailService] Resend send failed: ${resendResponse.error.message || 'Unknown error'}`,
+        );
+      }
+
+      if (!resendResponse?.data?.id) {
+        throw new Error('[MailService] Resend returned no message id');
+      }
+
+      console.log('[MailService] Resend email accepted:', {
+        id: resendResponse.data.id,
+        to,
+        subject: mailOptions.subject,
       });
       return null;
     }
