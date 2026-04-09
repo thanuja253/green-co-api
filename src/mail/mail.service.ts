@@ -92,7 +92,10 @@ export class MailService {
       });
       return null;
     }
+
+
     
+
 
     if (!this.transporter) {
       throw new Error('Mail transport is not initialized');
