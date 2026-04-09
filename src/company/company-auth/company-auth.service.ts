@@ -27,6 +27,7 @@ import {
 import { Facilitator, FacilitatorDocument } from '../schemas/facilitator.schema';
 import { MailService } from '../../mail/mail.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { passwordGeneration } from '../../helpers/password.helper';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
