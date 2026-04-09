@@ -95,6 +95,7 @@ export class MailService {
                     <td align="center" style="border-radius:12px;background:#6DC041;">
                       <a href="${loginUrl}" target="_blank" style="display:inline-block;padding:14px 32px;font-size:14px;font-weight:600;color:#FFFFFF;text-decoration:none;">Get started</a>
                     </td>
+                    
                   </tr>
                 </table>
                 <p style="margin:0;text-align:center;color:#3A973D;font-size:11px;opacity:0.8;">Or copy this link: <a href="${loginUrl}" style="color:#6DC041;text-decoration:none;word-break:break-all;">${loginUrl}</a></p>
