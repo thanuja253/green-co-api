@@ -39,6 +39,9 @@ import { PrimaryDataStoreDto } from './dto/primary-data-store.dto';
 import { PrimaryDataFormApprovalDto } from './dto/primary-data-approval.dto';
 import { UpdateAssessmentSubmittalDto } from './dto/update-assessment-submittal.dto';
 import { ScoreBandStatusDto } from './dto/score-band-status.dto';
+import { AdminJwtAuthGuard } from '../../admin/admin-auth/guards/admin-jwt-auth.guard';
+import { UpdateQuickviewDataDto } from './dto/update-quickview-data.dto';
+import { mergeNestedRegistrationBody } from './registration-info-normalize';
 
 @Controller('api/company/projects')
 export class CompanyProjectsController {
@@ -350,6 +353,67 @@ export class CompanyProjectsController {
     );
   }
 
+  /**
+   * GET /api/company/projects/:projectId/workflow-status
+   * Same next/latest step logic as quickview, smaller payload for other panels.
+   */
+  @Get(':projectId/workflow-status')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
+  async getWorkflowStatus(
+    @Request() req,
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.getWorkflowStatus(req.user.userId, projectId);
+  }
+
+  /**
+   * GET /api/company/projects/:projectId/admin/workflow-status
+   * Same as workflow-status; :projectId may be company id or project id. Open route — protect in production.
+   */
+  @Get(':projectId/admin/workflow-status')
+  async getWorkflowStatusAdmin(@Param('projectId') projectId: string): Promise<any> {
+    return this.companyProjectsService.getWorkflowStatusForAdmin(projectId);
+  }
+
+  /**
+   * PATCH /api/company/projects/:projectId/quickview-data
+   * Company panel update API for quickview-shown fields.
+   */
+  @Patch(':projectId/quickview-data')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  async updateQuickviewData(
+    @Request() req,
+    @Param('projectId') projectId: string,
+    @Body() dto: UpdateQuickviewDataDto,
+  ): Promise<any> {
+    return this.companyProjectsService.updateQuickviewData(
+      req.user.userId,
+      projectId,
+      dto,
+      false,
+    );
+  }
+
+  /**
+   * PATCH /api/company/projects/:projectId/admin/quickview-data
+   * Admin panel update API for same quickview fields.
+   */
+  @Patch(':projectId/admin/quickview-data')
+  @UseGuards(AdminJwtAuthGuard)
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  async updateQuickviewDataAsAdmin(
+    @Param('projectId') projectId: string,
+    @Body() dto: UpdateQuickviewDataDto,
+  ): Promise<any> {
+    return this.companyProjectsService.updateQuickviewData(
+      null,
+      projectId,
+      dto,
+      true,
+    );
+  }
+
   @Post(':projectId/milestones')
   @UseGuards(JwtAuthGuard, AccountStatusGuard)
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
@@ -573,7 +637,7 @@ export class CompanyProjectsController {
     }
 
     // Clean up body - remove empty file field objects
-    const cleanedBody = { ...body };
+    let cleanedBody = { ...body };
     if (cleanedBody.company_brief_profile && typeof cleanedBody.company_brief_profile === 'object' && Object.keys(cleanedBody.company_brief_profile).length === 0) {
       delete cleanedBody.company_brief_profile;
     }
@@ -586,6 +650,9 @@ export class CompanyProjectsController {
     if (cleanedBody.turnover && typeof cleanedBody.turnover === 'object' && Object.keys(cleanedBody.turnover).length === 0) {
       delete cleanedBody.turnover;
     }
+
+    // Flatten nested JSON shapes: { payload: {...} }, { registration_info: {...} }, { data: {...} }
+    cleanedBody = mergeNestedRegistrationBody(cleanedBody);
 
     // Convert to DTO
     const dto = cleanedBody as RegistrationInfoDto;
@@ -621,6 +688,33 @@ export class CompanyProjectsController {
       req.user.userId,
       projectId,
     );
+  }
+
+  /**
+   * GET /api/company/projects/:projectId/registration-data
+   * Alias for registration-info, returns saved registration form + masters.
+   */
+  @Get(':projectId/registration-data')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
+  async getRegistrationData(
+    @Request() req,
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.getRegistrationInfo(
+      req.user.userId,
+      projectId,
+    );
+  }
+
+  /**
+   * GET /api/company/projects/:projectId/admin/registration-data
+   * Registration payload + masters. Param may be project _id **or** company _id
+   * (same id as GET registered-companies `items[].id`).
+   * No auth guard: open for local/admin tooling; do not expose publicly without a reverse proxy rule.
+   */
+  @Get(':projectId/admin/registration-data')
+  async getAdminRegistrationData(@Param('projectId') projectId: string): Promise<any> {
+    return this.companyProjectsService.getRegistrationInfoForAdmin(projectId);
   }
 
   @Get(':projectId/registration-files/:fileType')

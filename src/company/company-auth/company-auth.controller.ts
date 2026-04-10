@@ -3,6 +3,7 @@ import {
   Body,
   Controller,
   Get,
+  Header,
   Post,
   Query,
   Request,
@@ -153,10 +154,31 @@ export class CompanyAuthController {
   }
 
   /**
+   * GET /api/company/auth/registered-companies
+   * Returns registered companies with pagination and summary.
+   */
+  @Get('registered-companies')
+  async getRegisteredCompanies(
+    @Query('q') q?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.companyAuthService.getRegisteredCompanies(
+      q,
+      page ? Number(page) : 1,
+      limit ? Number(limit) : 20,
+    );
+  }
+
+  /**
    * GET /api/company/auth/register-info
    * Auth namespace endpoint for registration masters.
    */
   @Get('register-info')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+  @Header('Pragma', 'no-cache')
+  @Header('Expires', '0')
+  @Header('Surrogate-Control', 'no-store')
   async getRegisterInfo() {
     return this.registrationMastersService.getRegistrationMasters();
   }
@@ -166,8 +188,45 @@ export class CompanyAuthController {
    * Alias endpoint for frontend consistency.
    */
   @Get('registration-info')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+  @Header('Pragma', 'no-cache')
+  @Header('Expires', '0')
+  @Header('Surrogate-Control', 'no-store')
   async getRegistrationInfo() {
     return this.registrationMastersService.getRegistrationMasters();
+  }
+
+  /**
+   * GET /api/company/auth/registration-data
+   * Full registration page data: payload defaults + masters + submitted companies.
+   */
+  @Get('registration-data')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+  @Header('Pragma', 'no-cache')
+  @Header('Expires', '0')
+  @Header('Surrogate-Control', 'no-store')
+  async getRegistrationData() {
+    const masters = await this.registrationMastersService.getRegistrationMasters();
+    const submitted = await this.companyAuthService.getSubmittedCompanies();
+    return {
+      status: 'success',
+      message: 'Registration data loaded successfully',
+      data: {
+        payload: {
+          email: '',
+          company_name: '',
+          mobileno: '',
+          assessment: 'cii',
+          selectfacilitator: '',
+        },
+        assessment_options: [
+          { id: 'cii', name: 'cii' },
+          { id: 'facilitator', name: 'facilitator' },
+        ],
+        submitted_companies: submitted.data,
+        ...masters.data,
+      },
+    };
   }
 }
 

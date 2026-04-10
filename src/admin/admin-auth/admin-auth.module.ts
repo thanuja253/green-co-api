@@ -7,6 +7,7 @@ import { AdminAuthController } from './admin-auth.controller';
 import { AdminAuthService } from './admin-auth.service';
 import { Admin, AdminSchema } from '../schemas/admin.schema';
 import { AdminJwtStrategy } from './strategies/admin-jwt.strategy';
+import { AdminJwtAuthGuard } from './guards/admin-jwt-auth.guard';
 import { MailModule } from '../../mail/mail.module';
 
 @Module({
@@ -32,7 +33,7 @@ import { MailModule } from '../../mail/mail.module';
     MailModule,
   ],
   controllers: [AdminAuthController],
-  providers: [AdminAuthService, AdminJwtStrategy],
-  exports: [AdminAuthService],
+  providers: [AdminAuthService, AdminJwtStrategy, AdminJwtAuthGuard],
+  exports: [AdminAuthService, AdminJwtAuthGuard],
 })
 export class AdminAuthModule {}

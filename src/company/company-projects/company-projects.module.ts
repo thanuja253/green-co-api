@@ -55,11 +55,15 @@ import {
 } from '../schemas/master-primary-data-checklist.schema';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { MailModule } from '../../mail/mail.module';
+import { RegistrationMastersModule } from '../registration-masters/registration-masters.module';
+import { AdminAuthModule } from '../../admin/admin-auth/admin-auth.module';
 
 @Module({
   imports: [
+    AdminAuthModule,
     NotificationsModule,
     MailModule,
+    RegistrationMastersModule,
     MongooseModule.forFeature([
       { name: CompanyProject.name, schema: CompanyProjectSchema },
       { name: Company.name, schema: CompanySchema },

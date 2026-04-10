@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { Model, Types } from 'mongoose';
 import { Company, CompanyDocument } from '../../schemas/company.schema';
 
 @Injectable()
@@ -23,6 +23,13 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(payload: any) {
+    if (!payload?.sub || !Types.ObjectId.isValid(String(payload.sub))) {
+      throw new UnauthorizedException({
+        status: 'error',
+        message: 'Unauthorized. Please check your credentials.',
+      });
+    }
+
     const company = await this.companyModel.findById(payload.sub).select('-password');
     if (!company) {
       throw new UnauthorizedException({

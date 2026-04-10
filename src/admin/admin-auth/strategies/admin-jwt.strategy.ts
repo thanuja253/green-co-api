@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { Model, Types } from 'mongoose';
 import { Admin, AdminDocument } from '../../schemas/admin.schema';
 
 @Injectable()
@@ -26,11 +26,29 @@ export class AdminJwtStrategy extends PassportStrategy(Strategy, 'admin-jwt') {
   }
 
   async validate(payload: any) {
-    const admin = await this.adminModel.findById(payload.sub);
+    if (payload?.sub === undefined || payload?.sub === null || String(payload.sub).trim() === '') {
+      throw new UnauthorizedException({
+        status: 'error',
+        message: 'Invalid admin session. Please log in again.',
+      });
+    }
+
+    const subStr =
+      typeof payload.sub === 'string' ? payload.sub.trim() : String(payload.sub).trim();
+
+    // Prefer ObjectId (current login shape); support legacy tokens that put admin email in sub.
+    let admin = Types.ObjectId.isValid(subStr)
+      ? await this.adminModel.findById(subStr)
+      : null;
+    if (!admin && subStr.includes('@')) {
+      admin = await this.adminModel.findOne({ email: subStr.toLowerCase() });
+    }
+
     if (!admin) {
       throw new UnauthorizedException({
         status: 'error',
-        message: 'Unauthorized. Please check your credentials.',
+        message:
+          'Unauthorized for this route. Send the admin JWT from POST /api/admin/login or POST /api/admin/auth/login as Authorization: Bearer <token>. Company (portal) tokens cannot access admin registration-data.',
       });
     }
 

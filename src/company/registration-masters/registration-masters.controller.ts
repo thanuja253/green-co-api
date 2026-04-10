@@ -1,4 +1,4 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, Header } from '@nestjs/common';
 import { RegistrationMastersService } from './registration-masters.service';
 
 @Controller('api/company')
@@ -10,6 +10,10 @@ export class RegistrationMastersController {
   // GET /api/company/register-info
   // Public endpoint - no auth required for master data
   @Get('register-info')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+  @Header('Pragma', 'no-cache')
+  @Header('Expires', '0')
+  @Header('Surrogate-Control', 'no-store')
   async getRegisterInfo() {
     console.log('[RegistrationMastersController] GET /api/company/register-info called');
     const result = await this.registrationMastersService.getRegistrationMasters();
@@ -28,6 +32,10 @@ export class RegistrationMastersController {
    * Returns all states (id, name, code) for dropdowns and filters.
    */
   @Get('states')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+  @Header('Pragma', 'no-cache')
+  @Header('Expires', '0')
+  @Header('Surrogate-Control', 'no-store')
   async getAllStates() {
     return this.registrationMastersService.getAllStates();
   }
@@ -37,6 +45,10 @@ export class RegistrationMastersController {
    * Returns industry categories for dropdowns.
    */
   @Get('categories')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+  @Header('Pragma', 'no-cache')
+  @Header('Expires', '0')
+  @Header('Surrogate-Control', 'no-store')
   async getAllCategories() {
     return this.registrationMastersService.getAllCategories();
   }

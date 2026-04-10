@@ -48,8 +48,119 @@ const INDIA_STATES_MASTER: Array<{ code: string; name: string }> = [
   { code: 'WB', name: 'West Bengal' },
 ];
 
+const DEFAULT_SECTORS_FROM_IMAGES: string[] = [
+  'AIRPORTS',
+  'AIRPORTS(GENERAL V4)',
+  'APPLIANCE',
+  'APPLIANCE(GENERAL V4)',
+  'AUTO COMPONENT',
+  'AUTO COMPONENT(GENERAL V4)',
+  'AUTOMOBILE',
+  'AUTOMOBILE (GENERAL V4)',
+  'AVIATION',
+  'AVIATION (GENERAL V4)',
+  'BEVERAGE',
+  'BEVERAGE(GENERAL V4)',
+  'BIOTECHNOLOGY',
+  'BIOTECHNOLOGY(GENERAL V4)',
+  'BUILDING MATERIALS',
+  'BUILDING MATERIALS(GENERAL V4)',
+  'CEMENT V 4',
+  'CEMENT VERSION V',
+  'CEMENT(GRINDING UNIT)',
+  'CEMENT(GRINDING UNIT)(GENERAL V4)',
+  'CEMENT(INTEGRATED UNIT)',
+  'CHEMICALS',
+  'CHEMICALS (GENERAL V4)',
+  'CONSTRUCTION',
+  'CONSTRUCTION (GENERAL V4)',
+  'DEFENCE MANUFACTURING',
+  'DEFENCE MANUFACTURING(GENERAL V4)',
+  'DUMMY TEST',
+  'EARTH MOVING',
+  'EARTH MOVING (GENERAL V4)',
+  'ELECTRICAL & ELECTRONICS',
+  'ELECTRICAL & ELECTRONICS(GENERAL V4)',
+  'ENGINEERING',
+  'ENGINEERING(GENERAL V4)',
+  'FETILIZER',
+  'FETILIZER (GENERAL V4)',
+  'FMCG',
+  'FMCG (GENERAL V4)',
+  'FOOD PROCESSING',
+  'FOOD PROCESSING (GENERAL V4)',
+  'FOUNDRY',
+  'FOUNDRY (GENERAL)',
+  'GLASS',
+  'GLASS(GENERAL V4)',
+  'HOSPITALITY & WELLNESS',
+  'HOSPITALITY & WELLNESS (GENERAL V4)',
+  'INDIAN RAILWAYS(PRODUCTION UNIT)',
+  'INDIAN RAILWAYS(WORKSHOP)',
+  'IRON & STEEL',
+  'IT & ITES',
+  'IT & ITES (GENERAL V4)',
+  'LEATHER',
+  'LEATHER (GENERAL V4)',
+  'METAL',
+  'MINES(OPEN CAST)',
+  'MINES(UNDER GROUND)',
+  'MINING',
+  'MINING (GENERAL V4)',
+  'NON FERROUS METALS',
+  'NON FERROUS METALS (GENERAL V4)',
+  'OIL & GAS(COMPRESSOR)',
+  'OIL & GAS(REFINERY)',
+  'OIL MARKETING(AFS NEW)',
+  'OIL MARKETING COMPANY(AFS)',
+  'OIL MARKETING COMPANY(LPG BP)',
+  'OIL MARKETING COMPANY(PIPELINE)',
+  'OIL MARKETING COMPANY(TERMINAL/DEPOTS)',
+  'OTHER MANUFACTURING SECTOR',
+  'PAINT',
+  'PAINT(GENERAL V4)',
+  'PAPER',
+  'PAPER (GENERAL V4)',
+  'PETROCHEMICALS',
+  'PETROCHEMICALS(GENERAL V4)',
+  'PETROLEUM MARKETING',
+  'PETROLEUM MARKETING(GENERAL V4)',
+  'PORTS & SHIPPING',
+  'PORTS & SHIPPING (GENERAL V4)',
+  'POWER PLANT',
+  'POWER PLANT (GENERAL V4)',
+  'R & D',
+  'R & D(GENERAL V4)',
+  'RECYLERS',
+  'RENEWABLE ENERGY',
+  'RENEWABLE ENERGY(GENERAL V4)',
+  'RENEWABLE ENERGY(HYDRO)',
+  'RENEWABLE ENERGY(SOLAR)',
+  'RENEWABLE ENERGY(WIND)',
+  'SERVICE SECTOR',
+  'SHIPPING',
+  'SHIPPING (GENERAL V4)',
+  'SME ( ONLY TURN OVER LESS THAN 50 CRORE)',
+  'STEEL',
+  'STEEL(GENERAL V4)',
+  'TEXTILE(DYEING UNIT)',
+  'TEXTILE(GARMENT)',
+  'TEXTILE(SPINING UNIT)',
+  'TYRE',
+  'TYRE (GENERAL V4)',
+  'WATCHES',
+  'WATCHES(GENERAL V4)',
+];
+
 @Injectable()
 export class RegistrationMastersService {
+  private lastRegistrationMastersCache: {
+    industries: Array<{ id: string; name: string }>;
+    entities: Array<{ id: string; name: string }>;
+    sectors: Array<{ id: string; name: string; group_name?: string }>;
+    states: Array<{ id: string; name: string; code?: string }>;
+    facilitators: Array<{ id: string; name: string }>;
+  } | null = null;
   constructor(
     @InjectModel(Industry.name)
     private readonly industryModel: Model<IndustryDocument>,
@@ -81,7 +192,7 @@ export class RegistrationMastersService {
     try {
       console.log('[RegistrationMasters] Fetching master data...');
       // Fetch all data - try with status filter first, fallback to all if empty
-      const [industriesFiltered, entitiesFiltered, sectors, statesFiltered, facilitatorsFiltered] =
+      const [industriesFiltered, entitiesFiltered, sectorsFiltered, statesFiltered, facilitatorsFiltered] =
         await Promise.all([
           // Industries: try status = 1 or "1" or missing
           this.industryModel
@@ -140,13 +251,99 @@ export class RegistrationMastersService {
         ]);
 
       // If filtered results are empty, try fetching all records (fallback)
-      const industries = industriesFiltered.length > 0
-        ? industriesFiltered
-        : await this.industryModel.find({}).sort({ name: 1 }).select('_id name').lean();
+      let industries =
+        industriesFiltered.length > 0
+          ? industriesFiltered
+          : await this.industryModel.find({}).sort({ name: 1 }).select('_id name').lean();
+
+      // Registration form requirement: Industry dropdown should show only
+      // MANUFACTURING and SERVICE (DB-backed values).
+      const requiredIndustryNames = ['MANUFACTURING', 'SERVICE'];
+      const industryByLower = new Map(
+        industries.map((i: any) => [String(i.name || '').trim().toLowerCase(), i]),
+      );
+      const missingRequiredIndustries = requiredIndustryNames.filter(
+        (name) => !industryByLower.has(name.toLowerCase()),
+      );
+      if (missingRequiredIndustries.length > 0) {
+        await this.industryModel.insertMany(
+          missingRequiredIndustries.map((name) => ({ name, status: '1' })),
+          { ordered: false },
+        );
+        industries = await this.industryModel.find({}).sort({ name: 1 }).select('_id name').lean();
+      }
+      const preferredOrder = new Map(requiredIndustryNames.map((n, idx) => [n.toLowerCase(), idx]));
+      industries = industries
+        .filter((i: any) => preferredOrder.has(String(i.name || '').trim().toLowerCase()))
+        .sort(
+          (a: any, b: any) =>
+            (preferredOrder.get(String(a.name || '').trim().toLowerCase()) ?? 999) -
+            (preferredOrder.get(String(b.name || '').trim().toLowerCase()) ?? 999),
+        );
       
-      const entities = entitiesFiltered.length > 0
-        ? entitiesFiltered
-        : await this.entityModel.find({}).sort({ name: 1 }).select('_id name').lean();
+      let entities =
+        entitiesFiltered.length > 0
+          ? entitiesFiltered
+          : await this.entityModel.find({}).sort({ name: 1 }).select('_id name').lean();
+
+      // Ensure required Type of Entity master values exist in DB (for registration dropdowns).
+      // This keeps frontend values DB-driven while guaranteeing baseline options.
+      const defaultEntities = (
+        process.env.REGISTRATION_DEFAULT_ENTITIES ||
+        'PRIVATE SECTOR,PUBLIC SECTOR,INDIAN RAILWAYS,OTHER GOVERNMENT ENTERPRISE,NOT FOR PROFIT'
+      )
+        .split(',')
+        .map((name) => name.trim())
+        .filter(Boolean);
+
+      if (defaultEntities.length > 0) {
+        const existingNames = new Set(
+          entities.map((e: any) => String(e.name || '').trim().toLowerCase()),
+        );
+        const missingDefaults = defaultEntities.filter(
+          (name) => !existingNames.has(name.toLowerCase()),
+        );
+        if (missingDefaults.length > 0) {
+          await this.entityModel.insertMany(
+            missingDefaults.map((name) => ({ name, status: '1' })),
+            { ordered: false },
+          );
+          entities = await this.entityModel
+            .find({})
+            .sort({ name: 1 })
+            .select('_id name')
+            .lean();
+        }
+      }
+
+      // Keep sectors independent from industries; read from sector master data in DB.
+      let sectors =
+        sectorsFiltered.length > 0
+          ? sectorsFiltered
+          : await this.sectorModel
+              .find({})
+              .sort({ group_name: 1, name: 1 })
+              .select('_id name group_name')
+              .lean();
+
+      // Seed sector master from provided registration screenshots when missing in DB.
+      const existingSectorNames = new Set(
+        (sectors as any[]).map((s) => String(s?.name || '').trim().toLowerCase()),
+      );
+      const missingSectors = DEFAULT_SECTORS_FROM_IMAGES.filter(
+        (name) => !existingSectorNames.has(name.toLowerCase()),
+      );
+      if (missingSectors.length > 0) {
+        await this.sectorModel.insertMany(
+          missingSectors.map((name) => ({ name })),
+          { ordered: false },
+        );
+        sectors = await this.sectorModel
+          .find({})
+          .sort({ group_name: 1, name: 1 })
+          .select('_id name group_name')
+          .lean();
+      }
       
       const states = statesFiltered.length > 0
         ? statesFiltered
@@ -164,45 +361,74 @@ export class RegistrationMastersService {
         facilitators: facilitators.length,
       });
 
+      const responseData = {
+        industries: industries.map((i: any) => ({
+          id: i._id.toString(),
+          name: i.name,
+        })),
+        entities: entities.map((e: any) => ({
+          id: e._id.toString(),
+          name: e.name,
+        })),
+        sectors: sectors.map((s: any) => ({
+          id: s._id.toString(),
+          name: s.name,
+          group_name: s.group_name || '',
+        })),
+        states: states.map((s: any) => ({
+          id: s._id.toString(),
+          name: s.name,
+          code: s.code || undefined,
+        })),
+        facilitators: facilitators.map((f: any) => ({
+          id: f._id.toString(),
+          name: f.name,
+        })),
+      };
+
+      // Keep last successful payload so UI can continue to work during transient DB outages.
+      this.lastRegistrationMastersCache = responseData;
+
       return {
         status: 'success',
         message: 'Registration masters loaded successfully',
-        data: {
-          industries: industries.map((i: any) => ({
-            id: i._id.toString(),
-            name: i.name,
-          })),
-          entities: entities.map((e: any) => ({
-            id: e._id.toString(),
-            name: e.name,
-          })),
-          sectors: sectors.map((s: any) => ({
-            id: s._id.toString(),
-            name: s.name,
-            group_name: s.group_name || '',
-          })),
-          states: states.map((s: any) => ({
-            id: s._id.toString(),
-            name: s.name,
-            code: s.code || undefined,
-          })),
-          facilitators: facilitators.map((f: any) => ({
-            id: f._id.toString(),
-            name: f.name,
-          })),
-        },
+        data: responseData,
       };
     } catch (error) {
       console.error('Error loading registration masters:', error);
-      // Return empty arrays instead of throwing error, so frontend can still render
+
+      // If DB is temporarily unavailable, return last known good payload.
+      if (this.lastRegistrationMastersCache) {
+        return {
+          status: 'success',
+          message: 'Registration masters loaded from cache (database temporarily unavailable)',
+          data: this.lastRegistrationMastersCache,
+        };
+      }
+
+      const defaultEntities = (
+        process.env.REGISTRATION_DEFAULT_ENTITIES ||
+        'PRIVATE SECTOR,PUBLIC SECTOR,INDIAN RAILWAYS,OTHER GOVERNMENT ENTERPRISE,NOT FOR PROFIT'
+      )
+        .split(',')
+        .map((name) => name.trim())
+        .filter(Boolean)
+        .map((name) => ({ id: name.toLowerCase().split(/\s+/).join('_'), name }));
+
+      const defaultStates = INDIA_STATES_MASTER.map((s) => ({
+        id: s.code,
+        name: s.name,
+        code: s.code,
+      }));
+
       return {
         status: 'success',
-        message: 'Registration masters loaded (some collections may be empty)',
+        message: 'Registration masters loaded from fallback defaults (database unavailable)',
         data: {
           industries: [],
-          entities: [],
+          entities: defaultEntities,
           sectors: [],
-          states: [],
+          states: defaultStates,
           facilitators: [],
         },
       };

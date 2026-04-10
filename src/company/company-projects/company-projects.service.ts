@@ -30,11 +30,29 @@ import {
 import { RegistrationInfoDto } from './dto/registration-info.dto';
 import { SubmitPaymentDto } from './dto/submit-payment.dto';
 import { UpdateInvoiceApprovalDto } from './dto/update-invoice-approval.dto';
+import { UpdateQuickviewDataDto } from './dto/update-quickview-data.dto';
+import { CompleteMilestoneDto } from './dto/complete-milestone.dto';
 import { join } from 'path';
 import * as fs from 'fs';
 import { getCertificationType } from '../../helpers/certification.helper';
 import { NotificationsService } from '../notifications/notifications.service';
 import { MailService } from '../../mail/mail.service';
+import { RegistrationMastersService } from '../registration-masters/registration-masters.service';
+import {
+  extendWorkflowCardsFromMilestoneSteps,
+  resolveLatestStepFromCards,
+  resolveNextStepFromCards,
+} from './workflow-milestone-cards';
+import {
+  coalesceRegistrationSnakeCase,
+  countFilledRegistrationFields,
+  normalizeRegistrationInfoFromDb,
+  pickBestProjectForRegistration,
+} from './registration-info-normalize';
+import {
+  getMilestoneCompletionNotifications,
+  type WorkflowActor,
+} from './workflow-step-notifications';
 
 /** View Certificate score band: 9 rows × 20 numbers (points bands 1–10 … 191–200). Normalize so frontend always gets number[][]. */
 function normalizeScoreBandRows(rows: any[]): number[][] {
@@ -97,6 +115,7 @@ export class CompanyProjectsService {
     private readonly masterPrimaryDataChecklistModel: Model<MasterPrimaryDataChecklistDocument>,
     private readonly notificationsService: NotificationsService,
     private readonly mailService: MailService,
+    private readonly registrationMastersService: RegistrationMastersService,
   ) {}
 
   /**
@@ -265,7 +284,7 @@ export class CompanyProjectsService {
     const company = await this.companyModel.findById(project.company_id).lean();
 
     // Convert relative paths to full URLs for frontend
-    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3001';
+    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3019';
     
     const certificate_document = project.certificate_document_url
       ? project.certificate_document_url.startsWith('http')
@@ -496,7 +515,10 @@ export class CompanyProjectsService {
     try {
       project = await this.projectModel.findOne({
         _id: new Types.ObjectId(projectId),
-        company_id: new Types.ObjectId(companyId),
+        $or: [
+          { company_id: new Types.ObjectId(companyId) },
+          { company_id: companyId },
+        ],
       });
     } catch (e) {
       throw new BadRequestException({
@@ -514,12 +536,14 @@ export class CompanyProjectsService {
 
     // Normalize field names (handle alternative naming from frontend)
     const normalizedData: any = { ...dto };
-    
+    coalesceRegistrationSnakeCase(normalizedData);
+
     // Remove file fields from DTO (they're handled via @UploadedFiles() parameter)
     delete normalizedData.company_brief_profile;
     delete normalizedData.turnover_document;
     delete normalizedData.brief_profile;
     delete normalizedData.turnover;
+    delete normalizedData.process_type;
     
     // Normalize pan_no -> pan_number
     if (dto.pan_no && !dto.pan_number) {
@@ -534,7 +558,7 @@ export class CompanyProjectsService {
     }
 
     // Handle file uploads
-    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3001';
+    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3019';
     console.log('[Registration Info Service] Processing files:', {
       hasFiles: !!files,
       company_brief_profile: files?.company_brief_profile?.[0]?.filename,
@@ -578,16 +602,31 @@ export class CompanyProjectsService {
       ...(project.registration_info || {}),
       ...normalizedData,
     };
-    
+
     // Mark profile as updated (registration form submitted)
     project.profile_update = 1;
-    
+
+    // Next workflow step: 3 = CII uploads proposal (24-step model). Never lower if project is already ahead.
+    const currentNext = Number(project.next_activities_id) || 0;
+    project.next_activities_id = Math.min(24, Math.max(3, currentNext));
+
+    // Persist process_type explicitly: 'c' = CII direct, 'f' = facilitator
+    if (dto.process_type !== undefined && dto.process_type !== null && String(dto.process_type).trim() !== '') {
+      const p = String(dto.process_type).toLowerCase().trim();
+      project.process_type = p === 'f' ? 'f' : 'c';
+    } else {
+      const p = String(project.process_type || 'c').toLowerCase().trim();
+      project.process_type = p === 'f' ? 'f' : 'c';
+    }
+
     console.log('[Registration Info Service] Saving to database:', {
       projectId: projectId.toString(),
       hasCompanyBriefProfile: !!normalizedData.company_brief_profile_url,
       hasTurnoverDocument: !!normalizedData.turnover_document_url,
       registrationInfoKeys: Object.keys(project.registration_info),
       profile_update: project.profile_update,
+      next_activities_id: project.next_activities_id,
+      process_type: project.process_type,
     });
 
     try {
@@ -597,7 +636,7 @@ export class CompanyProjectsService {
       throw new BadRequestException({ status: 'error', message });
     }
 
-    // Log activity: Company Filled Registration Info (milestone 2) and set next step to 3
+    // Activity: milestone 2 = registration submitted (canonical copy for UI / milestone list)
     const companyObjId = new Types.ObjectId(companyId);
     const existingMilestone2 = await this.companyActivityModel.findOne({
       company_id: companyObjId,
@@ -608,36 +647,25 @@ export class CompanyProjectsService {
       await this.companyActivityModel.create({
         company_id: companyObjId,
         project_id: project._id,
-        description: 'Registration form completed',
+        description: 'Registration submitted',
         activity_type: 'company',
         milestone_flow: 2,
         milestone_completed: true,
       });
-      const nextId = Math.min(24, 3);
-      if (project.next_activities_id < nextId) {
-        await this.projectModel.updateOne(
-          { _id: project._id },
-          { $set: { next_activities_id: nextId } },
-        );
-      }
+    } else {
+      await this.companyActivityModel.updateOne(
+        { _id: existingMilestone2._id },
+        {
+          $set: {
+            description: 'Registration submitted',
+            milestone_completed: true,
+          },
+        },
+      );
     }
 
-    // In-app notification for the company so they see confirmation after filing
-    if (companyId) {
-      this.notificationsService
-        .create(
-          'Registration form submitted',
-          'Your registration information has been saved successfully. You can view or update it from the project dashboard.',
-          'C',
-          companyId,
-        )
-        .then((doc) => {
-          console.log('[Registration Info Service] Notification created for company', companyId, 'id:', (doc as any)?._id?.toString?.());
-        })
-        .catch((e) => {
-          console.error('[Registration Info Service] Notification failed:', e?.message || e);
-        });
-    }
+    // In-app: milestone 2 — same pattern as other completed steps (company + admin)
+    void this.notifyWorkflowStepCompleted(companyId, project, 2, 'company');
 
     console.log('[Registration Info Service] Saved successfully. Registration info:', {
       company_brief_profile_url: project.registration_info?.company_brief_profile_url,
@@ -661,18 +689,20 @@ export class CompanyProjectsService {
       // Non-fatal: registration info was already saved
     }
 
-    // Build response with file URLs if files were uploaded
+    // Build response: workflow snapshot for company UI + optional file URLs
     const response: any = {
       status: 'success',
       message: 'Registration info saved successfully',
-      notification_created: true, // Frontend can refetch notifications when this is true
+      notification_created: true,
+      data: {
+        next_activities_id: project.next_activities_id,
+        nextActivitiesId: project.next_activities_id,
+        process_type: project.process_type,
+      },
     };
 
-    // Include file information in response if files were uploaded
-    const fileData: any = {};
-    
     if (normalizedData.company_brief_profile_url) {
-      fileData.company_brief_profile = {
+      response.data.company_brief_profile = {
         url: normalizedData.company_brief_profile_url,
         filename: normalizedData.company_brief_profile_filename,
         downloadUrl: `${baseUrl}/api/company/projects/${projectId}/registration-files/company-brief-profile`,
@@ -680,25 +710,32 @@ export class CompanyProjectsService {
     }
 
     if (normalizedData.turnover_document_url) {
-      fileData.turnover_document = {
+      response.data.turnover_document = {
         url: normalizedData.turnover_document_url,
         filename: normalizedData.turnover_document_filename,
         downloadUrl: `${baseUrl}/api/company/projects/${projectId}/registration-files/turnover-document`,
       };
     }
 
-    if (Object.keys(fileData).length > 0) {
-      response.data = fileData;
-    }
-
     return response;
   }
 
   async getRegistrationInfo(companyId: string, projectId: string) {
-    const project = await this.projectModel.findOne({
-      _id: projectId,
-      company_id: companyId,
-    });
+    if (!Types.ObjectId.isValid(companyId) || !Types.ObjectId.isValid(projectId)) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Invalid company or project id',
+      });
+    }
+
+    // Support legacy docs where company_id may be stored as string or ObjectId.
+    const project = await this.projectModel
+      .findOne({
+        _id: new Types.ObjectId(projectId),
+        $or: [{ company_id: companyId }, { company_id: new Types.ObjectId(companyId) }],
+      })
+      .select('registration_info')
+      .lean();
 
     if (!project) {
       throw new NotFoundException({
@@ -707,18 +744,53 @@ export class CompanyProjectsService {
       });
     }
 
-    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3001';
-    const registrationInfo = project.registration_info || {};
+    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3019';
+    const company = await this.companyModel
+      .findById(companyId)
+      .select('email mobile name turnover mst_sector_id')
+      .lean();
+
+    let registrationInfo = normalizeRegistrationInfoFromDb((project as any).registration_info);
+    const currentScore = countFilledRegistrationFields(registrationInfo);
+
+    const companyOid = new Types.ObjectId(companyId);
+    const siblingProjects = await this.projectModel
+      .find({
+        company_id: { $in: [companyId, companyOid] },
+      })
+      .select('registration_info profile_update updatedAt createdAt')
+      .lean();
+
+    const bestProject = pickBestProjectForRegistration(siblingProjects as any[]);
+    let registrationFilesProjectId = projectId;
+    if (bestProject) {
+      const bestNorm = normalizeRegistrationInfoFromDb((bestProject as any).registration_info);
+      const bestScore = countFilledRegistrationFields(bestNorm);
+      if (bestScore > currentScore) {
+        registrationInfo = { ...bestNorm, ...registrationInfo };
+        registrationFilesProjectId = String((bestProject as any)._id);
+      }
+    }
 
     // Build response data with all form fields
     const responseData: any = { ...registrationInfo };
+
+    // Mirror fields saved on Company document (see saveRegistrationInfo) when not in registration_info
+    const missing = (v: unknown) =>
+      v === undefined || v === null || (typeof v === 'string' && v.trim() === '');
+    if (company?.mst_sector_id != null && missing(responseData.sector_id)) {
+      responseData.sector_id = String(company.mst_sector_id);
+    }
+    if (company?.turnover != null && String(company.turnover).trim() !== '' && missing(responseData.turnover)) {
+      responseData.turnover = String(company.turnover);
+    }
     
     // Add file URLs if they exist (for viewing/downloading)
     if (registrationInfo.company_brief_profile_url) {
       responseData.company_brief_profile = {
         url: registrationInfo.company_brief_profile_url,
         filename: registrationInfo.company_brief_profile_filename || 'company_brief_profile',
-        downloadUrl: `${baseUrl}/api/company/projects/${projectId}/registration-files/company-brief-profile`,
+        downloadUrl: `${baseUrl}/api/company/projects/${registrationFilesProjectId}/registration-files/company-brief-profile`,
       };
     } else {
       responseData.company_brief_profile = null;
@@ -728,7 +800,7 @@ export class CompanyProjectsService {
       responseData.turnover_document = {
         url: registrationInfo.turnover_document_url,
         filename: registrationInfo.turnover_document_filename || 'turnover_document',
-        downloadUrl: `${baseUrl}/api/company/projects/${projectId}/registration-files/turnover-document`,
+        downloadUrl: `${baseUrl}/api/company/projects/${registrationFilesProjectId}/registration-files/turnover-document`,
       };
     } else {
       responseData.turnover_document = null;
@@ -740,17 +812,266 @@ export class CompanyProjectsService {
     delete responseData.turnover_document_url;
     delete responseData.turnover_document_filename;
 
+    // Complete payload for frontend edit/create form binding.
+    const payload = {
+      industry_id: '',
+      entity_id: '',
+      sector_id: '',
+      state_id: '',
+      city: '',
+      plant_address: '',
+      plant_pincode: '',
+      billing_address: '',
+      billing_pincode: '',
+      is_sez: false,
+      turnover: '',
+      employees_count: '',
+      permanent_employees: '',
+      contract_employees: '',
+      total_area: '',
+      plant_head_name: '',
+      plant_head_designation: '',
+      plant_head_email: '',
+      plant_head_mobile: '',
+      pan_number: '',
+      pan_no: '',
+      gstin: '',
+      gstin_no: '',
+      tan_no: '',
+      cin_number: '',
+      registration_number: '',
+      website: '',
+      products_services: '',
+      contact_person_name: '',
+      contact_person_email: '',
+      contact_person_mobile: '',
+      // Common aliases used by some frontends
+      email: company?.email || '',
+      company_email: company?.email || '',
+      company_name: company?.name || '',
+      mobile: company?.mobile || '',
+      plant_contact_no: '',
+      contact_number: '',
+      company_brief_profile: null as any,
+      turnover_document: null as any,
+      ...responseData,
+    };
+
+    const masters = await this.registrationMastersService.getRegistrationMasters();
+
+    // Same next-step / responsibility as GET .../quickview so the UI can refresh the quick view
+    // when registration data loads (e.g. "CII Uploaded Proposal Document", Pending, responsibility CII).
+    let quickview: {
+      next_step: any;
+      latest_step: any;
+      profile: Record<string, any>;
+      workflow_milestone_cards?: Record<number, any>;
+      recertification_new_project_id?: string;
+    } | null = null;
+    try {
+      const qv = await this.getQuickviewData(companyId, projectId);
+      const p = qv.data.profile;
+      const recertId = (qv.data as any).recertification_new_project_id;
+      const wmc = (qv.data as any).workflow_milestone_cards;
+      quickview = {
+        next_step: qv.data.next_step,
+        latest_step: qv.data.latest_step,
+        profile: {
+          next_activity: p.next_activity,
+          next_activity_status: p.next_activity_status,
+          next_responsibility: p.next_responsibility,
+          nextResponsibility: p.nextResponsibility,
+          next_activities_id: p.next_activities_id,
+          nextActivitiesId: p.nextActivitiesId,
+          proposal_document: p.proposal_document,
+          project_id: p.project_id,
+        },
+        ...(wmc ? { workflow_milestone_cards: wmc } : {}),
+        ...(recertId ? { recertification_new_project_id: String(recertId) } : {}),
+      };
+    } catch {
+      quickview = null;
+    }
+
     return {
       status: 'success',
       message: 'Registration info loaded successfully',
-      data: responseData,
+      data: {
+        ...responseData,
+        payload,
+        ...(registrationFilesProjectId !== projectId
+          ? { registration_files_project_id: registrationFilesProjectId }
+          : {}),
+        ...(quickview ? { quickview } : {}),
+        // Master lists (DB-backed) for dropdown binding
+        masters: {
+          industries: masters.data.industries,
+          entities: masters.data.entities,
+          sectors: masters.data.sectors,
+          states: masters.data.states,
+          facilitators: masters.data.facilitators,
+        },
+        industries: masters.data.industries,
+        industry_options: masters.data.industries,
+        entities: masters.data.entities,
+        entity_options: masters.data.entities,
+        sectors: masters.data.sectors,
+        sector_options: masters.data.sectors,
+        states: masters.data.states,
+        state_options: masters.data.states,
+        facilitators: masters.data.facilitators,
+        facilitator_options: masters.data.facilitators,
+      },
+    };
+  }
+
+  /**
+   * Resolves `:projectId` for admin-style registration-data (project _id **or** company _id).
+   */
+  private async resolveRegistrationIdsForAdminParam(projectIdOrCompanyId: string): Promise<{
+    companyId: string;
+    resolvedProjectId: string;
+  }> {
+    if (!Types.ObjectId.isValid(projectIdOrCompanyId)) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Invalid project or company id',
+      });
+    }
+
+    let project = await this.projectModel
+      .findById(projectIdOrCompanyId)
+      .select('company_id')
+      .lean();
+
+    if (!project) {
+      const candidates = await this.projectModel
+        .find({ company_id: new Types.ObjectId(projectIdOrCompanyId) })
+        .select('company_id registration_info profile_update updatedAt createdAt')
+        .lean();
+      project = pickBestProjectForRegistration(candidates as any[]);
+    }
+
+    if (!project) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'No project found for this id (use a company id from the companies list or a project id).',
+      });
+    }
+
+    const cid = (project as any).company_id;
+    let companyId: string | null = null;
+    if (cid instanceof Types.ObjectId) {
+      companyId = cid.toString();
+    } else if (typeof cid === 'string' && Types.ObjectId.isValid(cid)) {
+      companyId = cid;
+    } else if (cid && typeof cid === 'object' && (cid as any)._id != null) {
+      const inner = (cid as any)._id;
+      companyId = inner instanceof Types.ObjectId ? inner.toString() : String(inner);
+    }
+
+    if (!companyId) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Project is missing a valid company_id',
+      });
+    }
+
+    const resolvedProjectId = String((project as any)._id);
+    return { companyId, resolvedProjectId };
+  }
+
+  /**
+   * Admin registration-data: `:projectId` may be a real project _id **or** a company _id
+   * (the registered-companies list only exposes company ids, so the admin UI often passes that).
+   */
+  async getRegistrationInfoForAdmin(projectIdOrCompanyId: string) {
+    const { companyId, resolvedProjectId } =
+      await this.resolveRegistrationIdsForAdminParam(projectIdOrCompanyId);
+    return this.getRegistrationInfo(companyId, resolvedProjectId);
+  }
+
+  async updateQuickviewData(
+    companyId: string | null,
+    projectId: string,
+    dto: UpdateQuickviewDataDto,
+    isAdmin = false,
+  ) {
+    const projectQuery: any = { _id: projectId };
+    if (!isAdmin && companyId) {
+      projectQuery.company_id = companyId;
+    }
+
+    const project = await this.projectModel.findOne(projectQuery);
+    if (!project) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Project not found',
+      });
+    }
+
+    const ownerCompanyId = String((project as any).company_id);
+    const company = await this.companyModel.findById(ownerCompanyId);
+    if (!company) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Company not found',
+      });
+    }
+
+    const companyPatch: Record<string, any> = { ...(dto.company || {}) };
+    if (dto.company_name !== undefined) companyPatch.name = dto.company_name;
+    if (dto.company_email !== undefined) companyPatch.email = dto.company_email;
+    if (dto.company_mobile !== undefined) companyPatch.mobile = dto.company_mobile;
+
+    const projectPatch: Record<string, any> = { ...(dto.project || {}) };
+    if (dto.project_code !== undefined) projectPatch.project_id = dto.project_code;
+    if (dto.process_type !== undefined) projectPatch.process_type = dto.process_type;
+    if (dto.next_activities_id !== undefined) {
+      projectPatch.next_activities_id = dto.next_activities_id;
+    }
+
+    if (companyPatch.name !== undefined) company.name = String(companyPatch.name).trim();
+    if (companyPatch.email !== undefined) company.email = String(companyPatch.email).trim().toLowerCase();
+    if (companyPatch.mobile !== undefined) company.mobile = String(companyPatch.mobile).trim();
+    if (companyPatch.account_status !== undefined) company.account_status = String(companyPatch.account_status);
+    if (companyPatch.verified_status !== undefined) company.verified_status = String(companyPatch.verified_status);
+    if (companyPatch.reg_id !== undefined) company.reg_id = String(companyPatch.reg_id);
+    if (companyPatch.turnover !== undefined) company.turnover = String(companyPatch.turnover);
+    if (companyPatch.mst_sector_id !== undefined) company.mst_sector_id = String(companyPatch.mst_sector_id);
+
+    if (projectPatch.project_id !== undefined) project.project_id = String(projectPatch.project_id);
+    if (projectPatch.process_type !== undefined) project.process_type = String(projectPatch.process_type);
+    if (projectPatch.next_activities_id !== undefined) {
+      project.next_activities_id = Number(projectPatch.next_activities_id);
+    }
+
+    if (dto.registration_info && typeof dto.registration_info === 'object') {
+      const patch = { ...dto.registration_info };
+      coalesceRegistrationSnakeCase(patch);
+      project.registration_info = {
+        ...(project.registration_info || {}),
+        ...patch,
+      };
+    }
+
+    await company.save();
+    await project.save();
+
+    return {
+      status: 'success',
+      message: 'Quickview data updated successfully',
+      data: {
+        company_id: company._id.toString(),
+        project_id: project._id.toString(),
+      },
     };
   }
 
   async completeMilestone(
     companyId: string,
     projectId: string,
-    dto: { milestone_flow: number; description: string; completed?: boolean },
+    dto: CompleteMilestoneDto,
   ) {
     const project = await this.projectModel.findOne({
       _id: projectId,
@@ -777,7 +1098,7 @@ export class CompanyProjectsService {
       company_id: project.company_id,
       project_id: project._id,
       description: dto.description,
-      activity_type: 'cii',
+      activity_type: dto.activity_type === 'company' ? 'company' : 'cii',
       milestone_flow: dto.milestone_flow,
       milestone_completed: isCompleted,
     });
@@ -786,26 +1107,87 @@ export class CompanyProjectsService {
       const oldValue = project.next_activities_id;
       project.next_activities_id = dto.milestone_flow + 1;
       await project.save();
-      
+
       console.log('[Complete Milestone] After update:', {
         projectId: project._id.toString(),
         old_next_activities_id: oldValue,
         new_next_activities_id: project.next_activities_id,
         milestone_flow: dto.milestone_flow,
       });
-      
+
       // Verify it was saved
       const verifyProject = await this.projectModel.findById(projectId);
       console.log('[Complete Milestone] Verification:', {
         projectId: projectId,
         saved_next_activities_id: verifyProject?.next_activities_id,
       });
+
+      const actor: WorkflowActor =
+        dto.activity_type === 'company' ? 'company' : 'cii';
+      void this.notifyWorkflowStepCompleted(
+        companyId,
+        project,
+        dto.milestone_flow,
+        actor,
+      );
     }
 
     return {
       status: 'success',
       message: 'Milestone recorded successfully',
     };
+  }
+
+  /**
+   * Fire in-app notifications when a workflow step is completed (company + admin as appropriate).
+   */
+  private async notifyWorkflowStepCompleted(
+    companyId: string,
+    project: { _id: Types.ObjectId | any; project_id?: string },
+    milestoneFlow: number,
+    actor: WorkflowActor,
+  ): Promise<void> {
+    if (milestoneFlow < 1 || milestoneFlow > 24) return;
+    try {
+      const company = await this.companyModel.findById(companyId).select('name').lean();
+      const companyName = (company as any)?.name || 'Company';
+      const projectLabel =
+        (project as any).project_id ||
+        (project._id != null ? String(project._id) : '') ||
+        '';
+
+      const payloads = getMilestoneCompletionNotifications(milestoneFlow, actor, {
+        companyName,
+        projectLabel,
+      });
+
+      if (payloads.company) {
+        this.notificationsService
+          .create(
+            payloads.company.title,
+            payloads.company.content,
+            'C',
+            companyId,
+          )
+          .catch((e) =>
+            console.error('[Workflow notify] company:', e?.message || e),
+          );
+      }
+      if (payloads.admin) {
+        this.notificationsService
+          .create(
+            payloads.admin.title,
+            payloads.admin.content,
+            'A',
+            null,
+          )
+          .catch((e) =>
+            console.error('[Workflow notify] admin:', e?.message || e),
+          );
+      }
+    } catch (e: any) {
+      console.error('[Workflow notify] failed:', e?.message || e);
+    }
   }
 
   async getQuickviewData(
@@ -874,21 +1256,72 @@ export class CompanyProjectsService {
       ? await this.sectorModel.findById(company.mst_sector_id).lean()
       : null;
 
-    // Latest completed = highest milestone_flow among completed activities (not "first by date")
+    const hasProposalDocument = !!(project as any).proposal_document;
+
+    const normalizeMilestoneFlow = (activity: any): number | null => {
+      const description = String(activity?.description || '').toLowerCase();
+      const rawFlow =
+        activity?.milestone_flow !== undefined && activity?.milestone_flow !== null
+          ? Number(activity.milestone_flow)
+          : null;
+
+      // Strong description signals first — fixes wrong milestone_flow in DB (e.g. primary submit logged as 9).
+      const isPrimarySubmissionLike =
+        description.includes('primary data') ||
+        description.includes('primary form');
+      if (isPrimarySubmissionLike) {
+        if (
+          description.includes('cii') &&
+          (description.includes('approved') || description.includes('approve'))
+        ) {
+          return 12;
+        }
+        return 11;
+      }
+      if (
+        description.includes('registration submitted') ||
+        description.includes('registration form completed') ||
+        (description.includes('registration') && description.includes('submit'))
+      ) {
+        return 2;
+      }
+      if (description.includes('proposal') && description.includes('uploaded')) return 3;
+      if (description.includes('work order') && description.includes('uploaded')) return 4;
+      if (
+        description.includes('plant registers') ||
+        description.includes('greenco rating online')
+      ) {
+        return 1;
+      }
+
+      return Number.isFinite(rawFlow as number) ? rawFlow : null;
+    };
+
+    /** Completed activities that count toward pipeline position. Only step 3 is gated on proposal_file — later steps (e.g. 11) must still count or the milestone flow disagrees with the activity log. */
+    const activityCountsTowardCompletedPipeline = (a: any): boolean => {
+      if (!a.milestone_completed) return false;
+      const f = normalizeMilestoneFlow(a);
+      if (f == null || f < 1) return false;
+      if (f === 3 && !hasProposalDocument) return false;
+      return true;
+    };
+
+    // Latest completed = highest milestone_flow among qualifying completed activities (not "first by date")
     // so that certificate/feedback steps show correctly even if payment was logged later
     const completedMilestones = (allActivities as any[]).filter(
-      (a: any) => a.milestone_completed === true && a.milestone_flow,
+      (a: any) => activityCountsTowardCompletedPipeline(a),
     );
-    const latestCompletedMilestoneNumberFromActivities =
+    let latestCompletedMilestoneNumberFromActivities =
       completedMilestones.length > 0
-        ? Math.max(...completedMilestones.map((a: any) => a.milestone_flow))
+        ? Math.max(...completedMilestones.map((a: any) => normalizeMilestoneFlow(a) || 0))
         : 0;
-    const completedMilestone =
-      latestCompletedMilestoneNumberFromActivities > 0
-        ? completedMilestones.find(
-            (a: any) => a.milestone_flow === latestCompletedMilestoneNumberFromActivities,
-          )
-        : null;
+    // Strict onboarding guard: without proposal document, project cannot be beyond step 2.
+    if (!hasProposalDocument) {
+      latestCompletedMilestoneNumberFromActivities = Math.min(
+        latestCompletedMilestoneNumberFromActivities,
+        2,
+      );
+    }
 
     let facilitatorData = null;
     if (companyFacilitator && (companyFacilitator as any).facilitator_id) {
@@ -929,7 +1362,7 @@ export class CompanyProjectsService {
       2: { name: 'Company Filled Registration Info', responsibility: 'Company' },
       3: { name: 'CII Uploaded Proposal Document', responsibility: 'CII' },
       4: { name: 'Company Uploaded Work Order Document', responsibility: 'Company' },
-      5: { name: 'Work Order / Contract Document Accepted', responsibility: 'CII' },
+      5: { name: 'Work Order/ Contract Document Accepted', responsibility: 'CII' },
       6: { name: 'CII to provide Project Code', responsibility: 'CII' },
       7: { name: 'Assign Project Co‑Ordinator', responsibility: 'CII' },
       8: { name: 'CII uploaded the PI/Tax Invoice', responsibility: 'CII' },
@@ -951,46 +1384,66 @@ export class CompanyProjectsService {
       24: { name: 'Project close‑out / Sustenance phase', responsibility: 'Company' },
     };
 
-    // Get all company activities – same step names and responsibility as Latest/Next Step
-    const activitiesData = allActivities.map((activity) => {
-      const flow = activity.milestone_flow != null ? activity.milestone_flow : null;
-      const step = flow != null ? milestoneSteps[flow] : null;
-      return {
-        description: activity.description,
-        activity: step ? step.name : activity.description,
-        responsibility: step ? step.responsibility : (activity.activity_type === 'cii' ? 'CII' : 'Company'),
-        created_at: (activity as any).createdAt
-          ? (activity as any).createdAt.toISOString()
-          : new Date().toISOString(),
-        formatted_date: (activity as any).createdAt
-          ? new Date((activity as any).createdAt).toLocaleString('en-GB', {
-              day: '2-digit',
-              month: '2-digit',
-              year: 'numeric',
-              hour: '2-digit',
-              minute: '2-digit',
-              hour12: true,
-            })
-          : '',
-        milestone_flow: flow,
-        milestone_completed: activity.milestone_completed ?? false,
-        activity_type: activity.activity_type || null,
-      };
-    });
+    const workflowMilestoneCards = extendWorkflowCardsFromMilestoneSteps(milestoneSteps);
 
-    // Get last activity for milestone calculation
-    const lastActivity = allActivities.length > 0 ? allActivities[0] : null;
-
-    // Calculate current flow (matching Laravel logic)
-    // $curent_flow = is_null($last_activity) ? 1 : $last_activity->milestone_flow;
-    // if ($last_activity->milestone_completed) { $curent_flow += 1; }
-    let currentFlow = 1;
-    if (lastActivity) {
-      currentFlow = lastActivity.milestone_flow || 1;
-      if (lastActivity.milestone_completed) {
-        currentFlow += 1;
-      }
+    // Dedupe identical log rows (same flow + completion + description) so activity list matches timeline truth
+    const seenActivityKeys = new Set<string>();
+    const activitiesForList: any[] = [];
+    for (const a of allActivities as any[]) {
+      const f = normalizeMilestoneFlow(a);
+      const key = `${f ?? 'x'}|${!!a.milestone_completed}|${String(a.description || '').trim().toLowerCase()}`;
+      if (seenActivityKeys.has(key)) continue;
+      seenActivityKeys.add(key);
+      activitiesForList.push(a);
     }
+
+    /** Oldest → newest so the activity log reads as a timeline (milestones UI aligns with order of events). */
+    const activitiesChronological = [...activitiesForList].sort(
+      (a, b) =>
+        new Date((a as any).createdAt || 0).getTime() -
+        new Date((b as any).createdAt || 0).getTime(),
+    );
+
+    // Get all company activities – same step names and responsibility as Latest/Next Step
+    const activitiesData = activitiesChronological
+      .map((activity) => {
+        const flow = normalizeMilestoneFlow(activity);
+        const step = flow != null ? milestoneSteps[flow] : null;
+        return {
+          description: activity.description,
+          activity: step?.name || activity.description,
+          responsibility: step ? step.responsibility : (activity.activity_type === 'cii' ? 'CII' : 'Company'),
+          created_at: (activity as any).createdAt
+            ? (activity as any).createdAt.toISOString()
+            : new Date().toISOString(),
+          formatted_date: (activity as any).createdAt
+            ? new Date((activity as any).createdAt).toLocaleString('en-GB', {
+                day: '2-digit',
+                month: '2-digit',
+                year: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: true,
+              })
+            : '',
+          milestone_flow: flow,
+          milestone_completed: activity.milestone_completed ?? false,
+          activity_type: activity.activity_type || null,
+        };
+      })
+      // Keep timeline consistent with onboarding sequence.
+      .filter((a) => (hasProposalDocument ? true : (a.milestone_flow ?? 0) <= 2 || a.milestone_flow == null));
+
+    // Most recent activity (deduped), independent of chronological sort used for the list payload
+    const lastActivity =
+      activitiesForList.length > 0
+        ? activitiesForList.reduce((best, a) => {
+            const t = new Date((a as any).createdAt || 0).getTime();
+            const bt = new Date((best as any).createdAt || 0).getTime();
+            return t > bt ? a : best;
+          })
+        : null;
+    let currentFlow = 1;
 
     // Milestone responsibility map (for backward compatibility)
     const milestoneResponsibilityMap: Record<number, string> = {};
@@ -1001,44 +1454,64 @@ export class CompanyProjectsService {
 
     // Determine latest completed milestone (use highest completed step from activities)
     const latestCompletedMilestoneNumber = latestCompletedMilestoneNumberFromActivities;
-    const latestCompletedMilestone = latestCompletedMilestoneNumber > 0
-      ? milestoneSteps[latestCompletedMilestoneNumber]
-      : null;
-    const latestCompletedMilestoneName = latestCompletedMilestone?.name || null;
-
+    const latestResolved = resolveLatestStepFromCards(
+      latestCompletedMilestoneNumber,
+      milestoneSteps,
+      workflowMilestoneCards,
+    );
     // Next step: at least (latest + 1), use project.next_activities_id only if it's ahead (so stale DB still shows correct next)
     const derivedNext = latestCompletedMilestoneNumber >= 24 ? 24 : latestCompletedMilestoneNumber + 1;
     const storedNext = project.next_activities_id && project.next_activities_id > 0 ? project.next_activities_id : 0;
-    const nextMilestoneNumber = Math.min(24, Math.max(derivedNext, storedNext));
+    let nextMilestoneNumber = Math.min(24, Math.max(derivedNext, storedNext));
+    // If DB next_activities_id is ahead of derived next, trust completed activities first (avoids skipping step 2, etc.).
+    if (storedNext > derivedNext) {
+      nextMilestoneNumber = derivedNext;
+    }
+    // Early onboarding only: without a proposal file, don’t jump past step 3 (work order) if we’ve only completed ≤2.
+    if (!hasProposalDocument && latestCompletedMilestoneNumber <= 2) {
+      nextMilestoneNumber = Math.min(nextMilestoneNumber, 3);
+    }
+    nextMilestoneNumber = Math.max(derivedNext, Math.min(nextMilestoneNumber, 24));
+    // Keep milestone flow in sync with displayed "next step".
+    currentFlow = nextMilestoneNumber;
 
     // Check if next milestone is already in progress (exists in activities but not completed)
     const nextMilestoneInProgress = allActivities.some(
-      (activity) => activity.milestone_flow === nextMilestoneNumber && !activity.milestone_completed,
+      (activity) =>
+        normalizeMilestoneFlow(activity) === nextMilestoneNumber && !activity.milestone_completed,
     );
 
-    const nextMilestone = milestoneSteps[nextMilestoneNumber];
-    const nextMilestoneName = nextMilestone?.name || 'Project Completed';
+    const resolvedNextLabels = resolveNextStepFromCards(
+      nextMilestoneNumber,
+      latestCompletedMilestoneNumber,
+      milestoneSteps,
+      workflowMilestoneCards,
+    );
+    const nextMilestoneName = resolvedNextLabels.name || 'Project Completed';
 
     const nextActivityInfo = {
       name: nextMilestoneName,
       status: nextMilestoneInProgress ? 'In Progress' : (nextMilestoneNumber > 24 ? 'Completed' : 'Pending'),
-      responsibility: nextMilestone?.responsibility || milestoneResponsibilityMap[nextMilestoneNumber] || 'N/A',
+      responsibility:
+        resolvedNextLabels.responsibility ||
+        milestoneResponsibilityMap[nextMilestoneNumber] ||
+        'N/A',
     };
 
     // Base URL for document URLs
-    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3001';
+    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3019';
 
     // Tab visibility: after Assessor Visit (14) → show Certificate; after Certificate (15+) → show Recertification.
     // Don't return 15+ until certificate is uploaded (so Recertification stays hidden until certificate phase is done).
-    const rawNextId = typeof project.next_activities_id === 'number' ? project.next_activities_id : (project.next_activities_id ? parseInt(String(project.next_activities_id), 10) : 1);
+    // Use merged milestone next id (activities + DB) so profile.next_activities_id matches next_activity labels.
     const hasCertificate = !!(project as any).certificate_document_url;
-    const effectiveNextId = !hasCertificate && rawNextId >= 15 ? 14 : rawNextId;
+    const effectiveNextId = !hasCertificate && nextMilestoneNumber >= 15 ? 14 : nextMilestoneNumber;
 
     // Step 24 display: if recertification started → "open new project"; if not → "Certificate created" / Completed
     const recertificationNewProjectId = (project as any).recertification_project_id?.toString?.() ?? (project as any).recertification_project_id;
     const isRecertifiedAndAtCloseOut = effectiveNextId === 24 && !!recertificationNewProjectId;
     const isAtCloseOutNoRecertify = effectiveNextId === 24 && !recertificationNewProjectId;
-    const nextStepDisplayName = isRecertifiedAndAtCloseOut
+    let nextStepDisplayName = isRecertifiedAndAtCloseOut
       ? 'Recertification started – open your new project'
       : isAtCloseOutNoRecertify
         ? 'Certificate created'
@@ -1048,16 +1521,24 @@ export class CompanyProjectsService {
       : isAtCloseOutNoRecertify
         ? 'Completed'
         : nextActivityInfo.status;
-    const nextStepDisplayResponsibility = isAtCloseOutNoRecertify
+    let nextStepDisplayResponsibility = isAtCloseOutNoRecertify
       ? 'CII'
       : nextActivityInfo.responsibility;
+
+    let latestStepDisplayName =
+      latestCompletedMilestoneNumber > 0 ? latestResolved.name : null;
+    let latestStepDisplayResponsibility =
+      latestResolved.responsibility ||
+      milestoneResponsibilityMap[latestCompletedMilestoneNumber] ||
+      'Company';
 
     // Build profile object
     const profile = {
       id: project._id.toString(),
       name: company.name,
-      reg_id: company.reg_id || '',
-      project_id: project.project_id || project._id.toString(),
+      // Keep these empty until explicitly assigned (avoid showing ObjectId-like fallback values in UI).
+      reg_id: company.reg_id || null,
+      project_id: project.project_id || null,
       email: company.email,
       mobile: company.mobile,
       turnover: company.turnover || '',
@@ -1068,7 +1549,7 @@ export class CompanyProjectsService {
         : (company as any).updatedAt
           ? (company as any).updatedAt.toISOString()
           : new Date().toISOString(),
-      process_type: project.process_type,
+      process_type: project.process_type === 'f' ? 'f' : 'c',
       proposal_document: project.proposal_document
         ? project.proposal_document.startsWith('http')
           ? project.proposal_document
@@ -1084,15 +1565,16 @@ export class CompanyProjectsService {
       next_activity: nextStepDisplayName,
       next_activity_status: nextStepDisplayStatus,
       next_responsibility: nextStepDisplayResponsibility,
+      nextResponsibility: nextStepDisplayResponsibility,
     };
 
     // Build current activity data (Latest Step Completed)
     // Show the latest completed milestone, or fallback to latest activity description
-    const currentActivityData = latestCompletedMilestoneName
+    const currentActivityData = latestStepDisplayName
       ? {
-          activity: latestCompletedMilestoneName,
+          activity: latestStepDisplayName,
           activity_status: 'Completed',
-          responsibility: latestCompletedMilestone?.responsibility || milestoneResponsibilityMap[latestCompletedMilestoneNumber] || 'Company',
+          responsibility: latestStepDisplayResponsibility,
         }
       : currentActivity
         ? {
@@ -1134,7 +1616,9 @@ export class CompanyProjectsService {
           created_at: (lastActivity as any).createdAt
             ? (lastActivity as any).createdAt.toISOString()
             : new Date().toISOString(),
-          milestone_flow: lastActivity.milestone_flow || project.next_activities_id - 1,
+          milestone_flow:
+            normalizeMilestoneFlow(lastActivity) ||
+            ((project.next_activities_id || 1) - 1),
           milestone_completed: lastActivity.milestone_completed || false,
         }
       : {
@@ -1174,10 +1658,34 @@ export class CompanyProjectsService {
     };
     const latest_step = {
       id: latestCompletedMilestoneNumber || 0,
-      name: latestCompletedMilestoneName || currentActivityData.activity,
-      status: latestCompletedMilestoneNumber != null && latestCompletedMilestoneNumber > 0 ? 'Completed' : (currentActivityData.activity_status === 'Done' ? 'Done' : 'Pending'),
+      name: latestStepDisplayName || currentActivityData.activity,
+      status:
+        latestCompletedMilestoneNumber != null && latestCompletedMilestoneNumber > 0
+          ? 'Completed'
+          : currentActivityData.activity_status === 'Done'
+            ? 'Done'
+            : 'Pending',
       responsibility: currentActivityData.responsibility,
     };
+
+    // Per-step completion: merge explicit activity completions with a linear pipeline fill so the
+    // milestone strip matches "we are at step N" when intermediate steps were never logged (e.g. 1,2,11 only in DB).
+    const explicitCompletedFlowNumbers = new Set<number>();
+    for (const a of allActivities as any[]) {
+      if (!a.milestone_completed) continue;
+      const f = normalizeMilestoneFlow(a);
+      if (f == null || f < 1 || f > 24) continue;
+      if (f === 3 && !hasProposalDocument) continue;
+      explicitCompletedFlowNumbers.add(f);
+    }
+    const completedFlowNumbers = new Set<number>();
+    const pipelineLatest = latestCompletedMilestoneNumber;
+    for (let flowNum = 1; flowNum <= pipelineLatest; flowNum++) {
+      if (flowNum === 3 && !hasProposalDocument && !explicitCompletedFlowNumbers.has(3) && pipelineLatest < 4) {
+        continue;
+      }
+      completedFlowNumbers.add(flowNum);
+    }
 
     return {
       status: 'success',
@@ -1203,6 +1711,7 @@ export class CompanyProjectsService {
           return acc;
         }, {} as Record<string, string>),
         milestoneStepIds,
+        workflow_milestone_cards: workflowMilestoneCards,
         last_activity: lastActivityData,
         milestone_flow: {
           current_flow: currentFlow,
@@ -1212,9 +1721,12 @@ export class CompanyProjectsService {
             return acc;
           }, {} as Record<number, string>),
           milestone_status: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24].reduce((acc, flowNum) => {
-            let status = 'pending';
-            if (currentFlow > flowNum) status = 'completed';
-            else if (currentFlow === flowNum) status = 'in_progress';
+            let status: 'completed' | 'in_progress' | 'pending' = 'pending';
+            if (completedFlowNumbers.has(flowNum)) {
+              status = 'completed';
+            } else if (flowNum === effectiveNextId) {
+              status = 'in_progress';
+            }
             acc[flowNum] = {
               flow: flowNum,
               step: milestoneSteps[flowNum]?.name ?? '',
@@ -1223,6 +1735,47 @@ export class CompanyProjectsService {
             return acc;
           }, {} as Record<number, { flow: number; step: string; status: string }>),
         },
+      },
+    };
+  }
+
+  /**
+   * Compact workflow snapshot — same milestone rules as {@link getQuickviewData}.
+   * Use from other panels instead of parsing the full quickview payload.
+   */
+  async getWorkflowStatus(companyId: string, projectId: string) {
+    const full = await this.getQuickviewData(companyId, projectId);
+    return this.toWorkflowStatusPayload(full);
+  }
+
+  /**
+   * Same as {@link getWorkflowStatus}; param may be project _id or company _id (matches admin registration-data).
+   */
+  async getWorkflowStatusForAdmin(projectIdOrCompanyId: string) {
+    const { companyId, resolvedProjectId } =
+      await this.resolveRegistrationIdsForAdminParam(projectIdOrCompanyId);
+    return this.getWorkflowStatus(companyId, resolvedProjectId);
+  }
+
+  private toWorkflowStatusPayload(full: { status: string; message: string; data: any }) {
+    const d = full.data;
+    return {
+      status: 'success' as const,
+      message: 'Workflow status loaded successfully',
+      data: {
+        project_id: d.profile?.id,
+        project_code: d.profile?.project_id,
+        latest_step: d.latest_step,
+        next_step: d.next_step,
+        current_activity_data: d.current_activity_data,
+        next_activity: d.profile?.next_activity,
+        next_activity_status: d.profile?.next_activity_status,
+        next_responsibility: d.profile?.next_responsibility,
+        nextResponsibility: d.profile?.nextResponsibility,
+        next_activities_id: d.profile?.next_activities_id,
+        nextActivitiesId: d.profile?.nextActivitiesId,
+        proposal_document: d.profile?.proposal_document,
+        workflow_milestone_cards: d.workflow_milestone_cards,
       },
     };
   }
@@ -1248,7 +1801,7 @@ export class CompanyProjectsService {
       });
     }
 
-    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3001';
+    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3019';
     // Use Laravel-compatible path: uploads/company/{projectId}/
     const relativePath = `uploads/company/${projectId}/${file.filename}`;
     const fullUrl = `${baseUrl}/${relativePath}`;
@@ -1268,8 +1821,8 @@ export class CompanyProjectsService {
     }
 
     // LOG ACTIVITY 3: CII Uploaded Proposal Document
-    // Use correct flow based on process_type (1 for CII, 3 for Facilitator)
-    const flow = project.process_type === 'c' ? 1 : 3;
+    // Proposal upload is milestone 3 in the main flow.
+    const flow = 3;
     
     await this.companyActivityModel.create({
       company_id: companyId,
@@ -1402,7 +1955,7 @@ export class CompanyProjectsService {
       });
     }
 
-    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3001';
+    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3019';
     const relativePath = `uploads/resources/${projectId}/${file.filename}`;
     const fullUrl = `${baseUrl}/${relativePath}`;
 
@@ -1587,10 +2140,22 @@ export class CompanyProjectsService {
    * Get Proposal/Work Order Documents (combined endpoint for Proposal/Work Order page)
    */
   async getProposalWorkOrderDocuments(companyId: string, projectId: string) {
+    if (!Types.ObjectId.isValid(companyId) || !Types.ObjectId.isValid(projectId)) {
+      throw new BadRequestException({ status: 'error', message: 'Invalid company or project id' });
+    }
+    const projectOid = new Types.ObjectId(projectId);
+    const companyOid = new Types.ObjectId(companyId);
+    const projectQuery: any = {
+      _id: projectOid,
+      $or: [{ company_id: companyId }, { company_id: companyOid }],
+    };
     const [project, workOrder] = await Promise.all([
-      this.projectModel.findOne({ _id: projectId, company_id: companyId }).lean(),
+      this.projectModel.findOne(projectQuery).lean(),
       this.companyWorkOrderModel
-        .findOne({ company_id: companyId, project_id: projectId })
+        .findOne({
+          project_id: projectOid,
+          $or: [{ company_id: companyId }, { company_id: companyOid }],
+        })
         .sort({ createdAt: -1 })
         .lean(),
     ]);
@@ -1599,37 +2164,60 @@ export class CompanyProjectsService {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
 
-    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3001';
+    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3019';
     const response: any = { proposal_document: null, work_order: null };
     const projectAny = project as any;
     const workOrderAny = workOrder as any;
 
     const proposalDocValue = projectAny.proposal_document;
-    const hasProposalDoc = proposalDocValue && 
-                          typeof proposalDocValue === 'string' && 
-                          proposalDocValue.trim().length > 0;
-    
+    const hasProposalDoc =
+      proposalDocValue &&
+      typeof proposalDocValue === 'string' &&
+      proposalDocValue.trim().length > 0;
+
     if (hasProposalDoc) {
+      const pathRaw = proposalDocValue.trim();
+      const fileName = pathRaw.split('/').pop() || 'proposal.pdf';
+      const absUrl = pathRaw.startsWith('http') ? pathRaw : `${baseUrl}/${pathRaw.replace(/^\//, '')}`;
       response.proposal_document = {
         has_document: true,
-        document_url: proposalDocValue.startsWith('http') ? proposalDocValue : `${baseUrl}/${proposalDocValue}`,
-        document_filename: proposalDocValue.split('/').pop() || 'proposal.pdf',
-        path: proposalDocValue,
-        uploaded_at: projectAny.updatedAt?.toISOString?.() ?? projectAny.createdAt?.toISOString?.() ?? new Date().toISOString(),
+        document_url: absUrl,
+        document_filename: fileName,
+        filename: fileName,
+        path: pathRaw,
+        uploaded_at:
+          projectAny.updatedAt?.toISOString?.() ??
+          projectAny.createdAt?.toISOString?.() ??
+          new Date().toISOString(),
       };
     } else {
-      response.proposal_document = { has_document: false, document_url: null, document_filename: null };
+      response.proposal_document = {
+        has_document: false,
+        document_url: null,
+        document_filename: null,
+        filename: null,
+        path: null,
+      };
     }
 
     if (workOrderAny?.wo_doc) {
-      const woDocPath = workOrderAny.wo_doc.startsWith('/') ? workOrderAny.wo_doc.substring(1) : workOrderAny.wo_doc;
-      const woPath = woDocPath.startsWith('http') ? woDocPath : `${baseUrl}/${woDocPath}`;
+      const rawWo = String(workOrderAny.wo_doc).trim();
+      const woDocPath = rawWo.startsWith('/') ? rawWo.substring(1) : rawWo;
+      const woAbs = woDocPath.startsWith('http') ? woDocPath : `${baseUrl}/${woDocPath}`;
+      const woFileName = woDocPath.split('/').pop() || 'work-order.pdf';
       response.work_order = {
         wo_doc: workOrderAny.wo_doc,
-        wo_doc_url: woPath,
+        wo_doc_url: woAbs,
+        document_url: woAbs,
+        path: rawWo,
+        document_filename: woFileName,
         wo_status: workOrderAny.wo_status ?? 0,
         wo_remarks: workOrderAny.wo_remarks || null,
-        wo_doc_status_updated_at: workOrderAny.wo_doc_status_updated_at?.toISOString?.() ?? workOrderAny.updatedAt?.toISOString?.() ?? workOrderAny.createdAt?.toISOString?.() ?? new Date().toISOString(),
+        wo_doc_status_updated_at:
+          workOrderAny.wo_doc_status_updated_at?.toISOString?.() ??
+          workOrderAny.updatedAt?.toISOString?.() ??
+          workOrderAny.createdAt?.toISOString?.() ??
+          new Date().toISOString(),
         uploaded_at: workOrderAny.createdAt?.toISOString?.() ?? new Date().toISOString(),
       };
     } else {
@@ -1742,7 +2330,7 @@ export class CompanyProjectsService {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
     const projectAny = project as any;
-    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3001';
+    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3019';
     const docPath = projectAny.launch_training_document;
     const documentUrl = docPath
       ? (docPath.startsWith('http') ? docPath : `${baseUrl}/${docPath.replace(/^\//, '')}`)
@@ -1802,7 +2390,7 @@ export class CompanyProjectsService {
     const group = sectorDoc?.group_name ?? '';
     const sectorName = sectorDoc?.name ?? '';
 
-    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3001';
+    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3019';
 
     const toUrl = (path: string | undefined): string | null => {
       if (!path) return null;
@@ -1968,7 +2556,7 @@ export class CompanyProjectsService {
       .sort({ createdAt: -1 })
       .lean();
 
-    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3001';
+    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3019';
     const toUrl = (path: string | undefined) => {
       if (!path) return null;
       return path.startsWith('http') ? path : `${baseUrl}/${path.replace(/^\//, '')}`;
@@ -2099,7 +2687,7 @@ export class CompanyProjectsService {
       this.mailService.sendInvoiceRaisedEmail(company.email, company.name || 'Company', invoiceLabel, projectCode).catch((e) => console.error('Invoice email to company failed:', e));
     }
 
-    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3001';
+    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3019';
     const documentUrl = relativePath.startsWith('http') ? relativePath : `${baseUrl}/${relativePath.replace(/^\//, '')}`;
 
     return {
@@ -2334,7 +2922,7 @@ export class CompanyProjectsService {
       })
       .sort({ createdAt: -1 });
 
-    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3001';
+    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3019';
     // Use Laravel-compatible path: uploads/companyproject/{projectId}/
     const relativePath = `uploads/companyproject/${projectId}/${file.filename}`;
     const fullUrl = `${baseUrl}/${relativePath}`;
@@ -2444,7 +3032,7 @@ export class CompanyProjectsService {
       });
     }
 
-    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3001';
+    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3019';
     const relativePath = `uploads/companyproject/launchAndTraining/${companyId}/${file.filename}`;
     const fullUrl = `${baseUrl}/${relativePath}`;
 
@@ -2931,7 +3519,7 @@ export class CompanyProjectsService {
     // Handle contract document upload if provided
     let contractDocumentPath = null;
     if (contractDocument) {
-      const baseUrl = process.env.API_BASE_URL || 'http://localhost:3001';
+      const baseUrl = process.env.API_BASE_URL || 'http://localhost:3019';
       const relativePath = `uploads/facilitator-contracts/${projectId}/${contractDocument.filename}`;
       contractDocumentPath = `${baseUrl}/${relativePath}`;
       console.log('[Assign Facilitator] Contract document saved:', contractDocumentPath);
@@ -3406,7 +3994,7 @@ export class CompanyProjectsService {
       project_id: projectId,
       description: 'Company has submitted the Primary Form Data',
       activity_type: 'company',
-      milestone_flow: 9,
+      milestone_flow: 11,
       milestone_completed: true,
     });
 
@@ -3451,7 +4039,7 @@ export class CompanyProjectsService {
       project_id: projectId,
       description: 'Company has re-submitted the Primary Form Data Documents',
       activity_type: 'company',
-      milestone_flow: 9,
+      milestone_flow: 11,
       milestone_completed: false,
     });
 

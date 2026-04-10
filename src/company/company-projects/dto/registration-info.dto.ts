@@ -133,6 +133,11 @@ export class RegistrationInfoDto {
   @IsString()
   contact_person_mobile?: string;
 
+  /** Optional: 'c' = CII direct, 'f' = facilitator. Applied to the project when present. */
+  @IsOptional()
+  @IsString()
+  process_type?: string;
+
   // File fields (optional - these come from FormData, but may be sent as empty objects)
   // These are handled separately in the controller via @UploadedFiles()
   // No validation decorators - just accept and ignore

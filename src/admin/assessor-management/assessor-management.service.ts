@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
-import * as bcrypt from 'bcrypt';
+import * as bcrypt from 'bcryptjs';
 import { Assessor, AssessorDocument } from '../../company/schemas/assessor.schema';
 import { State, StateDocument } from '../../company/schemas/state.schema';
 import { Industry, IndustryDocument } from '../../company/schemas/industry.schema';

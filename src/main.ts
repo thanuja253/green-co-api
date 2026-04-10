@@ -7,34 +7,101 @@ import { join } from 'path';
 import * as express from 'express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 
+function corsAllowedOrigin(
+  origin: string | undefined,
+  isProduction: boolean,
+  allowedOrigins: string[],
+  localhostOriginOk: (o: string) => boolean,
+): string | null {
+  if (!origin) return null;
+  if (!isProduction) return origin;
+  if (allowedOrigins.includes(origin)) return origin;
+  if (localhostOriginOk(origin)) return origin;
+  return null;
+}
+
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
-    bodyParser: false, // Disable automatic body parsing to allow Multer to handle multipart/form-data
+    bodyParser: false,
+  });
+
+  const isProduction = process.env.NODE_ENV === 'production';
+  const envOrigins = process.env.FRONTEND_URL
+    ? process.env.FRONTEND_URL.split(',').map((url) => url.trim()).filter(Boolean)
+    : [];
+  const defaultOrigins = [
+    'http://localhost:3000',
+    'http://localhost:3001',
+    'http://localhost:3002',
+    'http://localhost:3015',
+    'http://localhost:3019',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:3001',
+    'http://127.0.0.1:3002',
+    'http://127.0.0.1:3015',
+    'https://cursor-greenco-mern.vercel.app',
+  ];
+  const allowedOrigins = envOrigins.length > 0 ? envOrigins : defaultOrigins;
+  const localhostOriginOk = (o: string) =>
+    /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(o);
+
+  /**
+   * First middleware on the stack: CORS + OPTIONS preflight.
+   * Runs before Nest’s router and before JSON parsers (bodyParser: false + our parsers below).
+   */
+  app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const origin = req.headers.origin as string | undefined;
+    const allowed = corsAllowedOrigin(origin, isProduction, allowedOrigins, localhostOriginOk);
+
+    if (allowed) {
+      res.setHeader('Access-Control-Allow-Origin', allowed);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader('Vary', 'Origin');
+      const reqHdr = req.headers['access-control-request-headers'];
+      res.setHeader(
+        'Access-Control-Allow-Headers',
+        typeof reqHdr === 'string' && reqHdr.trim() !== ''
+          ? reqHdr
+          : 'Content-Type, Authorization, Accept, X-Requested-With, Origin, Cache-Control, Pragma',
+      );
+      res.setHeader(
+        'Access-Control-Allow-Methods',
+        'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS',
+      );
+      res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+      res.setHeader('Access-Control-Max-Age', '86400');
+    }
+
+    if (req.method === 'OPTIONS') {
+      res.status(204).end();
+      return;
+    }
+    next();
   });
 
   // Manually add JSON and URL-encoded body parsers, but skip multipart/form-data
-  // This allows Multer to handle multipart/form-data without interference
   app.use((req, res, next) => {
-    const contentType = req.headers['content-type'] || '';
-    if (contentType.includes('multipart/form-data')) {
-      // Skip body parsing for multipart requests - let Multer handle it
+    if (req.method === 'OPTIONS') {
       return next();
     }
-    // For other content types, use JSON parser
+    const contentType = req.headers['content-type'] || '';
+    if (contentType.includes('multipart/form-data')) {
+      return next();
+    }
     return express.json()(req, res, next);
   });
-  
+
   app.use((req, res, next) => {
-    const contentType = req.headers['content-type'] || '';
-    if (contentType.includes('multipart/form-data')) {
-      // Skip body parsing for multipart requests - let Multer handle it
+    if (req.method === 'OPTIONS') {
       return next();
     }
-    // For URL-encoded requests, use URL-encoded parser
+    const contentType = req.headers['content-type'] || '';
+    if (contentType.includes('multipart/form-data')) {
+      return next();
+    }
     return express.urlencoded({ extended: true })(req, res, next);
   });
 
-  // Response time logging (skip static and health)
   app.use((req, res, next) => {
     const start = Date.now();
     const url = req.originalUrl || req.url;
@@ -48,61 +115,12 @@ async function bootstrap() {
     next();
   });
 
-  // Serve static files from uploads directory
   app.useStaticAssets(join(__dirname, '..', 'uploads'), {
     prefix: '/uploads/',
   });
 
-  // CORS: in development allow all origins to avoid "network error"; in production use allowlist
-  const isProduction = process.env.NODE_ENV === 'production';
-  const envOrigins = process.env.FRONTEND_URL
-    ? process.env.FRONTEND_URL.split(',').map((url) => url.trim())
-    : [];
-  const defaultOrigins = [
-    'http://localhost:3000',
-    'http://localhost:3002',
-    'http://localhost:3001',
-    'http://127.0.0.1:3000',
-    'http://127.0.0.1:3001',
-    'http://127.0.0.1:3002',
-    'https://cursor-greenco-mern.vercel.app',
-  ];
-  const allowedOrigins = envOrigins.length > 0 ? envOrigins : defaultOrigins;
-
-  app.enableCors({
-    origin: (origin, callback) => {
-      if (!origin) return callback(null, true);
-      // In development: allow every origin to rule out CORS as cause of network error
-      if (!isProduction) return callback(null, true);
-      if (allowedOrigins.includes(origin)) return callback(null, true);
-      if (origin.startsWith('http://localhost:') || origin.startsWith('https://localhost:')) return callback(null, true);
-      if (origin.startsWith('http://127.0.0.1:') || origin.startsWith('https://127.0.0.1:')) return callback(null, true);
-      callback(null, false);
-    },
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'X-Requested-With'],
-    optionsSuccessStatus: 200,
-  });
-
-  // Ensure OPTIONS (preflight) never returns 404: handle it early so browser gets 200 and sends the real request.
-  app.use((req, res, next) => {
-    if (req.method === 'OPTIONS') {
-      const origin = req.headers.origin || '*';
-      res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, X-Requested-With');
-      res.setHeader('Access-Control-Allow-Credentials', 'true');
-      res.status(200).end();
-      return;
-    }
-    next();
-  });
-
-  // Global exception filter to format all errors consistently
   app.useGlobalFilters(new HttpExceptionFilter());
 
-  // Global validation pipe
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
@@ -114,7 +132,6 @@ async function bootstrap() {
     }),
   );
 
-  // Swagger docs
   const swaggerConfig = new DocumentBuilder()
     .setTitle('Green Co API')
     .setDescription('Green Co backend API documentation')
@@ -124,14 +141,14 @@ async function bootstrap() {
   const swaggerDocument = SwaggerModule.createDocument(app, swaggerConfig);
   SwaggerModule.setup('api/docs', app, swaggerDocument);
 
-  // Set timeout for requests (30 seconds)
   const server = app.getHttpServer();
   server.timeout = 30000;
   server.keepAliveTimeout = 30000;
 
-  const port = process.env.PORT || 3001;
+  const port = process.env.PORT || 3019;
   await app.listen(port, '0.0.0.0');
-  console.log(`Application is running on: http://localhost:${port} (and on 0.0.0.0 for network access)`);
+  console.log(
+    `[API] Listening on http://localhost:${port} | CORS: ${isProduction ? 'allowlist' : 'any Origin (dev)'}`,
+  );
 }
 bootstrap();
-
