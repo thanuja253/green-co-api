@@ -41,6 +41,8 @@ import { UpdateAssessmentSubmittalDto } from './dto/update-assessment-submittal.
 import { ScoreBandStatusDto } from './dto/score-band-status.dto';
 import { AdminJwtAuthGuard } from '../../admin/admin-auth/guards/admin-jwt-auth.guard';
 import { UpdateQuickviewDataDto } from './dto/update-quickview-data.dto';
+import { ReviewProposalDto } from './dto/review-proposal.dto';
+import { UpdateProposalStatusDto } from './dto/update-proposal-status.dto';
 import { mergeNestedRegistrationBody } from './registration-info-normalize';
 
 @Controller('api/company/projects')
@@ -650,6 +652,7 @@ export class CompanyProjectsController {
 
     // Flatten nested JSON shapes: { payload: {...} }, { registration_info: {...} }, { data: {...} }
     cleanedBody = mergeNestedRegistrationBody(cleanedBody);
+    this.validateRegistrationInfoPayload(cleanedBody);
 
     // Convert to DTO
     const dto = cleanedBody as RegistrationInfoDto;
@@ -673,6 +676,147 @@ export class CompanyProjectsController {
     });
 
     return result;
+  }
+
+  private pickFirst(body: Record<string, any>, keys: string[]): any {
+    for (const k of keys) {
+      if (Object.prototype.hasOwnProperty.call(body, k) && body[k] !== undefined && body[k] !== null) {
+        return body[k];
+      }
+    }
+    return undefined;
+  }
+
+  private toCleanString(v: any): string {
+    if (v === undefined || v === null) return '';
+    return String(v).trim();
+  }
+
+  private validateRegistrationInfoPayload(body: Record<string, any>): void {
+    const errors: Record<string, string[]> = {};
+    const addErr = (field: string, msg: string) => {
+      if (!errors[field]) errors[field] = [];
+      errors[field].push(msg);
+    };
+
+    const companyName = this.toCleanString(this.pickFirst(body, ['company_name', 'companyName', 'name']));
+    const email = this.toCleanString(this.pickFirst(body, ['email', 'company_email', 'companyEmail']));
+    const mobile = this.toCleanString(this.pickFirst(body, ['mobileno', 'mobile', 'company_mobile', 'companyMobile']));
+    const city = this.toCleanString(this.pickFirst(body, ['location', 'city']));
+    const state = this.toCleanString(this.pickFirst(body, ['state', 'state_id']));
+    const postalAddress = this.toCleanString(this.pickFirst(body, ['postaladdress', 'plant_address']));
+    const postalPincode = this.toCleanString(this.pickFirst(body, ['postal_address_pincode', 'plant_pincode']));
+    const billingAddress = this.toCleanString(this.pickFirst(body, ['billingaddress', 'billing_address']));
+    const billingPincode = this.toCleanString(this.pickFirst(body, ['billing_address_pincode', 'billing_pincode']));
+    const plantEmail = this.toCleanString(this.pickFirst(body, ['plant_email', 'plant_head_email']));
+    const plantContact = this.toCleanString(this.pickFirst(body, ['plant_contact_no', 'plant_head_mobile']));
+    const industry = this.toCleanString(this.pickFirst(body, ['industry', 'industry_id']));
+    const entity = this.toCleanString(this.pickFirst(body, ['entity', 'entity_id']));
+    const sector = this.toCleanString(this.pickFirst(body, ['sector', 'sector_id']));
+    const companyTypeSez = this.pickFirst(body, ['company_type_sez', 'is_sez', 'isSez']);
+    const latestTurnover = this.toCleanString(this.pickFirst(body, ['latestturnover', 'turnover']));
+    const electrical = this.toCleanString(this.pickFirst(body, ['electricalenergyconsumption']));
+    const thermal = this.toCleanString(this.pickFirst(body, ['thermalenergyconsumption']));
+    const water = this.toCleanString(this.pickFirst(body, ['waterconsumption']));
+    const tanNo = this.toCleanString(this.pickFirst(body, ['tanno', 'tan_no']));
+    const panNo = this.toCleanString(this.pickFirst(body, ['panno', 'pan_no', 'pan_number']));
+    const gstinNo = this.toCleanString(this.pickFirst(body, ['gstinno', 'gstin_no', 'gstin']));
+    const declaration = this.pickFirst(body, ['inlineCheckbox', 'declaration', 'is_declaration_accepted']);
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const indianMobileRegex = /^[6-9][0-9]{9}$/;
+    const cityRegex = /^[A-Za-z ]+$/;
+    const indianPincodeRegex = /^[1-9][0-9]{5}$/;
+    const decimalTwoRegex = /^\d+(\.\d{1,2})?$/;
+    const tanRegex = /^[A-Z]{4}[0-9]{5}[A-Z]$/;
+    const panRegex = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
+    const gstRegex = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
+    const hasDoubleSpaces = (s: string) => /\s{2,}/.test(s);
+
+    if (!companyName) addErr('company_name', 'Company name is required');
+    else {
+      if (companyName.length < 3 || companyName.length > 50) addErr('company_name', 'Company name must be between 3 and 50 characters');
+      if (hasDoubleSpaces(companyName)) addErr('company_name', 'Company name cannot contain multiple consecutive spaces');
+    }
+
+    if (!email) addErr('email', 'Email is required');
+    else if (!emailRegex.test(email)) addErr('email', 'Email format is invalid');
+
+    if (!mobile) addErr('mobileno', 'Mobile number is required');
+    else if (!indianMobileRegex.test(mobile)) addErr('mobileno', 'Mobile number must be a valid 10-digit Indian number');
+
+    if (!city) addErr('location', 'City is required');
+    else {
+      if (city.length < 3 || city.length > 50) addErr('location', 'City must be between 3 and 50 characters');
+      if (!cityRegex.test(city)) addErr('location', 'City can contain only letters and spaces');
+      if (hasDoubleSpaces(city)) addErr('location', 'City cannot contain multiple consecutive spaces');
+    }
+
+    if (!state) addErr('state', 'State is required');
+
+    if (!postalAddress) addErr('postaladdress', 'Postal address is required');
+    else if (postalAddress.length < 10 || postalAddress.length > 150) addErr('postaladdress', 'Postal address must be between 10 and 150 characters');
+
+    if (!postalPincode) addErr('postal_address_pincode', 'Postal address pincode is required');
+    else if (!indianPincodeRegex.test(postalPincode)) addErr('postal_address_pincode', 'Postal address pincode must be a valid 6-digit Indian pincode');
+
+    if (!billingAddress) addErr('billingaddress', 'Billing address is required');
+    else if (billingAddress.length < 10 || billingAddress.length > 150) addErr('billingaddress', 'Billing address must be between 10 and 150 characters');
+
+    if (!billingPincode) addErr('billing_address_pincode', 'Billing address pincode is required');
+    else if (!indianPincodeRegex.test(billingPincode)) addErr('billing_address_pincode', 'Billing address pincode must be a valid 6-digit Indian pincode');
+
+    if (!plantEmail) addErr('plant_email', 'Plant email is required');
+    else if (!emailRegex.test(plantEmail)) addErr('plant_email', 'Plant email format is invalid');
+
+    if (!plantContact) addErr('plant_contact_no', 'Plant contact number is required');
+    else if (!indianMobileRegex.test(plantContact)) addErr('plant_contact_no', 'Plant contact number must be a valid 10-digit Indian number');
+
+    if (!industry) addErr('industry', 'Industry is required');
+    if (!entity) addErr('entity', 'Entity is required');
+    if (!sector) addErr('sector', 'Sector is required');
+
+    if (companyTypeSez === undefined || companyTypeSez === null || String(companyTypeSez).trim() === '') {
+      addErr('company_type_sez', 'Company type SEZ is required');
+    }
+
+    if (!latestTurnover) addErr('latestturnover', 'Latest turnover is required');
+    else if (!decimalTwoRegex.test(latestTurnover)) addErr('latestturnover', 'Latest turnover must be a valid number with up to 2 decimal places');
+
+    if (!electrical) addErr('electricalenergyconsumption', 'Electrical energy consumption is required');
+    else if (!decimalTwoRegex.test(electrical)) addErr('electricalenergyconsumption', 'Electrical energy consumption must be a valid number with up to 2 decimal places');
+
+    if (!thermal) addErr('thermalenergyconsumption', 'Thermal energy consumption is required');
+    else if (!decimalTwoRegex.test(thermal)) addErr('thermalenergyconsumption', 'Thermal energy consumption must be a valid number with up to 2 decimal places');
+
+    if (!water) addErr('waterconsumption', 'Water consumption is required');
+    else if (!decimalTwoRegex.test(water)) addErr('waterconsumption', 'Water consumption must be a valid number with up to 2 decimal places');
+
+    if (!tanNo) addErr('tanno', 'TAN number is required');
+    else if (!tanRegex.test(tanNo.toUpperCase())) addErr('tanno', 'TAN number format is invalid');
+
+    if (!panNo) addErr('panno', 'PAN number is required');
+    else if (!panRegex.test(panNo.toUpperCase())) addErr('panno', 'PAN number format is invalid');
+
+    if (!gstinNo) addErr('gstinno', 'GSTIN number is required');
+    else if (!gstRegex.test(gstinNo.toUpperCase())) addErr('gstinno', 'GSTIN number format is invalid');
+
+    const declarationAccepted =
+      declaration === true ||
+      declaration === 1 ||
+      declaration === '1' ||
+      String(declaration).toLowerCase() === 'true' ||
+      String(declaration).toLowerCase() === 'on' ||
+      String(declaration).toLowerCase() === 'yes';
+    if (!declarationAccepted) addErr('inlineCheckbox', 'Declaration is required');
+
+    if (Object.keys(errors).length > 0) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Validation failed',
+        errors,
+      });
+    }
   }
 
   @Get(':projectId/registration-info')
@@ -782,7 +926,7 @@ export class CompanyProjectsController {
    * POST /api/company/projects/:projectId/proposal-document
    */
   @Post(':projectId/proposal-document')
-  @UseGuards(JwtAuthGuard, AccountStatusGuard)
+  @UseGuards(AdminJwtAuthGuard)
   @UseInterceptors(
     FileInterceptor('proposal_document', {
       storage: diskStorage({
@@ -822,7 +966,6 @@ export class CompanyProjectsController {
     }),
   )
   async uploadProposalDocument(
-    @Request() req,
     @Param('projectId') projectId: string,
     @UploadedFile() file: Express.Multer.File,
   ): Promise<any> {
@@ -839,10 +982,108 @@ export class CompanyProjectsController {
       size: file.size,
     });
 
-    return this.companyProjectsService.uploadProposalDocument(
+    return this.companyProjectsService.uploadProposalDocumentForAdmin(projectId, file);
+  }
+
+  /**
+   * Upload Proposal Document (Admin upload responsibility).
+   * POST /api/company/projects/:projectId/admin/proposal-document
+   */
+  @Post(':projectId/admin/proposal-document')
+  @UseGuards(AdminJwtAuthGuard)
+  @UseInterceptors(
+    FileInterceptor('proposal_document', {
+      storage: diskStorage({
+        destination: (req, file, cb) => {
+          const projectId = req.params.projectId;
+          const uploadPath = join(process.cwd(), 'uploads', 'company', projectId);
+          if (!fs.existsSync(uploadPath)) {
+            fs.mkdirSync(uploadPath, { recursive: true });
+          }
+          cb(null, uploadPath);
+        },
+        filename: (req, file, cb) => {
+          const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+          const ext = extname(file.originalname);
+          cb(null, `proposal-${uniqueSuffix}${ext}`);
+        },
+      }),
+      limits: { fileSize: 10 * 1024 * 1024 },
+      fileFilter: (req, file, cb) => {
+        const allowedMimes = [
+          'application/pdf',
+          'application/msword',
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        ];
+        if (allowedMimes.includes(file.mimetype)) cb(null, true);
+        else cb(new Error('Invalid file type. Only PDF, DOC, DOCX are allowed.'), false);
+      },
+    }),
+  )
+  async uploadProposalDocumentAsAdmin(
+    @Param('projectId') projectId: string,
+    @UploadedFile() file: Express.Multer.File,
+  ): Promise<any> {
+    if (!file) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'No file uploaded',
+      });
+    }
+    return this.companyProjectsService.uploadProposalDocumentForAdmin(projectId, file);
+  }
+
+  /**
+   * Company accepts/rejects proposal document.
+   * POST /api/company/projects/:projectId/proposal/approval
+   */
+  @Post(':projectId/proposal/approval')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  async reviewProposalDocument(
+    @Request() req,
+    @Param('projectId') projectId: string,
+    @Body() dto: ReviewProposalDto,
+  ): Promise<any> {
+    if (dto.proposal_status === 2 && !dto.proposal_remarks) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Remarks are required when rejecting proposal',
+      });
+    }
+    return this.companyProjectsService.reviewProposalDocument(
       req.user.userId,
       projectId,
-      file,
+      dto,
+    );
+  }
+
+  /**
+   * Company updates proposal decision with string status.
+   * PATCH /api/company/projects/:projectId/proposal-document/status
+   * Body: { status: "accepted" | "rejected", remarks?: string }
+   */
+  @Patch(':projectId/proposal-document/status')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  async updateProposalStatus(
+    @Request() req,
+    @Param('projectId') projectId: string,
+    @Body() dto: UpdateProposalStatusDto,
+  ): Promise<any> {
+    if (dto.status === 'rejected' && !dto.remarks) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Remarks are required when rejecting proposal',
+      });
+    }
+    return this.companyProjectsService.reviewProposalDocument(
+      req.user.userId,
+      projectId,
+      {
+        proposal_status: dto.status === 'accepted' ? 1 : 2,
+        proposal_remarks: dto.remarks,
+      },
     );
   }
 
@@ -1584,6 +1825,22 @@ export class CompanyProjectsController {
       req.user.userId,
       projectId,
       file,
+    );
+  }
+
+  /**
+   * Get latest Work Order document metadata.
+   * GET /api/company/projects/:projectId/work-order-document
+   */
+  @Get(':projectId/work-order-document')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
+  async getWorkOrderDocument(
+    @Request() req,
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.getWorkOrderDocument(
+      req.user.userId,
+      projectId,
     );
   }
 

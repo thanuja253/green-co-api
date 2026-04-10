@@ -71,6 +71,15 @@ export class CompanyProject {
   @Prop()
   proposal_document?: string;
 
+  @Prop({ default: 0 }) // 0 = Pending, 1 = Accepted, 2 = Rejected
+  proposal_status?: number;
+
+  @Prop()
+  proposal_remarks?: string;
+
+  @Prop()
+  proposal_status_updated_at?: Date;
+
   @Prop()
   launch_training_document?: string;
 

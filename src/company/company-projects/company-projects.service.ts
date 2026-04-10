@@ -32,7 +32,7 @@ import { SubmitPaymentDto } from './dto/submit-payment.dto';
 import { UpdateInvoiceApprovalDto } from './dto/update-invoice-approval.dto';
 import { UpdateQuickviewDataDto } from './dto/update-quickview-data.dto';
 import { CompleteMilestoneDto } from './dto/complete-milestone.dto';
-import { join } from 'path';
+import { join, extname } from 'path';
 import * as fs from 'fs';
 import { getCertificationType } from '../../helpers/certification.helper';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -82,6 +82,11 @@ export const INVOICE_APPROVAL_STATUS_COLORS = ['warning', 'success', 'danger', '
 
 @Injectable()
 export class CompanyProjectsService {
+  private mapProposalStatusLabel(status: number | null | undefined): string {
+    if (status === 1) return 'accepted_by_company';
+    if (status === 2) return 'rejected_by_company';
+    return 'pending';
+  }
   constructor(
     @InjectModel(CompanyProject.name)
     private readonly projectModel: Model<CompanyProjectDocument>,
@@ -1545,13 +1550,46 @@ export class CompanyProjectsService {
     let nextStepDisplayResponsibility = isAtCloseOutNoRecertify
       ? 'CII'
       : nextActivityInfo.responsibility;
-
+    const proposalStatus = Number((project as any).proposal_status ?? 0);
+    const isProposalPendingCompanyDecision =
+      hasProposalDocument &&
+      proposalStatus === 0 &&
+      effectiveNextId <= 3 &&
+      !isRecertifiedAndAtCloseOut &&
+      !isAtCloseOutNoRecertify;
+    if (isProposalPendingCompanyDecision) {
+      nextStepDisplayName = 'Company will Accept/Reject Proposal Document';
+      nextStepDisplayResponsibility = 'Company';
+    }
     let latestStepDisplayName =
       latestCompletedMilestoneNumber > 0 ? latestResolved.name : null;
     let latestStepDisplayResponsibility =
       latestResolved.responsibility ||
       milestoneResponsibilityMap[latestCompletedMilestoneNumber] ||
       'Company';
+    const isProposalAcceptedByCompany =
+      hasProposalDocument &&
+      proposalStatus === 1 &&
+      !isRecertifiedAndAtCloseOut &&
+      !isAtCloseOutNoRecertify;
+    if (isProposalAcceptedByCompany) {
+      // Keep quickview aligned with proposal decision flow shown to the company.
+      latestStepDisplayName = 'Company Accepted Proposal Document';
+      latestStepDisplayResponsibility = 'Company';
+      nextStepDisplayName = 'Company Will Upload Work order';
+      nextStepDisplayResponsibility = 'Company';
+    }
+    const isProposalRejectedByCompany =
+      hasProposalDocument &&
+      proposalStatus === 2 &&
+      !isRecertifiedAndAtCloseOut &&
+      !isAtCloseOutNoRecertify;
+    if (isProposalRejectedByCompany) {
+      latestStepDisplayName = 'Company Rejected Proposal Document';
+      latestStepDisplayResponsibility = 'Company';
+      nextStepDisplayName = 'CII will Upload Proposal Document';
+      nextStepDisplayResponsibility = 'CII';
+    }
 
     // Build profile object
     const profile = {
@@ -1576,6 +1614,8 @@ export class CompanyProjectsService {
           ? project.proposal_document
           : `${baseUrl}/${project.proposal_document}`
         : null,
+      proposal_status: (project as any).proposal_status ?? 0,
+      proposal_remarks: (project as any).proposal_remarks ?? null,
       feedback_document: project.feedback_document_url
         ? project.feedback_document_url.startsWith('http')
           ? project.feedback_document_url
@@ -1779,6 +1819,16 @@ export class CompanyProjectsService {
   }
 
   /**
+   * Admin upload entrypoint for proposal document.
+   * Accepts project _id or company _id and resolves to the target project.
+   */
+  async uploadProposalDocumentForAdmin(projectIdOrCompanyId: string, file: Express.Multer.File) {
+    const { companyId, resolvedProjectId } =
+      await this.resolveRegistrationIdsForAdminParam(projectIdOrCompanyId);
+    return this.uploadProposalDocument(companyId, resolvedProjectId, file);
+  }
+
+  /**
    * Full quickview payload without company JWT — same milestone logic as {@link getQuickviewData}.
    * `:projectId` may be a project _id or company _id (admin companies list id).
    */
@@ -1837,8 +1887,11 @@ export class CompanyProjectsService {
     const relativePath = `uploads/company/${projectId}/${file.filename}`;
     const fullUrl = `${baseUrl}/${relativePath}`;
 
-    // Save proposal document path
+    // Save proposal document path (pending company approval)
     project.proposal_document = fullUrl;
+    (project as any).proposal_status = 0;
+    (project as any).proposal_remarks = null;
+    (project as any).proposal_status_updated_at = new Date();
     await project.save();
 
     // Generate company registration ID if not exists (similar to Laravel flow)
@@ -1851,17 +1904,14 @@ export class CompanyProjectsService {
       console.log('[Proposal Document] Generated reg_id:', regId);
     }
 
-    // LOG ACTIVITY 3: CII Uploaded Proposal Document
-    // Proposal upload is milestone 3 in the main flow.
-    const flow = 3;
-    
+    // LOG ACTIVITY 3 upload event (pending until company accepts).
     await this.companyActivityModel.create({
       company_id: companyId,
       project_id: projectId,
       description: 'CII Uploaded Proposal Document',
       activity_type: 'cii',
       milestone_flow: 3,
-      milestone_completed: true,
+      milestone_completed: false,
     });
 
     // Create notification - send to correct recipient based on process_type
@@ -1903,8 +1953,11 @@ export class CompanyProjectsService {
         );
     }
 
-    // Update next_activities_id to 4 (Company Will Upload Work order)
-    project.next_activities_id = 4;
+    // Keep workflow at step 3 until company accepts proposal.
+    const currentNext = typeof (project as any).next_activities_id === 'number'
+      ? Number((project as any).next_activities_id)
+      : 0;
+    (project as any).next_activities_id = Math.min(24, Math.max(3, currentNext));
     await project.save();
 
     console.log('[Proposal Document] Uploaded successfully:', {
@@ -1920,7 +1973,101 @@ export class CompanyProjectsService {
         document_url: fullUrl,
         document_filename: file.originalname,
         project_id: projectId,
+        proposal_status: (project as any).proposal_status ?? 0,
+        proposal_status_label: this.mapProposalStatusLabel((project as any).proposal_status ?? 0),
+        proposal_remarks: (project as any).proposal_remarks ?? null,
         next_activities_id: project.next_activities_id,
+      },
+    };
+  }
+
+  /**
+   * Company accepts/rejects proposal uploaded by CII/admin.
+   */
+  async reviewProposalDocument(
+    companyId: string,
+    projectId: string,
+    dto: { proposal_status: number; proposal_remarks?: string },
+  ) {
+    const project = await this.projectModel.findOne({
+      _id: projectId,
+      company_id: companyId,
+    });
+
+    if (!project) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Project not found',
+      });
+    }
+
+    if (!(project as any).proposal_document) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Proposal document not uploaded yet',
+      });
+    }
+
+    (project as any).proposal_status = dto.proposal_status;
+    (project as any).proposal_remarks =
+      dto.proposal_status === 2 ? (dto.proposal_remarks || null) : null;
+    (project as any).proposal_status_updated_at = new Date();
+
+    if (dto.proposal_status === 1) {
+      const currentNext = typeof (project as any).next_activities_id === 'number'
+        ? Number((project as any).next_activities_id)
+        : 0;
+      if (currentNext < 4) {
+        (project as any).next_activities_id = 4;
+      }
+    } else {
+      (project as any).next_activities_id = 3;
+    }
+    await project.save();
+
+    await this.companyActivityModel.create({
+      company_id: companyId,
+      project_id: projectId,
+      description:
+        dto.proposal_status === 1
+          ? 'Company Accepted Proposal Document'
+          : 'Company Rejected Proposal Document',
+      activity_type: 'company',
+      milestone_flow: 3,
+      milestone_completed: dto.proposal_status === 1,
+    });
+
+    // In-app notifications
+    this.notificationsService
+      .create(
+        dto.proposal_status === 1 ? 'Proposal accepted' : 'Proposal rejected',
+        dto.proposal_status === 1
+          ? `You accepted the proposal for project ${project.project_id || projectId}. You can now upload work order.`
+          : `You rejected the proposal.${dto.proposal_remarks ? ` Remarks: ${dto.proposal_remarks}` : ''}`,
+        'C',
+        companyId,
+      )
+      .catch((e) => console.error('[Proposal Review] Company notification failed:', e?.message || e));
+    this.notificationsService
+      .create(
+        dto.proposal_status === 1 ? 'Proposal accepted by company' : 'Proposal rejected by company',
+        `Company ${dto.proposal_status === 1 ? 'accepted' : 'rejected'} the proposal for project ${project.project_id || projectId}.${dto.proposal_status === 2 && dto.proposal_remarks ? ` Remarks: ${dto.proposal_remarks}` : ''}`,
+        'A',
+        null,
+      )
+      .catch((e) => console.error('[Proposal Review] Admin notification failed:', e?.message || e));
+
+    return {
+      status: 'success',
+      message:
+        dto.proposal_status === 1
+          ? 'Proposal Document accepted successfully'
+          : 'Proposal Document rejected',
+      data: {
+        proposal_status: dto.proposal_status,
+        proposal_status_label: this.mapProposalStatusLabel(dto.proposal_status),
+        proposal_remarks: dto.proposal_status === 2 ? dto.proposal_remarks || null : null,
+        next_activities_id: (project as any).next_activities_id,
       },
     };
   }
@@ -1948,6 +2095,8 @@ export class CompanyProjectsService {
         data: {
           has_document: false,
           document_url: null,
+          proposal_status: 'not_uploaded',
+          proposal_status_label: 'not_uploaded',
         },
       };
     }
@@ -1959,6 +2108,12 @@ export class CompanyProjectsService {
         has_document: true,
         document_url: project.proposal_document,
         document_filename: project.proposal_document.split('/').pop() || 'proposal.pdf',
+        proposal_status: (project as any).proposal_status ?? 0,
+        proposal_status_label: this.mapProposalStatusLabel((project as any).proposal_status ?? 0),
+        proposal_remarks: (project as any).proposal_remarks ?? null,
+        proposal_status_updated_at: (project as any).proposal_status_updated_at
+          ? new Date((project as any).proposal_status_updated_at).toISOString()
+          : null,
       },
     };
   }
@@ -2216,6 +2371,11 @@ export class CompanyProjectsService {
         document_filename: fileName,
         filename: fileName,
         path: pathRaw,
+        proposal_status: projectAny.proposal_status ?? 0,
+        proposal_remarks: projectAny.proposal_remarks ?? null,
+        proposal_status_updated_at: projectAny.proposal_status_updated_at
+          ? new Date(projectAny.proposal_status_updated_at).toISOString()
+          : null,
         uploaded_at:
           projectAny.updatedAt?.toISOString?.() ??
           projectAny.createdAt?.toISOString?.() ??
@@ -2228,6 +2388,9 @@ export class CompanyProjectsService {
         document_filename: null,
         filename: null,
         path: null,
+        proposal_status: 0,
+        proposal_remarks: null,
+        proposal_status_updated_at: null,
       };
     }
 
@@ -2945,6 +3108,32 @@ export class CompanyProjectsService {
       });
     }
 
+    // Backend hard guard: accept only PDF even if client bypasses multipart filter.
+    const fileExt = extname(file?.originalname || '').toLowerCase();
+    const isPdfMime = file?.mimetype === 'application/pdf';
+    const isPdfExt = fileExt === '.pdf';
+    if (!isPdfMime || !isPdfExt) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Invalid file type. Only PDF files are allowed.',
+      });
+    }
+
+    const proposalStatus = Number((project as any).proposal_status ?? 0);
+    const hasProposalDoc = !!(project as any).proposal_document;
+    const isLegacyAccepted =
+      hasProposalDoc &&
+      ((project as any).proposal_status === undefined || (project as any).proposal_status === null) &&
+      Number((project as any).next_activities_id || 0) >= 4;
+    const isProposalAccepted = proposalStatus === 1 || isLegacyAccepted;
+    if (!isProposalAccepted) {
+      throw new BadRequestException({
+        status: 'error',
+        message:
+          'Work order upload is allowed only after proposal is accepted by company.',
+      });
+    }
+
     // Check if work order already exists (for re-upload case)
     const existingWorkOrder = await this.companyWorkOrderModel
       .findOne({
@@ -3036,6 +3225,71 @@ export class CompanyProjectsService {
         project_id: projectId,
         wo_status: 0, // Under Review
         next_activities_id: project.next_activities_id,
+      },
+    };
+  }
+
+  /**
+   * Get latest Work Order document metadata for project.
+   */
+  async getWorkOrderDocument(companyId: string, projectId: string) {
+    const project = await this.projectModel.findOne({
+      _id: projectId,
+      company_id: companyId,
+    });
+
+    if (!project) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Project not found',
+      });
+    }
+
+    const workOrder = await this.companyWorkOrderModel
+      .findOne({
+        company_id: companyId,
+        project_id: projectId,
+      })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    if (!workOrder || !(workOrder as any).wo_doc) {
+      return {
+        status: 'success',
+        message: 'Work order document not uploaded yet',
+        data: {
+          has_document: false,
+          document_url: null,
+          document_filename: null,
+          wo_status: null,
+          wo_remarks: null,
+          wo_doc_status_updated_at: null,
+        },
+      };
+    }
+
+    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3019';
+    const rawPath = String((workOrder as any).wo_doc).trim();
+    const normalizedPath = rawPath.replace(/^\//, '');
+    const absUrl = normalizedPath.startsWith('http')
+      ? normalizedPath
+      : `${baseUrl}/${normalizedPath}`;
+    const filename = normalizedPath.split('/').pop() || 'work-order.pdf';
+
+    return {
+      status: 'success',
+      message: 'Work order document retrieved successfully',
+      data: {
+        has_document: true,
+        document_url: absUrl,
+        document_filename: filename,
+        wo_status: (workOrder as any).wo_status ?? 0,
+        wo_remarks: (workOrder as any).wo_remarks || null,
+        wo_doc_status_updated_at: (workOrder as any).wo_doc_status_updated_at
+          ? new Date((workOrder as any).wo_doc_status_updated_at).toISOString()
+          : (workOrder as any).updatedAt
+            ? new Date((workOrder as any).updatedAt).toISOString()
+            : null,
       },
     };
   }
@@ -3293,6 +3547,8 @@ export class CompanyProjectsService {
       data: {
         profile_update: (project as any).profile_update || 0,
         proposal_document: project.proposal_document || null,
+        proposal_status: (project as any).proposal_status ?? 0,
+        proposal_remarks: (project as any).proposal_remarks ?? null,
         process_type: project.process_type || 'c',
         facilitator: !!facilitator,
         work_order: workOrder
