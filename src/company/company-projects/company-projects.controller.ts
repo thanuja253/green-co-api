@@ -341,16 +341,13 @@ export class CompanyProjectsController {
     );
   }
 
+  /**
+   * GET /api/company/projects/:projectId/quickview
+   * Open route (no JWT): param may be project _id or company _id — matches admin workflow-status / registration-data.
+   */
   @Get(':projectId/quickview')
-  @UseGuards(JwtAuthGuard, AccountStatusGuard)
-  async getQuickview(
-    @Request() req,
-    @Param('projectId') projectId: string,
-  ): Promise<any> {
-    return this.companyProjectsService.getQuickviewData(
-      req.user.userId,
-      projectId,
-    );
+  async getQuickview(@Param('projectId') projectId: string): Promise<any> {
+    return this.companyProjectsService.getQuickviewDataForAdmin(projectId);
   }
 
   /**

@@ -1011,6 +1011,10 @@ export class CompanyProjectsService {
     }
 
     const ownerCompanyId = String((project as any).company_id);
+    const previousNextActivitiesId =
+      typeof (project as any).next_activities_id === 'number'
+        ? Number((project as any).next_activities_id)
+        : 0;
     const company = await this.companyModel.findById(ownerCompanyId);
     if (!company) {
       throw new NotFoundException({
@@ -1057,6 +1061,23 @@ export class CompanyProjectsService {
 
     await company.save();
     await project.save();
+
+    const currentNextActivitiesId =
+      typeof (project as any).next_activities_id === 'number'
+        ? Number((project as any).next_activities_id)
+        : 0;
+    // If quickview patch advances the workflow pointer, emit completion notification
+    // for the newly completed step (next step N means step N-1 just completed).
+    if (currentNextActivitiesId > previousNextActivitiesId && currentNextActivitiesId > 1) {
+      const completedFlow = Math.min(24, currentNextActivitiesId - 1);
+      const actor: WorkflowActor = isAdmin ? 'cii' : 'company';
+      void this.notifyWorkflowStepCompleted(
+        ownerCompanyId,
+        project as any,
+        completedFlow,
+        actor,
+      );
+    }
 
     return {
       status: 'success',
@@ -1755,6 +1776,16 @@ export class CompanyProjectsService {
     const { companyId, resolvedProjectId } =
       await this.resolveRegistrationIdsForAdminParam(projectIdOrCompanyId);
     return this.getWorkflowStatus(companyId, resolvedProjectId);
+  }
+
+  /**
+   * Full quickview payload without company JWT — same milestone logic as {@link getQuickviewData}.
+   * `:projectId` may be a project _id or company _id (admin companies list id).
+   */
+  async getQuickviewDataForAdmin(projectIdOrCompanyId: string) {
+    const { companyId, resolvedProjectId } =
+      await this.resolveRegistrationIdsForAdminParam(projectIdOrCompanyId);
+    return this.getQuickviewData(companyId, resolvedProjectId);
   }
 
   private toWorkflowStatusPayload(full: { status: string; message: string; data: any }) {
