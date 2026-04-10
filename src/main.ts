@@ -5,10 +5,26 @@ import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { join } from 'path';
 import * as express from 'express';
+import { CORS_ALLOWED_HEADERS, getAllowedCorsOrigin } from './common/cors-allow.util';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     bodyParser: false, // Disable automatic body parsing to allow Multer to handle multipart/form-data
+  });
+
+  // CORS must run before other middleware so preflight and cross-port localhost work reliably.
+  app.enableCors({
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+      const allowed = getAllowedCorsOrigin(origin);
+      if (allowed) return callback(null, allowed);
+      callback(null, false);
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: CORS_ALLOWED_HEADERS,
+    exposedHeaders: ['Content-Disposition'],
+    optionsSuccessStatus: 200,
   });
 
   // Manually add JSON and URL-encoded body parsers, but skip multipart/form-data
@@ -72,48 +88,24 @@ async function bootstrap() {
     prefix: '/uploads/',
   });
 
-  // CORS: in development allow all origins to avoid "network error"; in production use allowlist
-  const isProduction = process.env.NODE_ENV === 'production';
-  const envOrigins = process.env.FRONTEND_URL
-    ? process.env.FRONTEND_URL.split(',').map((url) => url.trim())
-    : [];
-  const defaultOrigins = [
-    'http://localhost:3000',
-    'http://localhost:3002',
-    'http://localhost:3001',
-    'http://127.0.0.1:3000',
-    'http://127.0.0.1:3001',
-    'http://127.0.0.1:3002',
-    'https://cursor-greenco-mern.vercel.app',
-    'https://cursor-greenco-admin.mern.vercel.app',
-    'https://greenco-admin.mern.vercel.app',
-  ];
-  const allowedOrigins = envOrigins.length > 0 ? envOrigins : defaultOrigins;
-
-  app.enableCors({
-    origin: (origin, callback) => {
-      if (!origin) return callback(null, true);
-      // In development: allow every origin to rule out CORS as cause of network error
-      if (!isProduction) return callback(null, true);
-      if (allowedOrigins.includes(origin)) return callback(null, true);
-      if (/^https:\/\/[a-z0-9-]+\.vercel\.app$/i.test(origin)) return callback(null, true);
-      if (origin.startsWith('http://localhost:') || origin.startsWith('https://localhost:')) return callback(null, true);
-      if (origin.startsWith('http://127.0.0.1:') || origin.startsWith('https://127.0.0.1:')) return callback(null, true);
-      callback(null, false);
-    },
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-    allowedHeaders: '*',
-    optionsSuccessStatus: 200,
-  });
-
   // Ensure OPTIONS (preflight) never returns 404: handle it early so browser gets 200 and sends the real request.
   app.use((req, res, next) => {
     if (req.method === 'OPTIONS') {
-      const origin = req.headers.origin || 'http://localhost:3000';
-      const reqHeaders = req.headers['access-control-request-headers'] || 'Content-Type, Authorization, Accept, X-Requested-With';
+      const originStr =
+        typeof req.headers.origin === 'string' ? req.headers.origin : undefined;
+      const allowed = originStr ? getAllowedCorsOrigin(originStr) : false;
+      const corsOrigin = allowed || (!originStr ? 'http://localhost:3000' : false);
+      if (!corsOrigin) {
+        res.status(403).end();
+        return;
+      }
+      const requested = req.headers['access-control-request-headers'];
+      const reqHeaders =
+        typeof requested === 'string' && requested.trim()
+          ? requested
+          : CORS_ALLOWED_HEADERS;
       const reqMethod = req.headers['access-control-request-method'] || 'GET, POST, PUT, DELETE, PATCH, OPTIONS';
-      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Origin', corsOrigin);
       res.setHeader('Vary', 'Origin');
       res.setHeader('Access-Control-Allow-Methods', Array.isArray(reqMethod) ? reqMethod.join(', ') : reqMethod);
       res.setHeader('Access-Control-Allow-Headers', Array.isArray(reqHeaders) ? reqHeaders.join(', ') : reqHeaders);

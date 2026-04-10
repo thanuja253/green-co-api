@@ -1,10 +1,11 @@
-import { Body, Controller, Get, Param, Post, Put, Query, Req, Res, UploadedFiles, UseInterceptors, UsePipes, ValidationPipe } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Put, Query, Req, Res, UploadedFiles, UseGuards, UseInterceptors, UsePipes, ValidationPipe } from '@nestjs/common';
 import { FileFieldsInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { extname, join } from 'path';
 import * as fs from 'fs';
 import { Request, Response } from 'express';
 import { CompanyProjectsService } from './company-projects.service';
+import { AdminJwtAuthGuard } from '../company-auth/guards/admin-jwt-auth.guard';
 import { AdminAssignAssessorDto } from './dto/admin-assign-assessor.dto';
 import { AdminPaymentStatusDto } from './dto/admin-payment-status.dto';
 import { CreateAssessorDto } from './dto/create-assessor.dto';
@@ -12,10 +13,76 @@ import { CreateAssessorProfileDto } from './dto/create-assessor-profile.dto';
 import { ListAssessorsQueryDto } from './dto/list-assessors-query.dto';
 import { UpdateAssessorApprovalDto } from './dto/update-assessor-approval.dto';
 import { ReportsQueryDto } from './dto/reports-query.dto';
+import {
+  REGISTRATION_INFO_FILE_FIELDS,
+  createRegistrationInfoValidationPipe,
+  parseRegistrationMultipartBody,
+  registrationInfoMulterOptions,
+} from './registration-info-upload.config';
 
 @Controller()
 export class AdminCompanyFlowController {
   constructor(private readonly companyProjectsService: CompanyProjectsService) {}
+
+  @Get('api/admin/projects/:projectId/registration-data')
+  @Get('admin/projects/:projectId/registration-data')
+  async getProjectRegistrationDataForAdmin(
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.getRegistrationInfoForAdmin(projectId);
+  }
+
+  @Put('api/admin/projects/:projectId/registration-data')
+  @Patch('api/admin/projects/:projectId/registration-data')
+  @Put('admin/projects/:projectId/registration-data')
+  @Patch('admin/projects/:projectId/registration-data')
+  @UseInterceptors(
+    FileFieldsInterceptor(REGISTRATION_INFO_FILE_FIELDS, registrationInfoMulterOptions),
+  )
+  @UsePipes(createRegistrationInfoValidationPipe())
+  async updateProjectRegistrationDataForAdmin(
+    @Req() req: Request,
+    @Param('projectId') projectId: string,
+    @Body() body: any,
+    @UploadedFiles() files?: {
+      company_brief_profile?: Express.Multer.File[];
+      brief_profile?: Express.Multer.File[];
+      turnover_document?: Express.Multer.File[];
+      turnover?: Express.Multer.File[];
+    },
+  ): Promise<any> {
+    const reqFiles = (req as any).files;
+    const { dto, files: mergedFiles } = parseRegistrationMultipartBody(body, files, reqFiles);
+    return this.companyProjectsService.updateRegistrationInfoForAdmin(projectId, dto, mergedFiles);
+  }
+
+  @Get('api/admin/projects/:projectId/quickview')
+  @Get('admin/projects/:projectId/quickview')
+  async getQuickviewForAdmin(
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.getQuickviewDataForAdmin(projectId);
+  }
+
+  @Get('api/admin/projects/:projectId/workflow-status')
+  @Get('admin/projects/:projectId/workflow-status')
+  async getWorkflowStatusForAdmin(
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.getWorkflowStatusForAdmin(projectId);
+  }
+
+  @Patch('api/admin/projects/:projectId/quickview-data')
+  @Patch('admin/projects/:projectId/quickview-data')
+  async updateQuickviewDataForAdmin(
+    @Param('projectId') projectId: string,
+    @Body() payload: any,
+  ): Promise<any> {
+    return this.companyProjectsService.updateQuickviewDataForAdmin(
+      projectId,
+      payload,
+    );
+  }
 
   @Post('api/admin/assessors')
   @Post('admin/assessors')

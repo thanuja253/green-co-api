@@ -5,6 +5,7 @@ import {
   Param,
   Patch,
   Post,
+  Put,
   Request,
   Res,
   UseGuards,
@@ -23,10 +24,10 @@ import { extname } from 'path';
 import { CompanyProjectsService } from './company-projects.service';
 import { JwtAuthGuard } from '../company-auth/guards/jwt-auth.guard';
 import { AccountStatusGuard } from '../company-auth/guards/account-status.guard';
+import { AdminJwtAuthGuard } from '../company-auth/guards/admin-jwt-auth.guard';
 import { join } from 'path';
 import * as fs from 'fs';
 import { CompleteMilestoneDto } from './dto/complete-milestone.dto';
-import { RegistrationInfoDto } from './dto/registration-info.dto';
 import { ApproveWorkOrderDto } from './dto/approve-workorder.dto';
 import { CreateProjectCodeDto } from './dto/create-project-code.dto';
 import { AssignCoordinatorDto } from './dto/assign-coordinator.dto';
@@ -39,6 +40,12 @@ import { PrimaryDataStoreDto } from './dto/primary-data-store.dto';
 import { PrimaryDataFormApprovalDto } from './dto/primary-data-approval.dto';
 import { UpdateAssessmentSubmittalDto } from './dto/update-assessment-submittal.dto';
 import { ScoreBandStatusDto } from './dto/score-band-status.dto';
+import {
+  REGISTRATION_INFO_FILE_FIELDS,
+  createRegistrationInfoValidationPipe,
+  parseRegistrationMultipartBody,
+  registrationInfoMulterOptions,
+} from './registration-info-upload.config';
 
 @Controller('api/company/projects')
 export class CompanyProjectsController {
@@ -365,130 +372,18 @@ export class CompanyProjectsController {
     );
   }
 
+  /**
+   * Save (first submit) or update registration form — same fields and multipart file fields as creation.
+   * POST = first save (may advance milestone 2). PUT/PATCH = update only (same merge rules, no milestone side effects).
+   */
   @Post(':projectId/registration-info')
+  @Put(':projectId/registration-info')
+  @Patch(':projectId/registration-info')
   @UseGuards(JwtAuthGuard, AccountStatusGuard)
   @UseInterceptors(
-    FileFieldsInterceptor(
-      [
-        { name: 'company_brief_profile', maxCount: 1 },
-        { name: 'brief_profile', maxCount: 1 }, // Alternative field name
-        { name: 'turnover_document', maxCount: 1 },
-        { name: 'turnover', maxCount: 1 }, // Alternative field name
-      ],
-      {
-      storage: diskStorage({
-        destination: (req, file, cb) => {
-          console.log('[File Upload Interceptor] ====== INTERCEPTOR RUNNING ======');
-          console.log('[File Upload Interceptor] Destination callback called', {
-            contentType: req.headers['content-type'],
-            fieldname: file.fieldname,
-            originalname: file.originalname,
-            mimetype: file.mimetype,
-            size: file.size,
-          });
-          const projectId = req.params.projectId;
-          const uploadPath = join(process.cwd(), 'uploads', 'registration', projectId);
-          // Create directory if it doesn't exist
-          if (!fs.existsSync(uploadPath)) {
-            fs.mkdirSync(uploadPath, { recursive: true });
-            console.log(`[File Upload] Created directory: ${uploadPath}`);
-          }
-          console.log(`[File Upload] Saving file to: ${uploadPath}`, {
-            fieldname: file.fieldname,
-            originalname: file.originalname,
-          });
-          cb(null, uploadPath);
-        },
-        filename: (req, file, cb) => {
-          // Generate unique filename: fieldname-timestamp.extension
-          const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-          const ext = extname(file.originalname);
-          const fieldName = file.fieldname || 'file';
-          const filename = `${fieldName}-${uniqueSuffix}${ext}`;
-          console.log(`[File Upload] Generated filename: ${filename}`, {
-            originalname: file.originalname,
-            fieldname: file.fieldname,
-            extension: ext,
-          });
-          cb(null, filename);
-        },
-      }),
-      limits: {
-        fileSize: 10 * 1024 * 1024, // 10MB max file size
-      },
-      fileFilter: (req, file, cb) => {
-        console.log('[File Upload Filter] Checking file:', {
-          fieldname: file.fieldname,
-          originalname: file.originalname,
-          mimetype: file.mimetype,
-        });
-        
-        // Allow PDF, DOC, DOCX, images
-        const allowedMimes = [
-          'application/pdf',
-          'application/msword',
-          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-          'image/jpeg',
-          'image/png',
-          'image/jpg',
-        ];
-        
-        if (allowedMimes.includes(file.mimetype)) {
-          console.log('[File Upload Filter] File accepted:', file.originalname);
-          cb(null, true);
-        } else {
-          console.log('[File Upload Filter] File rejected - invalid type:', file.mimetype);
-          cb(new Error(`Invalid file type: ${file.mimetype}. Only PDF, DOC, DOCX, and images are allowed.`), false);
-        }
-      },
-    }),
+    FileFieldsInterceptor(REGISTRATION_INFO_FILE_FIELDS, registrationInfoMulterOptions),
   )
-  @UsePipes(
-    new ValidationPipe({
-      transform: true,
-      whitelist: true,
-      forbidNonWhitelisted: false, // CRITICAL: Allow extra fields (overrides global pipe)
-      skipMissingProperties: false,
-      transformOptions: {
-        enableImplicitConversion: true,
-      },
-      // Custom exception factory to ignore file field errors
-      exceptionFactory: (errors) => {
-        if (!errors || errors.length === 0) {
-          return null as any;
-        }
-        
-        // Filter out errors for file fields (they're handled separately via @UploadedFiles)
-        const filteredErrors = errors.filter(
-          (error) =>
-            error.property !== 'company_brief_profile' &&
-            error.property !== 'turnover_document' &&
-            error.property !== 'brief_profile' &&
-            error.property !== 'turnover',
-        );
-        
-        // If all errors are for file fields, ignore them completely
-        if (filteredErrors.length === 0) {
-          // Return a pass-through (no error) - file fields are handled separately
-          return null as any;
-        }
-        
-        // Return validation errors only for non-file fields
-        const formattedErrors: Record<string, string[]> = {};
-        filteredErrors.forEach((error) => {
-          if (error.constraints) {
-            formattedErrors[error.property] = Object.values(error.constraints);
-          }
-        });
-        
-        return new BadRequestException({
-          status: 'error',
-          message: 'Validation failed',
-          errors: formattedErrors,
-        });
-      },
-    }),
-  )
+  @UsePipes(createRegistrationInfoValidationPipe())
   async saveRegistrationInfo(
     @Request() req,
     @Param('projectId') projectId: string,
@@ -537,70 +432,22 @@ export class CompanyProjectsController {
       turnover: files?.turnover?.length || 0,
     });
     
-    // Also check req.files (Multer might put files there as fallback)
     const reqFiles = (req as any).files;
-    console.log('[Registration Info Controller] req.files (fallback):', reqFiles);
-    console.log('[Registration Info Controller] req.file (single file fallback):', (req as any).file);
-    
-    // If @UploadedFiles() is empty but req.files has data, use that instead
-    if ((!files || Object.keys(files).length === 0) && reqFiles && Object.keys(reqFiles).length > 0) {
-      console.log('[Registration Info Controller] Using req.files as fallback');
-      files = reqFiles;
-    }
-    
-    console.log('[Registration Info Controller] Final files to pass to service:', {
-      hasFiles: !!files,
-      filesKeys: files ? Object.keys(files) : [],
-    });
-
-    if (files) {
-      if (files.company_brief_profile?.[0]) {
-        console.log('[Registration Info] Company Brief Profile file:', {
-          filename: files.company_brief_profile[0].filename,
-          originalname: files.company_brief_profile[0].originalname,
-          size: files.company_brief_profile[0].size,
-          mimetype: files.company_brief_profile[0].mimetype,
-        });
-      }
-      if (files.turnover_document?.[0]) {
-        console.log('[Registration Info] Turnover Document file:', {
-          filename: files.turnover_document[0].filename,
-          originalname: files.turnover_document[0].originalname,
-          size: files.turnover_document[0].size,
-          mimetype: files.turnover_document[0].mimetype,
-        });
-      }
-    }
-
-    // Clean up body - remove empty file field objects
-    const cleanedBody = { ...body };
-    if (cleanedBody.company_brief_profile && typeof cleanedBody.company_brief_profile === 'object' && Object.keys(cleanedBody.company_brief_profile).length === 0) {
-      delete cleanedBody.company_brief_profile;
-    }
-    if (cleanedBody.turnover_document && typeof cleanedBody.turnover_document === 'object' && Object.keys(cleanedBody.turnover_document).length === 0) {
-      delete cleanedBody.turnover_document;
-    }
-    if (cleanedBody.brief_profile && typeof cleanedBody.brief_profile === 'object' && Object.keys(cleanedBody.brief_profile).length === 0) {
-      delete cleanedBody.brief_profile;
-    }
-    if (cleanedBody.turnover && typeof cleanedBody.turnover === 'object' && Object.keys(cleanedBody.turnover).length === 0) {
-      delete cleanedBody.turnover;
-    }
-
-    // Convert to DTO
-    const dto = cleanedBody as RegistrationInfoDto;
+    const { dto, files: mergedFiles } = parseRegistrationMultipartBody(body, files, reqFiles);
 
     console.log('[Registration Info Controller] Calling service with:', {
-      hasFiles: !!files,
-      filesKeys: files ? Object.keys(files) : [],
-      dtoKeys: Object.keys(dto).slice(0, 5), // First 5 keys
+      hasFiles: !!mergedFiles,
+      filesKeys: mergedFiles ? Object.keys(mergedFiles) : [],
+      dtoKeys: Object.keys(dto).slice(0, 5),
     });
 
+    const isUpdate = req.method === 'PUT' || req.method === 'PATCH';
     const result = await this.companyProjectsService.saveRegistrationInfo(
       req.user.userId,
       projectId,
       dto,
-      files,
+      mergedFiles,
+      isUpdate ? { isUpdate: true, skipMilestone: true } : undefined,
     );
 
     console.log('[Registration Info Controller] Service returned:', {
@@ -621,6 +468,43 @@ export class CompanyProjectsController {
       req.user.userId,
       projectId,
     );
+  }
+
+  /**
+   * Admin-safe alias to fetch registration info by project id.
+   * GET /api/company/projects/:projectId/admin/registration-data
+   */
+  @Get(':projectId/admin/registration-data')
+  async getRegistrationInfoForAdminAlias(
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.getRegistrationInfoForAdmin(projectId);
+  }
+
+  /**
+   * Admin: update registration form (same multipart fields as company POST).
+   * PUT/PATCH /api/company/projects/:projectId/admin/registration-data
+   */
+  @Put(':projectId/admin/registration-data')
+  @Patch(':projectId/admin/registration-data')
+  @UseInterceptors(
+    FileFieldsInterceptor(REGISTRATION_INFO_FILE_FIELDS, registrationInfoMulterOptions),
+  )
+  @UsePipes(createRegistrationInfoValidationPipe())
+  async updateRegistrationInfoForAdmin(
+    @Request() req,
+    @Param('projectId') projectId: string,
+    @Body() body: any,
+    @UploadedFiles() files?: {
+      company_brief_profile?: Express.Multer.File[];
+      brief_profile?: Express.Multer.File[];
+      turnover_document?: Express.Multer.File[];
+      turnover?: Express.Multer.File[];
+    },
+  ): Promise<any> {
+    const reqFiles = (req as any).files;
+    const { dto, files: mergedFiles } = parseRegistrationMultipartBody(body, files, reqFiles);
+    return this.companyProjectsService.updateRegistrationInfoForAdmin(projectId, dto, mergedFiles);
   }
 
   @Get(':projectId/registration-files/:fileType')

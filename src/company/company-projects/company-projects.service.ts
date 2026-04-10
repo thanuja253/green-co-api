@@ -1141,6 +1141,7 @@ export class CompanyProjectsService {
       turnover_document?: Express.Multer.File[];
       turnover?: Express.Multer.File[];
     },
+    options?: { isUpdate?: boolean; skipMilestone?: boolean },
   ) {
     if (!companyId || !projectId) {
       throw new BadRequestException({
@@ -1260,40 +1261,43 @@ export class CompanyProjectsService {
       throw new BadRequestException({ status: 'error', message });
     }
 
-    // Log activity: Company Filled Registration Info (milestone 2) and set next step to 3
-    const companyObjId = new Types.ObjectId(companyId);
-    const existingMilestone2 = await this.companyActivityModel.findOne({
-      company_id: companyObjId,
-      project_id: project._id,
-      milestone_flow: 2,
-    });
-    if (!existingMilestone2) {
-      await this.companyActivityModel.create({
+    // Log activity: Company Filled Registration Info (milestone 2) — first save only (not on PATCH/PUT updates)
+    if (!options?.skipMilestone) {
+      const companyObjId = new Types.ObjectId(companyId);
+      const existingMilestone2 = await this.companyActivityModel.findOne({
         company_id: companyObjId,
         project_id: project._id,
-        description: 'Registration form completed',
-        activity_type: 'company',
         milestone_flow: 2,
-        milestone_completed: true,
       });
-      const nextId = Math.min(24, 3);
-      if (project.next_activities_id < nextId) {
-        await this.projectModel.updateOne(
-          { _id: project._id },
-          { $set: { next_activities_id: nextId } },
-        );
+      if (!existingMilestone2) {
+        await this.companyActivityModel.create({
+          company_id: companyObjId,
+          project_id: project._id,
+          description: 'Registration form completed',
+          activity_type: 'company',
+          milestone_flow: 2,
+          milestone_completed: true,
+        });
+        const nextId = Math.min(24, 3);
+        if (project.next_activities_id < nextId) {
+          await this.projectModel.updateOne(
+            { _id: project._id },
+            { $set: { next_activities_id: nextId } },
+          );
+        }
       }
     }
 
-    // In-app notification for the company so they see confirmation after filing
+    // In-app notification
     if (companyId) {
+      const title = options?.isUpdate
+        ? 'Registration form updated'
+        : 'Registration form submitted';
+      const body = options?.isUpdate
+        ? 'Your registration information has been updated.'
+        : 'Your registration information has been saved successfully. You can view or update it from the project dashboard.';
       this.notificationsService
-        .create(
-          'Registration form submitted',
-          'Your registration information has been saved successfully. You can view or update it from the project dashboard.',
-          'C',
-          companyId,
-        )
+        .create(title, body, 'C', companyId)
         .then((doc) => {
           console.log('[Registration Info Service] Notification created for company', companyId, 'id:', (doc as any)?._id?.toString?.());
         })
@@ -1327,7 +1331,9 @@ export class CompanyProjectsService {
     // Build response with file URLs if files were uploaded
     const response: any = {
       status: 'success',
-      message: 'Registration info saved successfully',
+      message: options?.isUpdate
+        ? 'Registration info updated successfully'
+        : 'Registration info saved successfully',
       notification_created: true, // Frontend can refetch notifications when this is true
     };
 
@@ -1407,6 +1413,228 @@ export class CompanyProjectsService {
       status: 'success',
       message: 'Registration info loaded successfully',
       data: responseData,
+    };
+  }
+
+  async getRegistrationInfoForAdmin(projectId: string) {
+    const project = await this.projectModel.findById(projectId);
+
+    if (!project) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Project not found',
+      });
+    }
+
+    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com';
+    const registrationInfo = project.registration_info || {};
+    const responseData: any = { ...registrationInfo };
+
+    if (registrationInfo.company_brief_profile_url) {
+      responseData.company_brief_profile = {
+        url: registrationInfo.company_brief_profile_url,
+        filename: registrationInfo.company_brief_profile_filename || 'company_brief_profile',
+        downloadUrl: `${baseUrl}/api/company/projects/${projectId}/registration-files/company-brief-profile`,
+      };
+    } else {
+      responseData.company_brief_profile = null;
+    }
+
+    if (registrationInfo.turnover_document_url) {
+      responseData.turnover_document = {
+        url: registrationInfo.turnover_document_url,
+        filename: registrationInfo.turnover_document_filename || 'turnover_document',
+        downloadUrl: `${baseUrl}/api/company/projects/${projectId}/registration-files/turnover-document`,
+      };
+    } else {
+      responseData.turnover_document = null;
+    }
+
+    delete responseData.company_brief_profile_url;
+    delete responseData.company_brief_profile_filename;
+    delete responseData.turnover_document_url;
+    delete responseData.turnover_document_filename;
+
+    return {
+      status: 'success',
+      message: 'Registration info loaded successfully',
+      data: responseData,
+    };
+  }
+
+  /**
+   * Admin updates registration_info for any project (same payload/files as company flow).
+   */
+  private async resolveProjectForAdmin(projectOrCompanyId: string): Promise<any | null> {
+    if (!Types.ObjectId.isValid(projectOrCompanyId)) {
+      return null;
+    }
+
+    const directProject = await this.projectModel.findById(projectOrCompanyId).lean();
+    if (directProject) return directProject;
+
+    // Admin UI may pass company id in place of project id.
+    return this.projectModel
+      .findOne({ company_id: projectOrCompanyId })
+      .sort({ createdAt: -1 })
+      .lean();
+  }
+
+  async updateRegistrationInfoForAdmin(
+    projectId: string,
+    dto: RegistrationInfoDto,
+    files?: {
+      company_brief_profile?: Express.Multer.File[];
+      brief_profile?: Express.Multer.File[];
+      turnover_document?: Express.Multer.File[];
+      turnover?: Express.Multer.File[];
+    },
+  ) {
+    const resolvedProject = await this.resolveProjectForAdmin(projectId);
+    if (!resolvedProject) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Project not found',
+      });
+    }
+    const companyId = String(resolvedProject.company_id || '');
+    if (!companyId) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Project has no company_id',
+      });
+    }
+    return this.saveRegistrationInfo(companyId, String(resolvedProject._id), dto, files, {
+      isUpdate: true,
+      skipMilestone: true,
+    });
+  }
+
+  async getQuickviewDataForAdmin(projectId: string): Promise<{
+    status: 'success';
+    message: string;
+    data: any;
+  }> {
+    const resolvedProject = await this.resolveProjectForAdmin(projectId);
+    if (!resolvedProject?.company_id) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Project not found',
+      });
+    }
+    return this.getQuickviewData(
+      String(resolvedProject.company_id),
+      String(resolvedProject._id),
+    );
+  }
+
+  async getWorkflowStatusForAdmin(projectId: string): Promise<{
+    status: 'success';
+    message: string;
+    data: any;
+  }> {
+    const quickview = await this.getQuickviewDataForAdmin(projectId);
+    const qd = quickview.data || {};
+    const nextStep = qd.next_step || {};
+    const latestStep = qd.latest_step || {};
+    const profile = qd.profile || {};
+    return {
+      status: 'success',
+      message: 'Workflow status loaded successfully',
+      data: {
+        latest_step: latestStep,
+        next_step: nextStep,
+        next_activity: nextStep?.name || qd?.current_activity_data?.activity || null,
+        next_activities_id:
+          typeof nextStep?.id === 'number'
+            ? nextStep.id
+            : profile?.next_activities_id ?? null,
+        proposal_document: profile?.proposal_document || null,
+        workflow_milestone_cards:
+          qd?.milestone_flow?.milestone_status || qd?.companies_activty || [],
+      },
+    };
+  }
+
+  async updateQuickviewDataForAdmin(projectId: string, payload: any): Promise<{
+    status: 'success';
+    message: string;
+    data: any;
+  }> {
+    const resolvedProject = await this.resolveProjectForAdmin(projectId);
+    const project = resolvedProject?._id
+      ? await this.projectModel.findById(resolvedProject._id)
+      : null;
+    if (!project) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Project not found',
+      });
+    }
+
+    const company = await this.companyModel.findById(project.company_id);
+    if (!company) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Company not found',
+      });
+    }
+
+    const companyPatch = payload?.company || {};
+    const projectPatch = payload?.project || {};
+    const registrationPatch = payload?.registration_info || {};
+
+    const mergedCompanyPatch = {
+      ...companyPatch,
+      ...(payload?.company_name ? { name: payload.company_name } : {}),
+      ...(payload?.company_email ? { email: payload.company_email } : {}),
+      ...(payload?.company_mobile ? { mobile: payload.company_mobile } : {}),
+    };
+
+    if (mergedCompanyPatch.name !== undefined) company.name = String(mergedCompanyPatch.name);
+    if (mergedCompanyPatch.email !== undefined)
+      company.email = String(mergedCompanyPatch.email).toLowerCase();
+    if (mergedCompanyPatch.mobile !== undefined) company.mobile = String(mergedCompanyPatch.mobile);
+    if (mergedCompanyPatch.account_status !== undefined)
+      company.account_status = String(mergedCompanyPatch.account_status);
+    if (mergedCompanyPatch.verified_status !== undefined)
+      company.verified_status = String(mergedCompanyPatch.verified_status);
+    if (mergedCompanyPatch.reg_id !== undefined)
+      (company as any).reg_id = String(mergedCompanyPatch.reg_id);
+    if (mergedCompanyPatch.turnover !== undefined)
+      (company as any).turnover = String(mergedCompanyPatch.turnover);
+    if (mergedCompanyPatch.mst_sector_id !== undefined)
+      (company as any).mst_sector_id = String(mergedCompanyPatch.mst_sector_id);
+
+    const mergedProjectPatch = {
+      ...projectPatch,
+      ...(payload?.project_code ? { project_id: payload.project_code } : {}),
+      ...(payload?.process_type ? { process_type: payload.process_type } : {}),
+      ...(payload?.next_activities_id !== undefined
+        ? { next_activities_id: payload.next_activities_id }
+        : {}),
+    };
+
+    if (mergedProjectPatch.project_id !== undefined)
+      project.project_id = String(mergedProjectPatch.project_id);
+    if (mergedProjectPatch.process_type !== undefined)
+      project.process_type = String(mergedProjectPatch.process_type);
+    if (mergedProjectPatch.next_activities_id !== undefined)
+      project.next_activities_id = Number(mergedProjectPatch.next_activities_id);
+
+    project.registration_info = {
+      ...(project.registration_info || {}),
+      ...(registrationPatch || {}),
+    };
+
+    await company.save();
+    await project.save();
+
+    const refreshed = await this.getQuickviewDataForAdmin(String(project._id));
+    return {
+      status: 'success',
+      message: 'Quickview data updated successfully',
+      data: refreshed.data,
     };
   }
 

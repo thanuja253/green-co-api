@@ -1,5 +1,10 @@
 import { ExceptionFilter, Catch, ArgumentsHost, HttpException } from '@nestjs/common';
 import { Request, Response } from 'express';
+import {
+  applyCorsHeadersToResponse,
+  CORS_ALLOWED_HEADERS,
+  getAllowedCorsOrigin,
+} from '../cors-allow.util';
 
 @Catch(HttpException)
 export class HttpExceptionFilter implements ExceptionFilter {
@@ -14,13 +19,26 @@ export class HttpExceptionFilter implements ExceptionFilter {
     // If an OPTIONS request accidentally reaches this filter (e.g. no route),
     // answer with 200 so the browser can proceed with the real request.
     if (request.method === 'OPTIONS') {
+      const originStr =
+        typeof request.headers.origin === 'string' ? request.headers.origin : undefined;
+      const allowed = originStr ? getAllowedCorsOrigin(originStr) : false;
+      const corsOrigin = allowed || (!originStr ? 'http://localhost:3000' : false);
+      if (!corsOrigin) {
+        response.status(403).end();
+        return;
+      }
       response
         .status(200)
-        .setHeader('Access-Control-Allow-Origin', request.headers.origin || '*')
+        .setHeader('Access-Control-Allow-Origin', corsOrigin)
         .setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS')
         .setHeader(
           'Access-Control-Allow-Headers',
-          request.headers['access-control-request-headers'] || 'Content-Type, Authorization, Accept, X-Requested-With',
+          (() => {
+            const requested = request.headers['access-control-request-headers'];
+            return typeof requested === 'string' && requested.trim()
+              ? requested
+              : CORS_ALLOWED_HEADERS;
+          })(),
         )
         .setHeader('Access-Control-Allow-Credentials', 'true')
         .end();
@@ -33,6 +51,10 @@ export class HttpExceptionFilter implements ExceptionFilter {
       exceptionResponse !== null &&
       'status' in exceptionResponse
     ) {
+      applyCorsHeadersToResponse(
+        typeof request.headers.origin === 'string' ? request.headers.origin : undefined,
+        (n, v) => response.setHeader(n, v),
+      );
       return response.status(status).json(exceptionResponse);
     }
 
@@ -42,6 +64,10 @@ export class HttpExceptionFilter implements ExceptionFilter {
         ? exceptionResponse
         : (exceptionResponse as any)?.message || exception.message || 'An error occurred';
 
+    applyCorsHeadersToResponse(
+      typeof request.headers.origin === 'string' ? request.headers.origin : undefined,
+      (n, v) => response.setHeader(n, v),
+    );
     return response.status(status).json({
       status: 'error',
       message: message,
