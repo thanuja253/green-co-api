@@ -140,6 +140,19 @@ export class CompanyAuthService {
     savedProject.next_activities_id = 2;
     await savedProject.save();
 
+    // Workflow transition notification: Step 1 -> Step 2
+    this.notificationsService
+      .create(
+        'Workflow moved: Company Registered -> Registration Form',
+        'Latest step: Company Registered. Next step: Registration Form. Please fill your registration form details.',
+        'C',
+        savedCompany._id.toString(),
+        'update',
+      )
+      .catch((err) =>
+        console.error('Registration step transition notification failed:', err),
+      );
+
     // Create facilitator assignment if assessment is facilitator
     if (registerDto.assessment === 'facilitator' && registerDto.selectfacilitator) {
       const facilitator = new this.companyFacilitatorModel({

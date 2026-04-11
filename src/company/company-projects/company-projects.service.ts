@@ -1,7 +1,7 @@
 /// <reference path="../../exceljs.d.ts" />
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model, Types } from 'mongoose';
+import { InjectConnection, InjectModel } from '@nestjs/mongoose';
+import { Connection, Model, Types } from 'mongoose';
 import {
   CompanyProject,
   CompanyProjectDocument,
@@ -35,6 +35,8 @@ import { ListAssessorsQueryDto } from './dto/list-assessors-query.dto';
 import { ReportsQueryDto } from './dto/reports-query.dto';
 import { join } from 'path';
 import * as fs from 'fs';
+import { GridFSBucket } from 'mongodb';
+import type { Response } from 'express';
 import { getCertificationType } from '../../helpers/certification.helper';
 import { NotificationsService } from '../notifications/notifications.service';
 import { MailService } from '../../mail/mail.service';
@@ -60,6 +62,103 @@ function normalizeScoreBandRows(rows: any[]): number[][] {
     return arr;
   });
 }
+
+/** Remove BSON file blobs from registration_info before JSON responses. */
+function omitRegistrationFileBinaries(reg: Record<string, any> | undefined): Record<string, any> {
+  if (!reg || typeof reg !== 'object') return {};
+  const { company_brief_profile_file, turnover_document_file, sez_document_file, ...rest } = reg;
+  return rest;
+}
+
+function bufferFromRegistrationStored(data: unknown): Buffer | null {
+  if (data == null) return null;
+  if (Buffer.isBuffer(data)) return data;
+  if (data instanceof Uint8Array) return Buffer.from(data);
+  if (typeof data === 'object' && data !== null) {
+    const o = data as Record<string, unknown>;
+    const raw = o.data ?? o.buffer;
+    if (Buffer.isBuffer(raw)) return raw;
+    if (raw instanceof Uint8Array) return Buffer.from(raw);
+    if (raw instanceof ArrayBuffer) return Buffer.from(raw);
+  }
+  return null;
+}
+
+/** Multer memoryStorage sets buffer; diskStorage sets path — always persist bytes to MongoDB. */
+function bufferFromMulterFile(file: Express.Multer.File | undefined): Buffer | null {
+  if (!file) return null;
+  if (file.buffer?.length) return file.buffer;
+  const p = (file as Express.Multer.File & { path?: string }).path;
+  if (p && fs.existsSync(p)) {
+    try {
+      return fs.readFileSync(p);
+    } finally {
+      try {
+        fs.unlinkSync(p);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return null;
+}
+
+function contentTypeForRegistrationFilename(filename: string, fallback: string): string {
+  const m = String(filename || '').toLowerCase().match(/\.[^.]+$/);
+  const ext = m ? m[0] : '';
+  const map: Record<string, string> = {
+    '.pdf': 'application/pdf',
+    '.doc': 'application/msword',
+    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+  };
+  return map[ext] || fallback;
+}
+
+function uploadsRelativePathFromUrl(filePath: string): string | null {
+  if (!filePath || typeof filePath !== 'string') return null;
+  const idx = filePath.indexOf('/uploads/');
+  if (idx >= 0) return filePath.slice(idx + 1);
+  if (filePath.startsWith('uploads/')) return filePath;
+  return null;
+}
+
+const REGISTRATION_GRIDFS_BUCKET = 'registration_uploads';
+const WORKFLOW_STEP_LABELS: Record<number, string> = {
+  1: 'Company Registered',
+  2: 'Registration Form',
+  3: 'Proposal Document',
+  4: 'Work Order Upload',
+  5: 'Work Order Review',
+  6: 'Project Code',
+  7: 'Coordinator Assignment',
+  8: 'Invoice Upload',
+  9: 'Payment Approval',
+  10: 'Primary Data Review',
+  11: 'Assessment Submittals',
+  12: 'Assessment Visits',
+  13: 'Assessment Complete',
+  14: 'Certificate Review',
+  15: 'Certificate/Feedback Upload',
+  18: 'Recertification Review',
+  19: 'Recertification Primary Data',
+  24: 'Workflow Completed',
+};
+
+function registrationGridfsIdFromReg(reg: Record<string, any>, key: string): Types.ObjectId | null {
+  const v = reg[key];
+  if (v == null) return null;
+  const s = String(v);
+  if (!Types.ObjectId.isValid(s)) return null;
+  return new Types.ObjectId(s);
+}
+
+export type RegistrationFileDownload =
+  | { kind: 'buffer'; buffer: Buffer; filename: string; contentType: string }
+  | { kind: 'disk'; fullPath: string; filename: string; contentType: string }
+  | { kind: 'gridfs'; fileId: Types.ObjectId; filename: string; contentType: string };
 
 /** Approval status labels and colours for invoice UI (COMPANY_APPROVAL_STATUS / APPROVAL_STATUS_COLORS) */
 export const INVOICE_APPROVAL_STATUS = ['Pending', 'Approved', 'Rejected', 'Under Review'];
@@ -98,12 +197,201 @@ export class CompanyProjectsService {
     private readonly primaryDataFormModel: Model<PrimaryDataFormDocument>,
     @InjectModel(MasterPrimaryDataChecklist.name)
     private readonly masterPrimaryDataChecklistModel: Model<MasterPrimaryDataChecklistDocument>,
+    @InjectConnection() private readonly mongoConnection: Connection,
     private readonly notificationsService: NotificationsService,
     private readonly mailService: MailService,
   ) {}
 
+  private getRegistrationGridfsBucket(): GridFSBucket {
+    const db = this.mongoConnection.db;
+    if (!db) {
+      throw new BadRequestException({ status: 'error', message: 'Database unavailable' });
+    }
+    // Mongoose pins its own mongodb driver; cast avoids duplicate-package Db type clashes.
+    return new GridFSBucket(db as any, { bucketName: REGISTRATION_GRIDFS_BUCKET });
+  }
+
+  private async registrationGridfsDelete(oid: Types.ObjectId): Promise<void> {
+    try {
+      await this.getRegistrationGridfsBucket().delete(oid);
+    } catch {
+      /* already removed */
+    }
+  }
+
+  private async registrationGridfsUpload(
+    buffer: Buffer,
+    filename: string,
+    metadata: Record<string, unknown>,
+  ): Promise<Types.ObjectId> {
+    const bucket = this.getRegistrationGridfsBucket();
+    return new Promise((resolve, reject) => {
+      const uploadStream = bucket.openUploadStream(filename, { metadata });
+      uploadStream.on('error', reject);
+      uploadStream.on('finish', () => {
+        const id = uploadStream.id;
+        resolve(id instanceof Types.ObjectId ? id : new Types.ObjectId(String(id)));
+      });
+      uploadStream.end(buffer);
+    });
+  }
+
+  /** Clone a GridFS file so two projects do not share the same file id (e.g. recertification). */
+  private async registrationGridfsClone(sourceId: Types.ObjectId): Promise<Types.ObjectId | null> {
+    const bucket = this.getRegistrationGridfsBucket();
+    const doc = await bucket.find({ _id: sourceId }).next();
+    if (!doc) return null;
+    const chunks: Buffer[] = [];
+    const stream = bucket.openDownloadStream(sourceId);
+    await new Promise<void>((resolve, reject) => {
+      stream.on('data', (c: Buffer) => chunks.push(c));
+      stream.on('error', reject);
+      stream.on('end', resolve);
+    });
+    const buffer = Buffer.concat(chunks);
+    const meta = (doc.metadata || {}) as Record<string, unknown>;
+    return this.registrationGridfsUpload(buffer, doc.filename, {
+      ...meta,
+      clonedFrom: sourceId.toString(),
+    });
+  }
+
+  private async duplicateRegistrationGridfsInPlace(reg: Record<string, any>): Promise<void> {
+    const briefId = registrationGridfsIdFromReg(reg, 'company_brief_profile_gridfs_id');
+    if (briefId) {
+      const next = await this.registrationGridfsClone(briefId);
+      if (next) reg.company_brief_profile_gridfs_id = next.toString();
+    }
+    const turnId = registrationGridfsIdFromReg(reg, 'turnover_document_gridfs_id');
+    if (turnId) {
+      const next = await this.registrationGridfsClone(turnId);
+      if (next) reg.turnover_document_gridfs_id = next.toString();
+    }
+    const sezId = registrationGridfsIdFromReg(reg, 'sez_document_gridfs_id');
+    if (sezId) {
+      const next = await this.registrationGridfsClone(sezId);
+      if (next) reg.sez_document_gridfs_id = next.toString();
+    }
+  }
+
+  /**
+   * Send registration attachment to the HTTP response (buffer, disk legacy, or GridFS).
+   */
+  async streamRegistrationFileToResponse(res: Response, download: RegistrationFileDownload): Promise<void> {
+    res.setHeader('Content-Type', download.contentType);
+    const safeName = String(download.filename).replace(/"/g, "'");
+    res.setHeader('Content-Disposition', `inline; filename="${safeName}"`);
+
+    if (download.kind === 'buffer') {
+      res.status(200).send(download.buffer);
+      return;
+    }
+    if (download.kind === 'disk') {
+      await new Promise<void>((resolve, reject) => {
+        res.status(200).sendFile(download.fullPath, (err) => (err ? reject(err) : resolve()));
+      });
+      return;
+    }
+
+    const bucket = this.getRegistrationGridfsBucket();
+    const stream = bucket.openDownloadStream(download.fileId);
+    stream.on('error', () => {
+      if (!res.headersSent) {
+        res.status(404).json({ status: 'error', message: 'File not found' });
+      }
+    });
+    stream.pipe(res);
+  }
+
+  /**
+   * Old clients / DB rows used URLs like /uploads/registration/:projectId/:filename (disk multer).
+   * Bytes now live in GridFS (or legacy buffer); this path still resolves the same attachment.
+   */
+  async streamLegacyRegistrationUploadPath(
+    projectId: string,
+    filenameParam: string,
+    res: Response,
+  ): Promise<void> {
+    if (!Types.ObjectId.isValid(projectId)) {
+      if (!res.headersSent) res.status(404).json({ status: 'error', message: 'Cannot GET' });
+      return;
+    }
+    let filename = filenameParam;
+    try {
+      filename = decodeURIComponent(filenameParam);
+    } catch {
+      /* use raw */
+    }
+
+    const project = await this.projectModel.findById(projectId).lean();
+    if (!project) {
+      if (!res.headersSent) res.status(404).json({ status: 'error', message: 'Cannot GET' });
+      return;
+    }
+
+    const reg = ((project as any).registration_info || {}) as Record<string, any>;
+    const turnName = String(reg.turnover_document_filename || '');
+    const briefName = String(reg.company_brief_profile_filename || '');
+
+    let fileType: string | null = null;
+    if (turnName && filename === turnName) {
+      fileType = 'turnover-document';
+    } else if (briefName && filename === briefName) {
+      fileType = 'company-brief-profile';
+    } else if (filename.startsWith('turnover_document-')) {
+      fileType = 'turnover-document';
+    } else if (filename.startsWith('company_brief_profile-') || filename.startsWith('brief_profile-')) {
+      fileType = 'company-brief-profile';
+    }
+
+    if (!fileType) {
+      if (!res.headersSent) {
+        res.status(404).json({
+          status: 'error',
+          message: `Cannot GET /uploads/registration/${projectId}/${filenameParam}`,
+        });
+      }
+      return;
+    }
+
+    try {
+      const download = await this.resolveRegistrationFileDownload(reg, fileType);
+      await this.streamRegistrationFileToResponse(res, download);
+    } catch {
+      if (!res.headersSent) {
+        res.status(404).json({
+          status: 'error',
+          message: `Cannot GET /uploads/registration/${projectId}/${filenameParam}`,
+        });
+      }
+    }
+  }
+
   private parseLegacyAssessorDates(value: string): string[] {
     return [...new Set((value || '').split(',').map((d) => d.trim()).filter(Boolean))];
+  }
+
+  private async notifyStepTransition(
+    companyId: string,
+    projectId: string,
+    fromStep: number,
+    toStep: number,
+    reason: string,
+  ): Promise<void> {
+    if (!companyId || toStep <= fromStep) return;
+    const fromLabel = WORKFLOW_STEP_LABELS[fromStep] || `Step ${fromStep}`;
+    const toLabel = WORKFLOW_STEP_LABELS[toStep] || `Step ${toStep}`;
+    await this.notificationsService
+      .create(
+        `Workflow moved: ${fromLabel} -> ${toLabel}`,
+        `Latest step: ${fromLabel}. Next step: ${toLabel}. ${reason}.`,
+        'C',
+        companyId,
+        'update',
+      )
+      .catch((e) =>
+        console.error('[Step Transition Notification] Failed:', e?.message || e),
+      );
   }
 
   private parseDdMmYyyyToDate(value: string): Date | null {
@@ -841,6 +1129,7 @@ export class CompanyProjectsService {
       ...registrationInfo,
       recert_source_project_id: (sourceProject as any)._id.toString(),
     };
+    await this.duplicateRegistrationGridfsInPlace(recertRegistrationInfo);
 
     const newProject = new this.projectModel({
       company_id: companyId,
@@ -982,6 +1271,17 @@ export class CompanyProjectsService {
       });
     }
 
+    return project;
+  }
+
+  async getProjectForRegistrationFile(projectId: string) {
+    const project = await this.projectModel.findById(projectId).lean();
+    if (!project) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Project not found',
+      });
+    }
     return project;
   }
 
@@ -1140,6 +1440,10 @@ export class CompanyProjectsService {
       brief_profile?: Express.Multer.File[];
       turnover_document?: Express.Multer.File[];
       turnover?: Express.Multer.File[];
+      sez_document?: Express.Multer.File[];
+      sezDocument?: Express.Multer.File[];
+      sez_input?: Express.Multer.File[];
+      sezinput?: Express.Multer.File[];
     },
     options?: { isUpdate?: boolean; skipMilestone?: boolean },
   ) {
@@ -1184,6 +1488,10 @@ export class CompanyProjectsService {
     delete normalizedData.turnover_document;
     delete normalizedData.brief_profile;
     delete normalizedData.turnover;
+    delete normalizedData.sez_document;
+    delete normalizedData.sezDocument;
+    delete normalizedData.sez_input;
+    delete normalizedData.sezinput;
     
     // Normalize pan_no -> pan_number
     if (dto.pan_no && !dto.pan_number) {
@@ -1197,59 +1505,113 @@ export class CompanyProjectsService {
       delete normalizedData.gstin_no;
     }
 
-    // Handle file uploads
-    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com';
+    // Registration files → GridFS (persistent on MongoDB; not Render ephemeral disk)
+    const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(/\/+$/, '');
+    const prevReg = (project.registration_info || {}) as Record<string, any>;
     console.log('[Registration Info Service] Processing files:', {
       hasFiles: !!files,
-      company_brief_profile: files?.company_brief_profile?.[0]?.filename,
-      turnover_document: files?.turnover_document?.[0]?.filename,
+      company_brief_profile: files?.company_brief_profile?.[0]?.originalname,
+      turnover_document: files?.turnover_document?.[0]?.originalname,
+      sez_document: files?.sez_document?.[0]?.originalname,
     });
 
     if (files) {
-      // Handle Company Brief Profile
       const briefProfileFile = files.company_brief_profile?.[0] || files.brief_profile?.[0];
-      if (briefProfileFile) {
-        const relativePath = `uploads/registration/${projectId}/${briefProfileFile.filename}`;
-        const fullUrl = `${baseUrl}/${relativePath}`;
-        normalizedData.company_brief_profile_url = fullUrl;
-        normalizedData.company_brief_profile_filename = briefProfileFile.originalname;
-        console.log('[Registration Info Service] Saved Company Brief Profile:', {
-          url: fullUrl,
-          filename: briefProfileFile.originalname,
-          savedFilename: briefProfileFile.filename,
+      const briefBuf = bufferFromMulterFile(briefProfileFile);
+      if (briefBuf?.length) {
+        const oldGf = registrationGridfsIdFromReg(prevReg, 'company_brief_profile_gridfs_id');
+        const newId = await this.registrationGridfsUpload(briefBuf, briefProfileFile!.originalname, {
+          projectId,
+          field: 'company_brief_profile',
+          contentType: briefProfileFile!.mimetype,
+        });
+        if (oldGf) await this.registrationGridfsDelete(oldGf);
+        normalizedData.company_brief_profile_gridfs_id = newId.toString();
+        normalizedData.company_brief_profile_filename = briefProfileFile!.originalname;
+        normalizedData.company_brief_profile_url = `${baseUrl}/api/company/projects/${projectId}/registration-files/company-brief-profile`;
+        delete normalizedData.company_brief_profile_file;
+        console.log('[Registration Info Service] Stored company brief profile in GridFS:', {
+          bytes: briefBuf.length,
+          filename: briefProfileFile!.originalname,
+          fileId: newId.toString(),
         });
       }
 
-      // Handle Turnover Document
       const turnoverFile = files.turnover_document?.[0] || files.turnover?.[0];
-      if (turnoverFile) {
-        const relativePath = `uploads/registration/${projectId}/${turnoverFile.filename}`;
-        const fullUrl = `${baseUrl}/${relativePath}`;
-        normalizedData.turnover_document_url = fullUrl;
-        normalizedData.turnover_document_filename = turnoverFile.originalname;
-        console.log('[Registration Info Service] Saved Turnover Document:', {
-          url: fullUrl,
-          filename: turnoverFile.originalname,
-          savedFilename: turnoverFile.filename,
+      const turnoverBuf = bufferFromMulterFile(turnoverFile);
+      if (turnoverBuf?.length) {
+        const oldGf = registrationGridfsIdFromReg(prevReg, 'turnover_document_gridfs_id');
+        const newId = await this.registrationGridfsUpload(turnoverBuf, turnoverFile!.originalname, {
+          projectId,
+          field: 'turnover_document',
+          contentType: turnoverFile!.mimetype,
+        });
+        if (oldGf) await this.registrationGridfsDelete(oldGf);
+        normalizedData.turnover_document_gridfs_id = newId.toString();
+        normalizedData.turnover_document_filename = turnoverFile!.originalname;
+        normalizedData.turnover_document_url = `${baseUrl}/api/company/projects/${projectId}/registration-files/turnover-document`;
+        delete normalizedData.turnover_document_file;
+        console.log('[Registration Info Service] Stored turnover document in GridFS:', {
+          bytes: turnoverBuf.length,
+          filename: turnoverFile!.originalname,
+          fileId: newId.toString(),
+        });
+      }
+
+      const sezFile =
+        files.sez_document?.[0] ||
+        files.sezDocument?.[0] ||
+        files.sez_input?.[0] ||
+        files.sezinput?.[0];
+      const sezBuf = bufferFromMulterFile(sezFile);
+      if (sezBuf?.length) {
+        const oldGf = registrationGridfsIdFromReg(prevReg, 'sez_document_gridfs_id');
+        const newId = await this.registrationGridfsUpload(sezBuf, sezFile!.originalname, {
+          projectId,
+          field: 'sez_document',
+          contentType: sezFile!.mimetype,
+        });
+        if (oldGf) await this.registrationGridfsDelete(oldGf);
+        normalizedData.sez_document_gridfs_id = newId.toString();
+        normalizedData.sez_document_filename = sezFile!.originalname;
+        normalizedData.sez_document_url = `${baseUrl}/api/company/projects/${projectId}/registration-files/sez-document`;
+        delete normalizedData.sez_document_file;
+        console.log('[Registration Info Service] Stored SEZ document in GridFS:', {
+          bytes: sezBuf.length,
+          filename: sezFile!.originalname,
+          fileId: newId.toString(),
         });
       }
     } else {
       console.log('[Registration Info Service] No files received');
     }
 
-    // Store raw form data under registration_info
-    project.registration_info = {
+    const mergedReg: Record<string, any> = {
       ...(project.registration_info || {}),
       ...normalizedData,
     };
+    if (normalizedData.company_brief_profile_gridfs_id) {
+      delete mergedReg.company_brief_profile_file;
+    }
+    if (normalizedData.turnover_document_gridfs_id) {
+      delete mergedReg.turnover_document_file;
+    }
+    if (normalizedData.sez_document_gridfs_id) {
+      delete mergedReg.sez_document_file;
+    }
+    project.registration_info = mergedReg;
     
     // Mark profile as updated (registration form submitted)
     project.profile_update = 1;
     
     console.log('[Registration Info Service] Saving to database:', {
       projectId: projectId.toString(),
-      hasCompanyBriefProfile: !!normalizedData.company_brief_profile_url,
-      hasTurnoverDocument: !!normalizedData.turnover_document_url,
+      hasCompanyBriefProfile:
+        !!normalizedData.company_brief_profile_url || !!normalizedData.company_brief_profile_gridfs_id,
+      hasTurnoverDocument:
+        !!normalizedData.turnover_document_url || !!normalizedData.turnover_document_gridfs_id,
+      hasSezDocument:
+        !!normalizedData.sez_document_url || !!normalizedData.sez_document_gridfs_id,
       registrationInfoKeys: Object.keys(project.registration_info),
       profile_update: project.profile_update,
     });
@@ -1355,6 +1717,13 @@ export class CompanyProjectsService {
         downloadUrl: `${baseUrl}/api/company/projects/${projectId}/registration-files/turnover-document`,
       };
     }
+    if (normalizedData.sez_document_url) {
+      fileData.sez_document = {
+        url: normalizedData.sez_document_url,
+        filename: normalizedData.sez_document_filename,
+        downloadUrl: `${baseUrl}/api/company/projects/${projectId}/registration-files/sez-document`,
+      };
+    }
 
     if (Object.keys(fileData).length > 0) {
       response.data = fileData;
@@ -1376,38 +1745,71 @@ export class CompanyProjectsService {
       });
     }
 
-    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com';
+    const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(/\/+$/, '');
     const registrationInfo = project.registration_info || {};
 
-    // Build response data with all form fields
-    const responseData: any = { ...registrationInfo };
-    
-    // Add file URLs if they exist (for viewing/downloading)
-    if (registrationInfo.company_brief_profile_url) {
+    const responseData: any = { ...omitRegistrationFileBinaries(registrationInfo) };
+
+    const briefBuf = bufferFromRegistrationStored(registrationInfo.company_brief_profile_file?.data);
+    const briefGrid = registrationGridfsIdFromReg(registrationInfo, 'company_brief_profile_gridfs_id');
+    const hasBrief =
+      (!!briefBuf && briefBuf.length > 0) ||
+      !!registrationInfo.company_brief_profile_url ||
+      !!briefGrid;
+    if (hasBrief) {
+      const downloadUrl = `${baseUrl}/api/company/projects/${projectId}/registration-files/company-brief-profile`;
       responseData.company_brief_profile = {
-        url: registrationInfo.company_brief_profile_url,
+        url: downloadUrl,
         filename: registrationInfo.company_brief_profile_filename || 'company_brief_profile',
-        downloadUrl: `${baseUrl}/api/company/projects/${projectId}/registration-files/company-brief-profile`,
+        downloadUrl,
       };
     } else {
       responseData.company_brief_profile = null;
     }
-    
-    if (registrationInfo.turnover_document_url) {
+
+    const turnoverBuf = bufferFromRegistrationStored(registrationInfo.turnover_document_file?.data);
+    const turnoverGrid = registrationGridfsIdFromReg(registrationInfo, 'turnover_document_gridfs_id');
+    const hasTurnover =
+      (!!turnoverBuf && turnoverBuf.length > 0) ||
+      !!registrationInfo.turnover_document_url ||
+      !!turnoverGrid;
+    if (hasTurnover) {
+      const downloadUrl = `${baseUrl}/api/company/projects/${projectId}/registration-files/turnover-document`;
       responseData.turnover_document = {
-        url: registrationInfo.turnover_document_url,
+        url: downloadUrl,
         filename: registrationInfo.turnover_document_filename || 'turnover_document',
-        downloadUrl: `${baseUrl}/api/company/projects/${projectId}/registration-files/turnover-document`,
+        downloadUrl,
       };
     } else {
       responseData.turnover_document = null;
     }
 
-    // Remove internal file URL fields from response (keep only the structured objects)
+    const sezBuf = bufferFromRegistrationStored(registrationInfo.sez_document_file?.data);
+    const sezGrid = registrationGridfsIdFromReg(registrationInfo, 'sez_document_gridfs_id');
+    const hasSez =
+      (!!sezBuf && sezBuf.length > 0) ||
+      !!registrationInfo.sez_document_url ||
+      !!sezGrid;
+    if (hasSez) {
+      const downloadUrl = `${baseUrl}/api/company/projects/${projectId}/registration-files/sez-document`;
+      responseData.sez_document = {
+        url: downloadUrl,
+        filename: registrationInfo.sez_document_filename || 'sez_document',
+        downloadUrl,
+      };
+    } else {
+      responseData.sez_document = null;
+    }
+
     delete responseData.company_brief_profile_url;
     delete responseData.company_brief_profile_filename;
     delete responseData.turnover_document_url;
     delete responseData.turnover_document_filename;
+    delete responseData.sez_document_url;
+    delete responseData.sez_document_filename;
+    delete responseData.company_brief_profile_gridfs_id;
+    delete responseData.turnover_document_gridfs_id;
+    delete responseData.sez_document_gridfs_id;
 
     return {
       status: 'success',
@@ -1416,50 +1818,228 @@ export class CompanyProjectsService {
     };
   }
 
-  async getRegistrationInfoForAdmin(projectId: string) {
-    const project = await this.projectModel.findById(projectId);
-
-    if (!project) {
+  async getRegistrationInfoForAdmin(projectOrCompanyId: string) {
+    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    if (!resolved) {
       throw new NotFoundException({
         status: 'error',
         message: 'Project not found',
       });
     }
 
-    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com';
-    const registrationInfo = project.registration_info || {};
-    const responseData: any = { ...registrationInfo };
+    const effectiveProjectId = String(resolved._id);
+    const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(/\/+$/, '');
+    const registrationInfo = resolved.registration_info || {};
+    const responseData: any = { ...omitRegistrationFileBinaries(registrationInfo) };
 
-    if (registrationInfo.company_brief_profile_url) {
+    const briefBuf = bufferFromRegistrationStored(registrationInfo.company_brief_profile_file?.data);
+    const briefGrid = registrationGridfsIdFromReg(registrationInfo, 'company_brief_profile_gridfs_id');
+    const hasBrief =
+      (!!briefBuf && briefBuf.length > 0) ||
+      !!registrationInfo.company_brief_profile_url ||
+      !!briefGrid;
+    if (hasBrief) {
+      const downloadUrl = `${baseUrl}/api/admin/projects/${effectiveProjectId}/registration-files/company-brief-profile`;
       responseData.company_brief_profile = {
-        url: registrationInfo.company_brief_profile_url,
+        url: downloadUrl,
         filename: registrationInfo.company_brief_profile_filename || 'company_brief_profile',
-        downloadUrl: `${baseUrl}/api/company/projects/${projectId}/registration-files/company-brief-profile`,
+        downloadUrl,
       };
     } else {
       responseData.company_brief_profile = null;
     }
 
-    if (registrationInfo.turnover_document_url) {
+    const turnoverBuf = bufferFromRegistrationStored(registrationInfo.turnover_document_file?.data);
+    const turnoverGrid = registrationGridfsIdFromReg(registrationInfo, 'turnover_document_gridfs_id');
+    const hasTurnover =
+      (!!turnoverBuf && turnoverBuf.length > 0) ||
+      !!registrationInfo.turnover_document_url ||
+      !!turnoverGrid;
+    if (hasTurnover) {
+      const downloadUrl = `${baseUrl}/api/admin/projects/${effectiveProjectId}/registration-files/turnover-document`;
       responseData.turnover_document = {
-        url: registrationInfo.turnover_document_url,
+        url: downloadUrl,
         filename: registrationInfo.turnover_document_filename || 'turnover_document',
-        downloadUrl: `${baseUrl}/api/company/projects/${projectId}/registration-files/turnover-document`,
+        downloadUrl,
       };
     } else {
       responseData.turnover_document = null;
+    }
+
+    const sezBuf = bufferFromRegistrationStored(registrationInfo.sez_document_file?.data);
+    const sezGrid = registrationGridfsIdFromReg(registrationInfo, 'sez_document_gridfs_id');
+    const hasSez =
+      (!!sezBuf && sezBuf.length > 0) ||
+      !!registrationInfo.sez_document_url ||
+      !!sezGrid;
+    if (hasSez) {
+      const downloadUrl = `${baseUrl}/api/admin/projects/${effectiveProjectId}/registration-files/sez-document`;
+      responseData.sez_document = {
+        url: downloadUrl,
+        filename: registrationInfo.sez_document_filename || 'sez_document',
+        downloadUrl,
+      };
+    } else {
+      responseData.sez_document = null;
     }
 
     delete responseData.company_brief_profile_url;
     delete responseData.company_brief_profile_filename;
     delete responseData.turnover_document_url;
     delete responseData.turnover_document_filename;
+    delete responseData.sez_document_url;
+    delete responseData.sez_document_filename;
+    delete responseData.company_brief_profile_gridfs_id;
+    delete responseData.turnover_document_gridfs_id;
+    delete responseData.sez_document_gridfs_id;
 
     return {
       status: 'success',
       message: 'Registration info loaded successfully',
       data: responseData,
     };
+  }
+
+  /**
+   * Resolve registration attachment for download: GridFS first, then embedded buffer, then legacy disk under /uploads/.
+   */
+  async resolveRegistrationFileDownload(
+    registrationInfo: Record<string, any> | undefined,
+    fileType: string,
+  ): Promise<RegistrationFileDownload> {
+    const reg = registrationInfo || {};
+    const ft = String(fileType || '').toLowerCase();
+
+    if (ft === 'company-brief-profile' || ft === 'brief-profile') {
+      const gfId = registrationGridfsIdFromReg(reg, 'company_brief_profile_gridfs_id');
+      if (gfId) {
+        const filename =
+          reg.company_brief_profile_filename || reg.company_brief_profile_file?.originalName || 'company_brief_profile';
+        const doc = await this.getRegistrationGridfsBucket().find({ _id: gfId }).next();
+        const meta = (doc?.metadata || {}) as Record<string, unknown>;
+        const contentType =
+          (typeof meta.contentType === 'string' && meta.contentType) ||
+          contentTypeForRegistrationFilename(String(filename), 'application/octet-stream');
+        return { kind: 'gridfs', fileId: gfId, filename: String(filename), contentType };
+      }
+      const embedded = reg.company_brief_profile_file;
+      const buf = bufferFromRegistrationStored(embedded?.data);
+      if (buf && buf.length > 0) {
+        const filename =
+          reg.company_brief_profile_filename || embedded?.originalName || 'company_brief_profile';
+        const contentType =
+          embedded?.contentType ||
+          contentTypeForRegistrationFilename(String(filename), 'application/octet-stream');
+        return { kind: 'buffer', buffer: buf, filename: String(filename), contentType };
+      }
+      const url = reg.company_brief_profile_url;
+      if (typeof url === 'string') {
+        const rel = uploadsRelativePathFromUrl(url);
+        if (rel) {
+          const fullPath = join(process.cwd(), rel);
+          if (fs.existsSync(fullPath)) {
+            const filename = reg.company_brief_profile_filename || 'company_brief_profile';
+            return {
+              kind: 'disk',
+              fullPath,
+              filename: String(filename),
+              contentType: contentTypeForRegistrationFilename(String(filename), 'application/octet-stream'),
+            };
+          }
+        }
+      }
+      throw new NotFoundException({ status: 'error', message: 'File not found' });
+    }
+
+    if (ft === 'turnover-document' || ft === 'turnover') {
+      const gfId = registrationGridfsIdFromReg(reg, 'turnover_document_gridfs_id');
+      if (gfId) {
+        const filename =
+          reg.turnover_document_filename || reg.turnover_document_file?.originalName || 'turnover_document';
+        const doc = await this.getRegistrationGridfsBucket().find({ _id: gfId }).next();
+        const meta = (doc?.metadata || {}) as Record<string, unknown>;
+        const contentType =
+          (typeof meta.contentType === 'string' && meta.contentType) ||
+          contentTypeForRegistrationFilename(String(filename), 'application/octet-stream');
+        return { kind: 'gridfs', fileId: gfId, filename: String(filename), contentType };
+      }
+      const embedded = reg.turnover_document_file;
+      const buf = bufferFromRegistrationStored(embedded?.data);
+      if (buf && buf.length > 0) {
+        const filename = reg.turnover_document_filename || embedded?.originalName || 'turnover_document';
+        const contentType =
+          embedded?.contentType ||
+          contentTypeForRegistrationFilename(String(filename), 'application/octet-stream');
+        return { kind: 'buffer', buffer: buf, filename: String(filename), contentType };
+      }
+      const url = reg.turnover_document_url;
+      if (typeof url === 'string') {
+        const rel = uploadsRelativePathFromUrl(url);
+        if (rel) {
+          const fullPath = join(process.cwd(), rel);
+          if (fs.existsSync(fullPath)) {
+            const filename = reg.turnover_document_filename || 'turnover_document';
+            return {
+              kind: 'disk',
+              fullPath,
+              filename: String(filename),
+              contentType: contentTypeForRegistrationFilename(String(filename), 'application/octet-stream'),
+            };
+          }
+        }
+      }
+      throw new NotFoundException({ status: 'error', message: 'File not found' });
+    }
+
+    if (ft === 'sez-document' || ft === 'sez') {
+      const gfId = registrationGridfsIdFromReg(reg, 'sez_document_gridfs_id');
+      if (gfId) {
+        const filename =
+          reg.sez_document_filename || reg.sez_document_file?.originalName || 'sez_document';
+        const doc = await this.getRegistrationGridfsBucket().find({ _id: gfId }).next();
+        const meta = (doc?.metadata || {}) as Record<string, unknown>;
+        const contentType =
+          (typeof meta.contentType === 'string' && meta.contentType) ||
+          contentTypeForRegistrationFilename(String(filename), 'application/pdf');
+        return { kind: 'gridfs', fileId: gfId, filename: String(filename), contentType };
+      }
+      const embedded = reg.sez_document_file;
+      const buf = bufferFromRegistrationStored(embedded?.data);
+      if (buf && buf.length > 0) {
+        const filename = reg.sez_document_filename || embedded?.originalName || 'sez_document';
+        const contentType =
+          embedded?.contentType ||
+          contentTypeForRegistrationFilename(String(filename), 'application/pdf');
+        return { kind: 'buffer', buffer: buf, filename: String(filename), contentType };
+      }
+      const url = reg.sez_document_url;
+      if (typeof url === 'string') {
+        const rel = uploadsRelativePathFromUrl(url);
+        if (rel) {
+          const fullPath = join(process.cwd(), rel);
+          if (fs.existsSync(fullPath)) {
+            const filename = reg.sez_document_filename || 'sez_document';
+            return {
+              kind: 'disk',
+              fullPath,
+              filename: String(filename),
+              contentType: contentTypeForRegistrationFilename(String(filename), 'application/pdf'),
+            };
+          }
+        }
+      }
+      throw new NotFoundException({ status: 'error', message: 'File not found' });
+    }
+
+    throw new BadRequestException({ status: 'error', message: 'Invalid file type' });
+  }
+
+  async getRegistrationFileDownloadForAdmin(projectOrCompanyId: string, fileType: string): Promise<RegistrationFileDownload> {
+    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    if (!resolved) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return await this.resolveRegistrationFileDownload(resolved.registration_info, fileType);
   }
 
   /**
@@ -1488,6 +2068,10 @@ export class CompanyProjectsService {
       brief_profile?: Express.Multer.File[];
       turnover_document?: Express.Multer.File[];
       turnover?: Express.Multer.File[];
+      sez_document?: Express.Multer.File[];
+      sezDocument?: Express.Multer.File[];
+      sez_input?: Express.Multer.File[];
+      sezinput?: Express.Multer.File[];
     },
   ) {
     const resolvedProject = await this.resolveProjectForAdmin(projectId);
@@ -1522,10 +2106,25 @@ export class CompanyProjectsService {
         message: 'Project not found',
       });
     }
-    return this.getQuickviewData(
+    const quickview = await this.getQuickviewData(
       String(resolvedProject.company_id),
       String(resolvedProject._id),
     );
+    const resolvedProjectId = String(resolvedProject._id);
+    const normalizedInput = String(projectId).trim();
+    return {
+      ...quickview,
+      data: {
+        ...quickview.data,
+        id_resolution: {
+          input_id: normalizedInput,
+          resolved_project_id: resolvedProjectId,
+          resolved_company_id: String(resolvedProject.company_id),
+          /** True when the path param was already the Mongo project _id; false when it was company id (latest project chosen). */
+          input_matched_project_id: resolvedProjectId === normalizedInput,
+        },
+      },
+    };
   }
 
   async getWorkflowStatusForAdmin(projectId: string): Promise<{
@@ -1677,6 +2276,26 @@ export class CompanyProjectsService {
       const oldValue = project.next_activities_id;
       project.next_activities_id = dto.milestone_flow + 1;
       await project.save();
+      await this.notifyStepTransition(
+        String(project.company_id),
+        String(project._id),
+        Number(oldValue || 0),
+        Number(project.next_activities_id || 0),
+        dto.description || `Milestone ${dto.milestone_flow} completed`,
+      );
+
+      // Capture each completed step in notifications so panel can read from notification APIs.
+      this.notificationsService
+        .create(
+          `Step ${dto.milestone_flow} completed`,
+          dto.description || `Milestone ${dto.milestone_flow} has been completed.`,
+          'C',
+          String(project.company_id),
+          'update',
+        )
+        .catch((e) =>
+          console.error('[Complete Milestone] Notification failed:', e?.message || e),
+        );
       
       console.log('[Complete Milestone] After update:', {
         projectId: project._id.toString(),
@@ -2139,13 +2758,13 @@ export class CompanyProjectsService {
       });
     }
 
-    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com';
+    const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(/\/+$/, '');
     // Use Laravel-compatible path: uploads/company/{projectId}/
     const relativePath = `uploads/company/${projectId}/${file.filename}`;
-    const fullUrl = `${baseUrl}/${relativePath}`;
+    const apiViewUrl = `${baseUrl}/api/company/projects/${projectId}/proposal-document/file`;
 
-    // Save proposal document path
-    project.proposal_document = fullUrl;
+    // Save proposal document as relative path so server can move host/base URL safely.
+    project.proposal_document = relativePath;
     await project.save();
 
     // Generate company registration ID if not exists (similar to Laravel flow)
@@ -2211,12 +2830,20 @@ export class CompanyProjectsService {
     }
 
     // Update next_activities_id to 4 (Company Will Upload Work order)
+    const prevNextActivity = Number((project as any).next_activities_id || 0);
     project.next_activities_id = 4;
     await project.save();
+    await this.notifyStepTransition(
+      String(project.company_id),
+      String(project._id),
+      prevNextActivity,
+      4,
+      'Proposal document uploaded',
+    );
 
     console.log('[Proposal Document] Uploaded successfully:', {
       projectId: projectId.toString(),
-      documentUrl: fullUrl,
+      documentUrl: apiViewUrl,
       next_activities_id: project.next_activities_id,
     });
 
@@ -2224,12 +2851,28 @@ export class CompanyProjectsService {
       status: 'success',
       message: 'Proposal Document uploaded successfully',
       data: {
-        document_url: fullUrl,
+        proposal_status: 0,
+        proposal_status_label: 'pending_by_company',
+        proposal_remarks: null,
+        proposal_status_updated_at: new Date().toISOString(),
+        document_url: apiViewUrl,
         document_filename: file.originalname,
         project_id: projectId,
         next_activities_id: project.next_activities_id,
       },
     };
+  }
+
+  async uploadProposalDocumentByProjectId(projectId: string, file: Express.Multer.File) {
+    const project = await this.resolveProjectForAdmin(projectId);
+    if (!project?.company_id) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Project not found',
+      });
+    }
+    const effectiveProjectId = String(project._id);
+    return this.uploadProposalDocument(String(project.company_id), effectiveProjectId, file);
   }
 
   /**
@@ -2254,20 +2897,96 @@ export class CompanyProjectsService {
         message: 'Proposal document not uploaded yet',
         data: {
           has_document: false,
+          document_filename: null,
+          proposal_status: 'not_uploaded',
+          proposal_status_label: 'not_uploaded',
+          proposal_remarks: null,
+          proposal_status_updated_at: null,
           document_url: null,
         },
       };
     }
+
+    // Proposal is considered "approved by company" once company uploads work order for this project.
+    const workOrder = await this.companyWorkOrderModel
+      .findOne({
+        company_id: companyId,
+        project_id: projectId,
+      })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const proposalAcceptedByCompany = !!workOrder;
+    const proposalStatus = proposalAcceptedByCompany ? 1 : 0;
+    const proposalStatusLabel = proposalAcceptedByCompany
+      ? 'accepted_by_company'
+      : 'pending_by_company';
+    const proposalStatusUpdatedAt = proposalAcceptedByCompany
+      ? (workOrder as any).createdAt?.toISOString?.() ??
+        (workOrder as any).updatedAt?.toISOString?.() ??
+        null
+      : (project as any).updatedAt?.toISOString?.() ??
+        (project as any).createdAt?.toISOString?.() ??
+        null;
+
+    const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(/\/+$/, '');
+    const apiViewUrl = `${baseUrl}/api/company/projects/${projectId}/proposal-document/file`;
+    const proposalRaw = String(project.proposal_document || '');
+    const filename = proposalRaw.split('/').pop() || 'proposal.pdf';
 
     return {
       status: 'success',
       message: 'Proposal document retrieved successfully',
       data: {
         has_document: true,
-        document_url: project.proposal_document,
-        document_filename: project.proposal_document.split('/').pop() || 'proposal.pdf',
+        proposal_status: proposalStatus,
+        proposal_status_label: proposalStatusLabel,
+        proposal_remarks: null,
+        proposal_status_updated_at: proposalStatusUpdatedAt,
+        document_url: apiViewUrl,
+        document_filename: filename,
       },
     };
+  }
+
+  async getProposalDocumentByProjectId(projectId: string) {
+    const project = await this.resolveProjectForAdmin(projectId);
+    if (!project?.company_id) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Project not found',
+      });
+    }
+    const effectiveProjectId = String(project._id);
+    return this.getProposalDocument(String(project.company_id), effectiveProjectId);
+  }
+
+  async streamProposalDocumentByProjectId(projectOrCompanyId: string, res: Response): Promise<void> {
+    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    if (!resolved) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const proposalRaw = String((resolved as any).proposal_document || '').trim();
+    if (!proposalRaw) {
+      throw new NotFoundException({ status: 'error', message: 'Proposal document not uploaded yet' });
+    }
+
+    const normalized = proposalRaw.startsWith('http')
+      ? (uploadsRelativePathFromUrl(proposalRaw) || '')
+      : proposalRaw.replace(/^\/+/, '');
+    const fullPath = join(process.cwd(), normalized);
+    if (!normalized || !fs.existsSync(fullPath)) {
+      throw new NotFoundException({ status: 'error', message: 'File not found' });
+    }
+
+    const filename = normalized.split('/').pop() || 'proposal.pdf';
+    const contentType = contentTypeForRegistrationFilename(filename, 'application/pdf');
+    await this.streamRegistrationFileToResponse(res, {
+      kind: 'disk',
+      fullPath,
+      filename,
+      contentType,
+    });
   }
 
   /**
@@ -2532,6 +3251,98 @@ export class CompanyProjectsService {
       message: 'Documents retrieved successfully',
       data: response,
     };
+  }
+
+  async getProposalWorkOrderDocumentsByProjectId(projectOrCompanyId: string) {
+    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.getProposalWorkOrderDocuments(
+      String(resolved.company_id),
+      String(resolved._id),
+    );
+  }
+
+  /**
+   * Get latest work order document info for a project.
+   */
+  async getWorkOrderDocument(companyId: string, projectId: string) {
+    const [project, workOrder] = await Promise.all([
+      this.projectModel.findOne({ _id: projectId, company_id: companyId }).lean(),
+      this.companyWorkOrderModel
+        .findOne({ company_id: companyId, project_id: projectId })
+        .sort({ createdAt: -1 })
+        .lean(),
+    ]);
+
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(/\/+$/, '');
+
+    if (!workOrder || !(workOrder as any).wo_doc) {
+      return {
+        status: 'success',
+        message: 'Work order document not uploaded yet',
+        data: {
+          has_document: false,
+          document_url: null,
+          document_filename: null,
+          wo_status: null,
+          wo_remarks: null,
+          wo_doc_status_updated_at: null,
+        },
+      };
+    }
+
+    const workOrderAny = workOrder as any;
+    const woDocPath = String(workOrderAny.wo_doc || '').replace(/^\/+/, '');
+    const url = woDocPath.startsWith('http') ? woDocPath : `${baseUrl}/${woDocPath}`;
+    return {
+      status: 'success',
+      message: 'Work order document retrieved successfully',
+      data: {
+        has_document: true,
+        document_url: url,
+        document_filename: woDocPath.split('/').pop() || 'workorder.pdf',
+        wo_status: workOrderAny.wo_status ?? 0,
+        wo_remarks: workOrderAny.wo_remarks || null,
+        wo_doc_status_updated_at:
+          workOrderAny.wo_doc_status_updated_at?.toISOString?.() ??
+          workOrderAny.updatedAt?.toISOString?.() ??
+          workOrderAny.createdAt?.toISOString?.() ??
+          null,
+      },
+    };
+  }
+
+  /**
+   * Update latest work order status for a project (accept/reject + remarks).
+   */
+  async updateWorkOrderStatus(
+    companyId: string,
+    projectId: string,
+    dto: { wo_status: number; wo_remarks?: string },
+  ) {
+    const latestWorkOrder = await this.companyWorkOrderModel
+      .findOne({ company_id: companyId, project_id: projectId })
+      .sort({ createdAt: -1 });
+
+    if (!latestWorkOrder) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Work order document not found',
+      });
+    }
+
+    return this.approveWorkOrder(
+      companyId,
+      projectId,
+      String((latestWorkOrder as any)._id),
+      dto,
+    );
   }
 
   /**
@@ -3265,8 +4076,16 @@ export class CompanyProjectsService {
     });
 
     // Update next_activities_id to 5 (CII will Approved/Rejected Work Order)
+    const prevNextActivity = Number((project as any).next_activities_id || 0);
     project.next_activities_id = 5;
     await project.save();
+    await this.notifyStepTransition(
+      String(project.company_id),
+      String(project._id),
+      prevNextActivity,
+      5,
+      isReUpload ? 'Work order re-uploaded' : 'Work order uploaded',
+    );
 
     // Get coordinator for notifications (if exists)
     const coordinator = await this.companyCoordinatorModel
@@ -3469,6 +4288,13 @@ export class CompanyProjectsService {
       if (currentNext < 6) {
         (project as any).next_activities_id = 6;
         await project.save();
+        await this.notifyStepTransition(
+          String(project.company_id),
+          String(project._id),
+          currentNext,
+          6,
+          'Work order approved',
+        );
       }
     }
 
@@ -3627,8 +4453,16 @@ export class CompanyProjectsService {
 
     // Update project with project code and next_activities_id
     project.project_id = projectCode;
+    const prevNextActivity = Number((project as any).next_activities_id || 0);
     project.next_activities_id = 7; // Assign Project Co-Ordinator
     await project.save();
+    await this.notifyStepTransition(
+      String(project.company_id),
+      String(project._id),
+      prevNextActivity,
+      7,
+      'Project code created',
+    );
 
     console.log('[Create Project Code] Project updated:', {
       projectId: project._id.toString(),
@@ -3734,8 +4568,16 @@ export class CompanyProjectsService {
     });
 
     // Update next_activities_id to 8 (CII uploaded the PI/Tax Invoice)
+    const prevNextActivity = Number((project as any).next_activities_id || 0);
     project.next_activities_id = 8;
     await project.save();
+    await this.notifyStepTransition(
+      String(project.company_id),
+      String(project._id),
+      prevNextActivity,
+      8,
+      'Coordinator assigned',
+    );
 
     // LOG ACTIVITY 7: Assign Project Co-Ordinator
     await this.companyActivityModel.create({

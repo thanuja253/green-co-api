@@ -1,7 +1,10 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, Param, Res } from '@nestjs/common';
+import type { Response } from 'express';
+import { CompanyProjectsService } from './company/company-projects/company-projects.service';
 
 @Controller()
 export class AppController {
+  constructor(private readonly companyProjectsService: CompanyProjectsService) {}
   @Get()
   getRoot() {
     return {
@@ -24,6 +27,18 @@ export class AppController {
       message: 'API is healthy',
       timestamp: new Date().toISOString(),
     };
+  }
+
+  /**
+   * Legacy public URL pattern from disk-based multer; now streams from GridFS / embedded data.
+   */
+  @Get('uploads/registration/:projectId/:filename')
+  async legacyRegistrationUpload(
+    @Param('projectId') projectId: string,
+    @Param('filename') filename: string,
+    @Res() res: Response,
+  ): Promise<void> {
+    await this.companyProjectsService.streamLegacyRegistrationUploadPath(projectId, filename, res);
   }
 }
 

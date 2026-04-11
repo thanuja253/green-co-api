@@ -4,6 +4,7 @@ import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { join } from 'path';
+import * as fs from 'fs';
 import * as express from 'express';
 import { CORS_ALLOWED_HEADERS, getAllowedCorsOrigin } from './common/cors-allow.util';
 
@@ -26,6 +27,14 @@ async function bootstrap() {
     exposedHeaders: ['Content-Disposition'],
     optionsSuccessStatus: 200,
   });
+
+  // Same root as multer (registration-info-upload.config): process.cwd()/uploads.
+  // __dirname-based paths can miss files if cwd differs from dist layout (e.g. some hosts).
+  const uploadsRoot = join(process.cwd(), 'uploads');
+  if (!fs.existsSync(uploadsRoot)) {
+    fs.mkdirSync(uploadsRoot, { recursive: true });
+  }
+  app.use('/uploads', express.static(uploadsRoot));
 
   // Manually add JSON and URL-encoded body parsers, but skip multipart/form-data
   // This allows Multer to handle multipart/form-data without interference
@@ -81,11 +90,6 @@ async function bootstrap() {
       }
     });
     next();
-  });
-
-  // Serve static files from uploads directory
-  app.useStaticAssets(join(__dirname, '..', 'uploads'), {
-    prefix: '/uploads/',
   });
 
   // Ensure OPTIONS (preflight) never returns 404: handle it early so browser gets 200 and sends the real request.

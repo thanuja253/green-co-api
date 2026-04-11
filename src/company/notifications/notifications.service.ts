@@ -65,19 +65,37 @@ export class NotificationsService {
     });
 
     return {
-      notifications: notifications.map((n: any) => ({
-        id: n._id.toString(),
-        title: n.title,
-        ...(n.content != null && n.content !== '' && { content: n.content }),
-        ...(n.category != null && { notify_type: n.category }),
-        seen: !!n.seen,
-        created_at:
-          n.createdAt instanceof Date
-            ? n.createdAt.toISOString()
-            : typeof n.createdAt === 'string'
-              ? n.createdAt
-              : n.createdAt,
-      })),
+      notifications: this.mapNotifications(notifications),
+      notificationsCount: unreadCount,
+    };
+  }
+
+  /**
+   * Get notifications by role/module code only (used by admin panel and role feeds).
+   */
+  async getForType(
+    notifyType: NotifyType,
+    options?: { limit?: number; skip?: number },
+  ): Promise<{ notifications: any[]; notificationsCount: number }> {
+    const limit = options?.limit ?? 50;
+    const skip = options?.skip ?? 0;
+    const filter = { notify_type: notifyType };
+
+    const [notifications, unreadCount] = await Promise.all([
+      this.notificationModel
+        .find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      this.notificationModel.countDocuments({
+        ...filter,
+        seen: false,
+      }),
+    ]);
+
+    return {
+      notifications: this.mapNotifications(notifications),
       notificationsCount: unreadCount,
     };
   }
@@ -95,5 +113,35 @@ export class NotificationsService {
       filter._id = new Types.ObjectId(notificationId);
     }
     await this.notificationModel.updateMany(filter, { $set: { seen: true } });
+  }
+
+  /**
+   * Mark one or all notifications as seen by role/module code.
+   */
+  async markSeenByType(
+    notifyType: NotifyType,
+    notificationId?: string,
+  ): Promise<void> {
+    const filter: any = { notify_type: notifyType };
+    if (notificationId) {
+      filter._id = new Types.ObjectId(notificationId);
+    }
+    await this.notificationModel.updateMany(filter, { $set: { seen: true } });
+  }
+
+  private mapNotifications(notifications: any[]): any[] {
+    return notifications.map((n: any) => ({
+      id: n._id.toString(),
+      title: n.title,
+      ...(n.content != null && n.content !== '' && { content: n.content }),
+      ...(n.category != null && { notify_type: n.category }),
+      seen: !!n.seen,
+      created_at:
+        n.createdAt instanceof Date
+          ? n.createdAt.toISOString()
+          : typeof n.createdAt === 'string'
+            ? n.createdAt
+            : n.createdAt,
+    }));
   }
 }

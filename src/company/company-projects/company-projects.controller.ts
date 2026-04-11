@@ -393,6 +393,10 @@ export class CompanyProjectsController {
       brief_profile?: Express.Multer.File[];
       turnover_document?: Express.Multer.File[];
       turnover?: Express.Multer.File[];
+      sez_document?: Express.Multer.File[];
+      sezDocument?: Express.Multer.File[];
+      sez_input?: Express.Multer.File[];
+      sezinput?: Express.Multer.File[];
     },
   ): Promise<any> {
     console.log('========================================');
@@ -500,6 +504,10 @@ export class CompanyProjectsController {
       brief_profile?: Express.Multer.File[];
       turnover_document?: Express.Multer.File[];
       turnover?: Express.Multer.File[];
+      sez_document?: Express.Multer.File[];
+      sezDocument?: Express.Multer.File[];
+      sez_input?: Express.Multer.File[];
+      sezinput?: Express.Multer.File[];
     },
   ): Promise<any> {
     const reqFiles = (req as any).files;
@@ -508,66 +516,18 @@ export class CompanyProjectsController {
   }
 
   @Get(':projectId/registration-files/:fileType')
-  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   async getRegistrationFile(
-    @Request() req,
     @Param('projectId') projectId: string,
     @Param('fileType') fileType: string,
     @Res() res: Response,
   ) {
-    const project = await this.companyProjectsService.getProject(
-      req.user.userId,
-      projectId,
+    const project = await this.companyProjectsService.getProjectForRegistrationFile(projectId);
+
+    const download = await this.companyProjectsService.resolveRegistrationFileDownload(
+      project.registration_info,
+      fileType,
     );
-
-    const registrationInfo = project.registration_info || {};
-    let filePath: string | null = null;
-    let filename: string = 'file';
-
-    if (fileType === 'company-brief-profile' || fileType === 'brief-profile') {
-      filePath = registrationInfo.company_brief_profile_url;
-      filename = registrationInfo.company_brief_profile_filename || 'company_brief_profile';
-    } else if (fileType === 'turnover-document' || fileType === 'turnover') {
-      filePath = registrationInfo.turnover_document_url;
-      filename = registrationInfo.turnover_document_filename || 'turnover_document';
-    }
-
-    if (!filePath) {
-      throw new NotFoundException({
-        status: 'error',
-        message: 'File not found',
-      });
-    }
-
-    // Extract relative path from URL if it's a full URL
-    const relativePath = filePath.startsWith('http')
-      ? filePath.replace(/^https?:\/\/[^/]+/, '').replace(/^\//, '')
-      : filePath;
-
-    const fullPath = join(process.cwd(), relativePath);
-
-    if (!fs.existsSync(fullPath)) {
-      throw new NotFoundException({
-        status: 'error',
-        message: 'File not found on server',
-      });
-    }
-
-    // Determine content type based on file extension
-    const ext = extname(filename).toLowerCase();
-    const contentTypes: Record<string, string> = {
-      '.pdf': 'application/pdf',
-      '.doc': 'application/msword',
-      '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.png': 'image/png',
-    };
-
-    res.setHeader('Content-Type', contentTypes[ext] || 'application/octet-stream');
-    res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
-
-    return res.sendFile(fullPath);
+    await this.companyProjectsService.streamRegistrationFileToResponse(res, download);
   }
 
   /**
@@ -575,9 +535,16 @@ export class CompanyProjectsController {
    * POST /api/company/projects/:projectId/proposal-document
    */
   @Post(':projectId/proposal-document')
-  @UseGuards(JwtAuthGuard, AccountStatusGuard)
+  @Put(':projectId/proposal-document')
+  @Patch(':projectId/proposal-document')
   @UseInterceptors(
-    FileInterceptor('proposal_document', {
+    FileFieldsInterceptor(
+      [
+        { name: 'proposal_document', maxCount: 1 },
+        { name: 'proposalDocument', maxCount: 1 },
+        { name: 'file', maxCount: 1 },
+      ],
+      {
       storage: diskStorage({
         destination: (req, file, cb) => {
           const projectId = req.params.projectId;
@@ -601,28 +568,35 @@ export class CompanyProjectsController {
         fileSize: 10 * 1024 * 1024, // 10MB max file size
       },
       fileFilter: (req, file, cb) => {
-        const allowedMimes = [
-          'application/pdf',
-          'application/msword',
-          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-        ];
-        if (allowedMimes.includes(file.mimetype)) {
+        const isPdfMime = file.mimetype === 'application/pdf';
+        const isPdfExt = extname(file.originalname || '').toLowerCase() === '.pdf';
+        if (isPdfMime && isPdfExt) {
           cb(null, true);
-        } else {
-          cb(new Error('Invalid file type. Only PDF, DOC, DOCX are allowed.'), false);
+          return;
         }
+        cb(new Error('Invalid file type. Only PDF is allowed.'), false);
       },
-    }),
+      },
+    ),
   )
   async uploadProposalDocument(
-    @Request() req,
     @Param('projectId') projectId: string,
-    @UploadedFile() file: Express.Multer.File,
+    @UploadedFiles()
+    files?: {
+      proposal_document?: Express.Multer.File[];
+      proposalDocument?: Express.Multer.File[];
+      file?: Express.Multer.File[];
+    },
   ): Promise<any> {
+    const file =
+      files?.proposal_document?.[0] ||
+      files?.proposalDocument?.[0] ||
+      files?.file?.[0];
+
     if (!file) {
       throw new BadRequestException({
         status: 'error',
-        message: 'No file uploaded',
+        message: 'No file uploaded. Use proposal_document, proposalDocument, or file.',
       });
     }
 
@@ -632,11 +606,7 @@ export class CompanyProjectsController {
       size: file.size,
     });
 
-    return this.companyProjectsService.uploadProposalDocument(
-      req.user.userId,
-      projectId,
-      file,
-    );
+    return this.companyProjectsService.uploadProposalDocumentByProjectId(projectId, file);
   }
 
   /**
@@ -644,15 +614,18 @@ export class CompanyProjectsController {
    * GET /api/company/projects/:projectId/proposal-document
    */
   @Get(':projectId/proposal-document')
-  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   async getProposalDocument(
-    @Request() req,
     @Param('projectId') projectId: string,
   ): Promise<any> {
-    return this.companyProjectsService.getProposalDocument(
-      req.user.userId,
-      projectId,
-    );
+    return this.companyProjectsService.getProposalDocumentByProjectId(projectId);
+  }
+
+  @Get(':projectId/proposal-document/file')
+  async viewProposalDocument(
+    @Param('projectId') projectId: string,
+    @Res() res: Response,
+  ): Promise<void> {
+    await this.companyProjectsService.streamProposalDocumentByProjectId(projectId, res);
   }
 
   /**
@@ -793,15 +766,10 @@ export class CompanyProjectsController {
    * GET /api/company/projects/:projectId/proposal-workorder-documents
    */
   @Get(':projectId/proposal-workorder-documents')
-  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   async getProposalWorkOrderDocuments(
-    @Request() req,
     @Param('projectId') projectId: string,
   ): Promise<any> {
-    return this.companyProjectsService.getProposalWorkOrderDocuments(
-      req.user.userId,
-      projectId,
-    );
+    return this.companyProjectsService.getProposalWorkOrderDocumentsByProjectId(projectId);
   }
 
   /**
@@ -1377,6 +1345,52 @@ export class CompanyProjectsController {
       req.user.userId,
       projectId,
       file,
+    );
+  }
+
+  /**
+   * Get latest work order document metadata.
+   * GET /api/company/projects/:projectId/work-order-document
+   */
+  @Get(':projectId/work-order-document')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
+  async getWorkOrderDocument(
+    @Request() req,
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.getWorkOrderDocument(
+      req.user.userId,
+      projectId,
+    );
+  }
+
+  /**
+   * Update latest work order status (accept/reject + remarks).
+   * PATCH /api/company/projects/:projectId/work-order-document/status
+   */
+  @Patch(':projectId/work-order-document/status')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
+  @UsePipes(
+    new ValidationPipe({
+      whitelist: true,
+      forbidNonWhitelisted: true,
+    }),
+  )
+  async updateWorkOrderStatus(
+    @Request() req,
+    @Param('projectId') projectId: string,
+    @Body() dto: ApproveWorkOrderDto,
+  ): Promise<any> {
+    if (dto.wo_status === 2 && !dto.wo_remarks) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Remarks are required when rejecting work order',
+      });
+    }
+    return this.companyProjectsService.updateWorkOrderStatus(
+      req.user.userId,
+      projectId,
+      dto,
     );
   }
 

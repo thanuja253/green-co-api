@@ -141,6 +141,11 @@ export class RegistrationInfoDto {
   turnover_document?: any;
 
   brief_profile?: any; // Alternative field name for company_brief_profile
+
+  sez_document?: any;
+  sezDocument?: any;
+  sez_input?: any;
+  sezinput?: any;
 }
 
 

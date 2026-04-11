@@ -81,6 +81,7 @@ import { MailModule } from '../../mail/mail.module';
   ],
   controllers: [CompanyProjectsController, AdminCompanyFlowController],
   providers: [CompanyProjectsService],
+  exports: [CompanyProjectsService],
 })
 export class CompanyProjectsModule {}
 

@@ -32,6 +32,20 @@ export class AdminCompanyFlowController {
     return this.companyProjectsService.getRegistrationInfoForAdmin(projectId);
   }
 
+  @Get('api/admin/projects/:projectId/registration-files/:fileType')
+  @Get('admin/projects/:projectId/registration-files/:fileType')
+  async getProjectRegistrationFileForAdmin(
+    @Param('projectId') projectId: string,
+    @Param('fileType') fileType: string,
+    @Res() res: Response,
+  ): Promise<void> {
+    const download = await this.companyProjectsService.getRegistrationFileDownloadForAdmin(
+      projectId,
+      fileType,
+    );
+    await this.companyProjectsService.streamRegistrationFileToResponse(res, download);
+  }
+
   @Put('api/admin/projects/:projectId/registration-data')
   @Patch('api/admin/projects/:projectId/registration-data')
   @Put('admin/projects/:projectId/registration-data')
@@ -49,6 +63,10 @@ export class AdminCompanyFlowController {
       brief_profile?: Express.Multer.File[];
       turnover_document?: Express.Multer.File[];
       turnover?: Express.Multer.File[];
+      sez_document?: Express.Multer.File[];
+      sezDocument?: Express.Multer.File[];
+      sez_input?: Express.Multer.File[];
+      sezinput?: Express.Multer.File[];
     },
   ): Promise<any> {
     const reqFiles = (req as any).files;

@@ -38,7 +38,7 @@ export class NotificationsController {
     return { status: 'success', message: 'All notifications marked as seen' };
   }
 
-  /** PATCH /api/company/notifications/:notificationId/seen – mark one as seen */
+  /** PATCH /api/company/notifications/:notificationId/selen – mark one as seen */
   @Patch(':notificationId/seen')
   @UseGuards(JwtAuthGuard, AccountStatusGuard)
   async markOneSeen(@Request() req, @Param('notificationId') notificationId: string) {
