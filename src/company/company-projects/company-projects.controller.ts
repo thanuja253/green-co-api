@@ -437,6 +437,8 @@ export class CompanyProjectsController {
         { name: 'brief_profile', maxCount: 1 }, // Alternative field name
         { name: 'turnover_document', maxCount: 1 },
         { name: 'turnover', maxCount: 1 }, // Alternative field name
+        { name: 'sez_document', maxCount: 1 },
+        { name: 'sez_input', maxCount: 1 }, // Alternative field name
       ],
       {
       storage: diskStorage({
@@ -486,6 +488,18 @@ export class CompanyProjectsController {
           mimetype: file.mimetype,
         });
         
+        // SEZ document: PDF only. Other registration docs keep existing allowed types.
+        if (file.fieldname === 'sez_document' || file.fieldname === 'sez_input') {
+          if (file.mimetype === 'application/pdf') {
+            console.log('[File Upload Filter] SEZ file accepted:', file.originalname);
+            cb(null, true);
+          } else {
+            console.log('[File Upload Filter] SEZ file rejected - invalid type:', file.mimetype);
+            cb(new Error(`Invalid SEZ file type: ${file.mimetype}. Only PDF is allowed.`), false);
+          }
+          return;
+        }
+
         // Allow PDF, DOC, DOCX, images
         const allowedMimes = [
           'application/pdf',
@@ -527,7 +541,9 @@ export class CompanyProjectsController {
             error.property !== 'company_brief_profile' &&
             error.property !== 'turnover_document' &&
             error.property !== 'brief_profile' &&
-            error.property !== 'turnover',
+            error.property !== 'turnover' &&
+            error.property !== 'sez_document' &&
+            error.property !== 'sez_input',
         );
         
         // If all errors are for file fields, ignore them completely
@@ -561,6 +577,8 @@ export class CompanyProjectsController {
       brief_profile?: Express.Multer.File[];
       turnover_document?: Express.Multer.File[];
       turnover?: Express.Multer.File[];
+      sez_document?: Express.Multer.File[];
+      sez_input?: Express.Multer.File[];
     },
   ): Promise<any> {
     console.log('========================================');
@@ -598,6 +616,8 @@ export class CompanyProjectsController {
       brief_profile: files?.brief_profile?.length || 0,
       turnover_document: files?.turnover_document?.length || 0,
       turnover: files?.turnover?.length || 0,
+      sez_document: files?.sez_document?.length || 0,
+      sez_input: files?.sez_input?.length || 0,
     });
     
     // Also check req.files (Multer might put files there as fallback)
@@ -648,6 +668,12 @@ export class CompanyProjectsController {
     }
     if (cleanedBody.turnover && typeof cleanedBody.turnover === 'object' && Object.keys(cleanedBody.turnover).length === 0) {
       delete cleanedBody.turnover;
+    }
+    if (cleanedBody.sez_document && typeof cleanedBody.sez_document === 'object' && Object.keys(cleanedBody.sez_document).length === 0) {
+      delete cleanedBody.sez_document;
+    }
+    if (cleanedBody.sez_input && typeof cleanedBody.sez_input === 'object' && Object.keys(cleanedBody.sez_input).length === 0) {
+      delete cleanedBody.sez_input;
     }
 
     // Flatten nested JSON shapes: { payload: {...} }, { registration_info: {...} }, { data: {...} }
@@ -742,8 +768,10 @@ export class CompanyProjectsController {
     if (!email) addErr('email', 'Email is required');
     else if (!emailRegex.test(email)) addErr('email', 'Email format is invalid');
 
-    if (!mobile) addErr('mobileno', 'Mobile number is required');
-    else if (!indianMobileRegex.test(mobile)) addErr('mobileno', 'Mobile number must be a valid 10-digit Indian number');
+    // Some clients don't post company mobile on edit/update calls; validate format only when provided.
+    if (mobile && !indianMobileRegex.test(mobile)) {
+      addErr('mobileno', 'Mobile number must be a valid 10-digit Indian number');
+    }
 
     if (!city) addErr('location', 'City is required');
     else {
@@ -783,14 +811,17 @@ export class CompanyProjectsController {
     if (!latestTurnover) addErr('latestturnover', 'Latest turnover is required');
     else if (!decimalTwoRegex.test(latestTurnover)) addErr('latestturnover', 'Latest turnover must be a valid number with up to 2 decimal places');
 
-    if (!electrical) addErr('electricalenergyconsumption', 'Electrical energy consumption is required');
-    else if (!decimalTwoRegex.test(electrical)) addErr('electricalenergyconsumption', 'Electrical energy consumption must be a valid number with up to 2 decimal places');
+    if (electrical && !decimalTwoRegex.test(electrical)) {
+      addErr('electricalenergyconsumption', 'Electrical energy consumption must be a valid number with up to 2 decimal places');
+    }
 
-    if (!thermal) addErr('thermalenergyconsumption', 'Thermal energy consumption is required');
-    else if (!decimalTwoRegex.test(thermal)) addErr('thermalenergyconsumption', 'Thermal energy consumption must be a valid number with up to 2 decimal places');
+    if (thermal && !decimalTwoRegex.test(thermal)) {
+      addErr('thermalenergyconsumption', 'Thermal energy consumption must be a valid number with up to 2 decimal places');
+    }
 
-    if (!water) addErr('waterconsumption', 'Water consumption is required');
-    else if (!decimalTwoRegex.test(water)) addErr('waterconsumption', 'Water consumption must be a valid number with up to 2 decimal places');
+    if (water && !decimalTwoRegex.test(water)) {
+      addErr('waterconsumption', 'Water consumption must be a valid number with up to 2 decimal places');
+    }
 
     if (!tanNo) addErr('tanno', 'TAN number is required');
     else if (!tanRegex.test(tanNo.toUpperCase())) addErr('tanno', 'TAN number format is invalid');
@@ -808,7 +839,10 @@ export class CompanyProjectsController {
       String(declaration).toLowerCase() === 'true' ||
       String(declaration).toLowerCase() === 'on' ||
       String(declaration).toLowerCase() === 'yes';
-    if (!declarationAccepted) addErr('inlineCheckbox', 'Declaration is required');
+    // Allow update calls that don't resend checkbox; enforce only when declaration field is posted.
+    if (declaration !== undefined && declaration !== null && !declarationAccepted) {
+      addErr('inlineCheckbox', 'Declaration is required');
+    }
 
     if (Object.keys(errors).length > 0) {
       throw new BadRequestException({
@@ -881,6 +915,9 @@ export class CompanyProjectsController {
     } else if (fileType === 'turnover-document' || fileType === 'turnover') {
       filePath = registrationInfo.turnover_document_url;
       filename = registrationInfo.turnover_document_filename || 'turnover_document';
+    } else if (fileType === 'sez-document' || fileType === 'sez-input' || fileType === 'sez') {
+      filePath = registrationInfo.sez_document_url;
+      filename = registrationInfo.sez_document_filename || 'sez_document.pdf';
     }
 
     if (!filePath) {

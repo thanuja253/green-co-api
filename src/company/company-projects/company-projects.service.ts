@@ -501,6 +501,8 @@ export class CompanyProjectsService {
       brief_profile?: Express.Multer.File[];
       turnover_document?: Express.Multer.File[];
       turnover?: Express.Multer.File[];
+      sez_document?: Express.Multer.File[];
+      sez_input?: Express.Multer.File[];
     },
   ) {
     if (!companyId || !projectId) {
@@ -548,6 +550,8 @@ export class CompanyProjectsService {
     delete normalizedData.turnover_document;
     delete normalizedData.brief_profile;
     delete normalizedData.turnover;
+    delete normalizedData.sez_document;
+    delete normalizedData.sez_input;
     delete normalizedData.process_type;
     
     // Normalize pan_no -> pan_number
@@ -568,6 +572,7 @@ export class CompanyProjectsService {
       hasFiles: !!files,
       company_brief_profile: files?.company_brief_profile?.[0]?.filename,
       turnover_document: files?.turnover_document?.[0]?.filename,
+      sez_document: files?.sez_document?.[0]?.filename || files?.sez_input?.[0]?.filename,
     });
 
     if (files) {
@@ -596,6 +601,20 @@ export class CompanyProjectsService {
           url: fullUrl,
           filename: turnoverFile.originalname,
           savedFilename: turnoverFile.filename,
+        });
+      }
+
+      // Handle SEZ Document (PDF only enforced by controller filter)
+      const sezFile = files.sez_document?.[0] || files.sez_input?.[0];
+      if (sezFile) {
+        const relativePath = `uploads/registration/${projectId}/${sezFile.filename}`;
+        const fullUrl = `${baseUrl}/${relativePath}`;
+        normalizedData.sez_document_url = fullUrl;
+        normalizedData.sez_document_filename = sezFile.originalname;
+        console.log('[Registration Info Service] Saved SEZ Document:', {
+          url: fullUrl,
+          filename: sezFile.originalname,
+          savedFilename: sezFile.filename,
         });
       }
     } else {
@@ -628,6 +647,7 @@ export class CompanyProjectsService {
       projectId: projectId.toString(),
       hasCompanyBriefProfile: !!normalizedData.company_brief_profile_url,
       hasTurnoverDocument: !!normalizedData.turnover_document_url,
+      hasSezDocument: !!normalizedData.sez_document_url,
       registrationInfoKeys: Object.keys(project.registration_info),
       profile_update: project.profile_update,
       next_activities_id: project.next_activities_id,
@@ -675,6 +695,7 @@ export class CompanyProjectsService {
     console.log('[Registration Info Service] Saved successfully. Registration info:', {
       company_brief_profile_url: project.registration_info?.company_brief_profile_url,
       turnover_document_url: project.registration_info?.turnover_document_url,
+      sez_document_url: project.registration_info?.sez_document_url,
     });
 
     // Optionally mirror some fields onto Company for Quickview/profile
@@ -719,6 +740,13 @@ export class CompanyProjectsService {
         url: normalizedData.turnover_document_url,
         filename: normalizedData.turnover_document_filename,
         downloadUrl: `${baseUrl}/api/company/projects/${projectId}/registration-files/turnover-document`,
+      };
+    }
+    if (normalizedData.sez_document_url) {
+      response.data.sez_document = {
+        url: normalizedData.sez_document_url,
+        filename: normalizedData.sez_document_filename,
+        downloadUrl: `${baseUrl}/api/company/projects/${projectId}/registration-files/sez-document`,
       };
     }
 
@@ -810,12 +838,23 @@ export class CompanyProjectsService {
     } else {
       responseData.turnover_document = null;
     }
+    if (registrationInfo.sez_document_url) {
+      responseData.sez_document = {
+        url: registrationInfo.sez_document_url,
+        filename: registrationInfo.sez_document_filename || 'sez_document.pdf',
+        downloadUrl: `${baseUrl}/api/company/projects/${registrationFilesProjectId}/registration-files/sez-document`,
+      };
+    } else {
+      responseData.sez_document = null;
+    }
 
     // Remove internal file URL fields from response (keep only the structured objects)
     delete responseData.company_brief_profile_url;
     delete responseData.company_brief_profile_filename;
     delete responseData.turnover_document_url;
     delete responseData.turnover_document_filename;
+    delete responseData.sez_document_url;
+    delete responseData.sez_document_filename;
 
     // Complete payload for frontend edit/create form binding.
     const payload = {
@@ -859,6 +898,7 @@ export class CompanyProjectsService {
       contact_number: '',
       company_brief_profile: null as any,
       turnover_document: null as any,
+      sez_document: null as any,
       ...responseData,
     };
 
@@ -936,6 +976,8 @@ export class CompanyProjectsService {
   private async resolveRegistrationIdsForAdminParam(projectIdOrCompanyId: string): Promise<{
     companyId: string;
     resolvedProjectId: string;
+    /** How the param was interpreted: direct project `_id`, or company `_id` with one project picked. */
+    resolution: 'project_id' | 'company_id';
   }> {
     if (!Types.ObjectId.isValid(projectIdOrCompanyId)) {
       throw new BadRequestException({
@@ -949,7 +991,10 @@ export class CompanyProjectsService {
       .select('company_id')
       .lean();
 
+    let resolution: 'project_id' | 'company_id' = 'project_id';
+
     if (!project) {
+      resolution = 'company_id';
       const candidates = await this.projectModel
         .find({ company_id: new Types.ObjectId(projectIdOrCompanyId) })
         .select('company_id registration_info profile_update updatedAt createdAt')
@@ -983,7 +1028,7 @@ export class CompanyProjectsService {
     }
 
     const resolvedProjectId = String((project as any)._id);
-    return { companyId, resolvedProjectId };
+    return { companyId, resolvedProjectId, resolution };
   }
 
   /**
@@ -1813,9 +1858,21 @@ export class CompanyProjectsService {
    * Same as {@link getWorkflowStatus}; param may be project _id or company _id (matches admin registration-data).
    */
   async getWorkflowStatusForAdmin(projectIdOrCompanyId: string) {
-    const { companyId, resolvedProjectId } =
+    const { companyId, resolvedProjectId, resolution } =
       await this.resolveRegistrationIdsForAdminParam(projectIdOrCompanyId);
-    return this.getWorkflowStatus(companyId, resolvedProjectId);
+    const full = await this.getWorkflowStatus(companyId, resolvedProjectId);
+    return {
+      ...full,
+      data: {
+        ...full.data,
+        id_resolution: {
+          requested_id: projectIdOrCompanyId,
+          resolved_project_id: resolvedProjectId,
+          company_id: companyId,
+          resolution,
+        },
+      },
+    };
   }
 
   /**
@@ -1833,9 +1890,21 @@ export class CompanyProjectsService {
    * `:projectId` may be a project _id or company _id (admin companies list id).
    */
   async getQuickviewDataForAdmin(projectIdOrCompanyId: string) {
-    const { companyId, resolvedProjectId } =
+    const { companyId, resolvedProjectId, resolution } =
       await this.resolveRegistrationIdsForAdminParam(projectIdOrCompanyId);
-    return this.getQuickviewData(companyId, resolvedProjectId);
+    const payload = await this.getQuickviewData(companyId, resolvedProjectId);
+    return {
+      ...payload,
+      data: {
+        ...payload.data,
+        id_resolution: {
+          requested_id: projectIdOrCompanyId,
+          resolved_project_id: resolvedProjectId,
+          company_id: companyId,
+          resolution,
+        },
+      },
+    };
   }
 
   private toWorkflowStatusPayload(full: { status: string; message: string; data: any }) {
@@ -1879,6 +1948,19 @@ export class CompanyProjectsService {
       throw new NotFoundException({
         status: 'error',
         message: 'Project not found',
+      });
+    }
+
+    // Enforce workflow order: proposal upload is allowed only after registration is submitted.
+    const hasRegistrationSubmitted =
+      Number((project as any).profile_update || 0) === 1 ||
+      !!(project as any).registration_info &&
+        Object.keys((project as any).registration_info || {}).length > 0;
+    if (!hasRegistrationSubmitted) {
+      throw new BadRequestException({
+        status: 'error',
+        message:
+          'Registration info is not completed yet. Complete registration before uploading proposal document.',
       });
     }
 
@@ -2114,6 +2196,9 @@ export class CompanyProjectsService {
         proposal_status_updated_at: (project as any).proposal_status_updated_at
           ? new Date((project as any).proposal_status_updated_at).toISOString()
           : null,
+        can_reupload: Number((project as any).proposal_status ?? 0) === 2,
+        reupload_responsibility:
+          Number((project as any).proposal_status ?? 0) === 2 ? 'CII' : null,
       },
     };
   }
@@ -2376,6 +2461,9 @@ export class CompanyProjectsService {
         proposal_status_updated_at: projectAny.proposal_status_updated_at
           ? new Date(projectAny.proposal_status_updated_at).toISOString()
           : null,
+        can_reupload: Number(projectAny.proposal_status ?? 0) === 2,
+        reupload_responsibility:
+          Number(projectAny.proposal_status ?? 0) === 2 ? 'CII' : null,
         uploaded_at:
           projectAny.updatedAt?.toISOString?.() ??
           projectAny.createdAt?.toISOString?.() ??
@@ -2391,6 +2479,8 @@ export class CompanyProjectsService {
         proposal_status: 0,
         proposal_remarks: null,
         proposal_status_updated_at: null,
+        can_reupload: false,
+        reupload_responsibility: null,
       };
     }
 
