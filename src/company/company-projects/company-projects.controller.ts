@@ -33,7 +33,6 @@ import { ApproveWorkOrderDto } from './dto/approve-workorder.dto';
 import { WorkOrderAcceptanceDetailsDto } from './dto/work-order-acceptance.dto';
 import { ProjectCodeUpsertDto } from './dto/project-code-upsert.dto';
 import { CreateProjectCodeDto } from './dto/create-project-code.dto';
-import { AssignCoordinatorDto } from './dto/assign-coordinator.dto';
 import { AssignAssessorDto } from './dto/assign-assessor.dto';
 import { AssignFacilitatorDto } from './dto/assign-facilitator.dto';
 import { SubmitPaymentDto } from './dto/submit-payment.dto';
@@ -49,6 +48,11 @@ import {
   parseRegistrationMultipartBody,
   registrationInfoMulterOptions,
 } from './registration-info-upload.config';
+import {
+  LaunchTrainingSessionFiles,
+  addLaunchTrainingSessionFromMultipart,
+  launchTrainingSessionUploadInterceptor,
+} from './launch-training-session-upload.config';
 
 @Controller('api/company/projects')
 export class CompanyProjectsController {
@@ -893,6 +897,56 @@ export class CompanyProjectsController {
   }
 
   /**
+   * Launch & Training Program — same payload as `/api/admin/projects/.../launch-training`.
+   * Some admin UIs call the **company** API base (`/api/company/projects/...`); without these aliases, POST returns 404.
+   */
+  @Get(':projectId/launch-training')
+  async getLaunchTrainingCompanyApiAlias(
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.getLaunchTrainingProgramForAdmin(projectId);
+  }
+
+  @Get(':projectId/launch-training-program')
+  async getLaunchTrainingProgramCompanyApiAlias(
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.getLaunchTrainingProgramForAdmin(projectId);
+  }
+
+  @Post(':projectId/launch-training-sessions')
+  @UseInterceptors(launchTrainingSessionUploadInterceptor())
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  async postLaunchTrainingSessionsCompanyAlias(
+    @Param('projectId') projectId: string,
+    @Body() dto: UploadLaunchAndTrainingDto,
+    @UploadedFiles() files?: LaunchTrainingSessionFiles,
+  ): Promise<any> {
+    return addLaunchTrainingSessionFromMultipart(
+      this.companyProjectsService,
+      projectId,
+      dto,
+      files,
+    );
+  }
+
+  @Post(':projectId/launch-training')
+  @UseInterceptors(launchTrainingSessionUploadInterceptor())
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  async postLaunchTrainingCompanyAlias(
+    @Param('projectId') projectId: string,
+    @Body() dto: UploadLaunchAndTrainingDto,
+    @UploadedFiles() files?: LaunchTrainingSessionFiles,
+  ): Promise<any> {
+    return addLaunchTrainingSessionFromMultipart(
+      this.companyProjectsService,
+      projectId,
+      dto,
+      files,
+    );
+  }
+
+  /**
    * Upload Launch And Training (Site Visit Report) – consultant/facilitator upload.
    * POST /api/company/projects/:projectId/launch-and-training-document
    * Body (multipart): launch_upload (file, PDF), launch_training_report_date (string).
@@ -1710,9 +1764,10 @@ export class CompanyProjectsController {
   @Post(':projectId/assign-coordinator')
   async assignCoordinator(
     @Param('projectId') projectId: string,
-    @Body() dto: AssignCoordinatorDto,
+    /** Raw body: global ValidationPipe strips unknown keys from DTOs; keep full payload for assign. */
+    @Body() body: Record<string, unknown>,
   ): Promise<any> {
-    return this.companyProjectsService.assignCoordinatorByProjectId(projectId, dto);
+    return this.companyProjectsService.assignCoordinatorByProjectId(projectId, body);
   }
 
   /**

@@ -3,6 +3,17 @@ import { Document, Schema as MongooseSchema } from 'mongoose';
 
 export type CompanyProjectDocument = CompanyProject & Document;
 
+/** Up to 4 informational Launch & Training sessions (admin uploads; no approval flow). */
+const LaunchTrainingSessionSubSchema = new MongooseSchema(
+  {
+    relative_path: { type: String, required: true },
+    original_filename: { type: String },
+    session_date: { type: Date },
+    uploaded_at: { type: Date, default: () => new Date() },
+  },
+  { _id: false },
+);
+
 @Schema({ timestamps: true })
 export class CompanyProject {
   @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Company', required: true })
@@ -76,6 +87,14 @@ export class CompanyProject {
 
   @Prop()
   launch_training_report_date?: Date;
+
+  @Prop({ type: [LaunchTrainingSessionSubSchema], default: [] })
+  launch_training_sessions?: Array<{
+    relative_path: string;
+    original_filename?: string;
+    session_date?: Date;
+    uploaded_at?: Date;
+  }>;
 
   @Prop()
   hand_holding_document?: string;

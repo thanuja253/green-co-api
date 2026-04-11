@@ -32,7 +32,6 @@ import { CreateAssessorProfileDto } from './dto/create-assessor-profile.dto';
 import { ListAssessorsQueryDto } from './dto/list-assessors-query.dto';
 import { UpdateAssessorApprovalDto } from './dto/update-assessor-approval.dto';
 import { ReportsQueryDto } from './dto/reports-query.dto';
-import { AssignCoordinatorDto } from './dto/assign-coordinator.dto';
 import { AssignFacilitatorDto } from './dto/assign-facilitator.dto';
 import { CreateCoordinatorDto } from './dto/create-coordinator.dto';
 import { UpdateCoordinatorDto } from './dto/update-coordinator.dto';
@@ -115,12 +114,12 @@ export class AdminCompanyFlowController {
 
   @Post('api/admin/projects/:projectId/assign-coordinator')
   @Post('admin/projects/:projectId/assign-coordinator')
-  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
   async assignCoordinatorForAdmin(
     @Param('projectId') projectId: string,
-    @Body() dto: AssignCoordinatorDto,
+    /** Raw body so arbitrary UI field names (e.g. dropdown label) are not stripped. */
+    @Body() body: Record<string, unknown>,
   ): Promise<any> {
-    return this.companyProjectsService.assignCoordinatorForAdmin(projectId, dto);
+    return this.companyProjectsService.assignCoordinatorForAdmin(projectId, body);
   }
 
   @Delete('api/admin/projects/:projectId/coordinators/:assignmentId')
@@ -178,6 +177,8 @@ export class AdminCompanyFlowController {
   async removeFacilitatorForAdmin(@Param('projectId') projectId: string): Promise<any> {
     return this.companyProjectsService.removeFacilitatorAssignmentForAdmin(projectId);
   }
+
+  /** Launch & Training GET/POST: `admin-launch-training.controller.ts` */
 
   /** Master coordinator directory (MongoDB): dropdown uses `label` = "Name - mobile". */
   @Get('api/admin/coordinators')

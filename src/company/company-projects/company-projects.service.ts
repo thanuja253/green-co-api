@@ -33,7 +33,7 @@ import { UpdateInvoiceApprovalDto } from './dto/update-invoice-approval.dto';
 import { CreateAssessorProfileDto } from './dto/create-assessor-profile.dto';
 import { ListAssessorsQueryDto } from './dto/list-assessors-query.dto';
 import { ReportsQueryDto } from './dto/reports-query.dto';
-import { AssignCoordinatorDto } from './dto/assign-coordinator.dto';
+import { pickCoordinatorIdFromBody } from './dto/assign-coordinator.dto';
 import { CreateCoordinatorDto } from './dto/create-coordinator.dto';
 import { UpdateCoordinatorDto } from './dto/update-coordinator.dto';
 import { join, relative } from 'path';
@@ -2065,6 +2065,8 @@ export class CompanyProjectsService {
 
   private static readonly MAX_COORDINATORS_PER_PROJECT = 3;
 
+  private static readonly MAX_LAUNCH_TRAINING_SESSIONS = 4;
+
   /** Assignment tab: coordinators/facilitators require a project code (`project_id` on CompanyProject). */
   private assertProjectHasCodeForAssignments(project: { project_id?: string }): void {
     const code = project?.project_id != null ? String(project.project_id).trim() : '';
@@ -2088,37 +2090,164 @@ export class CompanyProjectsService {
     return String(project.company_id);
   }
 
-  /** coordinator_id OR (name + email): email matches master row or creates one. */
-  private async resolveCoordinatorMasterId(dto: AssignCoordinatorDto): Promise<string> {
-    const rawId = dto.coordinator_id?.trim();
+  /** Last 8–15 digit run (handles "Test - 9090909090", en-dash labels, etc.). */
+  private extractTrailingMobileDigits(s: string): string | null {
+    const m = String(s).trim().match(/(\d{8,15})\s*$/);
+    return m ? m[1] : null;
+  }
+
+  private async findActiveCoordinatorByMobile(mobileStr: string) {
+    const n = Number(mobileStr);
+    const mobileClause: Record<string, unknown>[] = [{ mobile: mobileStr }];
+    if (!Number.isNaN(n) && String(n) === mobileStr.trim()) {
+      mobileClause.push({ mobile: n });
+    }
+    return this.coordinatorModel
+      .findOne({
+        $and: [
+          { $or: mobileClause },
+          { $or: [{ status: '1' }, { status: 1 }, { status: { $exists: false } }] },
+        ],
+      })
+      .select('_id')
+      .lean();
+  }
+
+  /** Scan full request body — global DTO whitelist was stripping unknown keys. */
+  private async resolveCoordinatorIdFromNameDashMobileFields(
+    raw: Record<string, unknown>,
+  ): Promise<string | null> {
+    const seen = new Set<string>();
+    const tryString = async (s: string): Promise<string | null> => {
+      const t = s.trim();
+      if (!t || seen.has(t)) return null;
+      seen.add(t);
+      const mobile = this.extractTrailingMobileDigits(t);
+      if (!mobile) return null;
+      const doc = await this.findActiveCoordinatorByMobile(mobile);
+      return doc ? String((doc as any)._id) : null;
+    };
+
+    const walk = async (v: unknown): Promise<string | null> => {
+      if (v == null) return null;
+      if (typeof v === 'string') return tryString(v);
+      if (typeof v === 'number' && String(v).length >= 8) return tryString(String(v));
+      if (typeof v === 'object' && !Array.isArray(v)) {
+        for (const inner of Object.values(v as Record<string, unknown>)) {
+          const hit = await walk(inner);
+          if (hit) return hit;
+        }
+      }
+      return null;
+    };
+
+    for (const k of [
+      'label',
+      'name',
+      'display',
+      'text',
+      'title',
+      'coordinator',
+      'coordinatorName',
+      'coordinator_label',
+      'selectedLabel',
+    ]) {
+      const v = raw[k];
+      if (v == null) continue;
+      const hit = await walk(v);
+      if (hit) return hit;
+    }
+
+    for (const [, v] of Object.entries(raw)) {
+      const hit = await walk(v);
+      if (hit) return hit;
+    }
+
+    const picked = pickCoordinatorIdFromBody(raw);
+    if (picked && !Types.ObjectId.isValid(picked)) {
+      return await tryString(picked);
+    }
+
+    return null;
+  }
+
+  /** coordinator_id OR (name + email) OR unique name match in directory. */
+  private async resolveCoordinatorMasterId(raw: Record<string, unknown>): Promise<string> {
+    const body = raw && typeof raw === 'object' ? raw : {};
+    const picked = pickCoordinatorIdFromBody(body);
+    const rawId = (picked || (typeof body.coordinator_id === 'string' ? body.coordinator_id : '') || '')
+      .toString()
+      .trim();
+
+    if (rawId && Types.ObjectId.isValid(rawId)) {
+      return rawId;
+    }
+
+    const fromDisplay = await this.resolveCoordinatorIdFromNameDashMobileFields(body);
+    if (fromDisplay) return fromDisplay;
+
     if (rawId) {
-      if (!Types.ObjectId.isValid(rawId)) {
+      throw new BadRequestException({
+        status: 'error',
+        message:
+          'Invalid coordinator id. Send Mongo id from GET coordinators, or body field label/name as "Name - mobile".',
+      });
+    }
+
+    const name =
+      body.name != null && String(body.name).trim() !== '' ? String(body.name).trim() : '';
+    const email =
+      body.email != null && String(body.email).trim() !== ''
+        ? String(body.email).trim().toLowerCase()
+        : '';
+
+    if (name && email) {
+      const existing = await this.coordinatorModel.findOne({ email }).lean();
+      if (existing) {
+        return String((existing as any)._id);
+      }
+      const created = await this.coordinatorModel.create({
+        name,
+        email,
+        status: '1',
+      });
+      return created._id.toString();
+    }
+
+    if (name && !email) {
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const matches = await this.coordinatorModel
+        .find({
+          $or: [{ status: '1' }, { status: 1 }, { status: { $exists: false } }],
+          name: new RegExp(`^${escaped}$`, 'i'),
+        })
+        .limit(2)
+        .select('_id')
+        .lean();
+      if (matches.length === 1) {
+        return String((matches[0] as any)._id);
+      }
+      if (matches.length > 1) {
         throw new BadRequestException({
           status: 'error',
           message:
-            'Invalid coordinator id. Use id from GET /api/company/projects/coordinators (or send name and email).',
+            'Multiple coordinators match that name. Send id from GET coordinators or include email.',
         });
       }
-      return rawId;
     }
-    const name = dto.name?.trim();
-    const email = dto.email?.trim().toLowerCase();
-    if (!name || !email) {
-      throw new BadRequestException({
-        status: 'error',
-        message: 'Provide either coordinator_id or both name and email.',
-      });
+
+    if (!name && email) {
+      const existing = await this.coordinatorModel.findOne({ email }).lean();
+      if (existing) {
+        return String((existing as any)._id);
+      }
     }
-    const existing = await this.coordinatorModel.findOne({ email }).lean();
-    if (existing) {
-      return String((existing as any)._id);
-    }
-    const created = await this.coordinatorModel.create({
-      name,
-      email,
-      status: '1',
+
+    throw new BadRequestException({
+      status: 'error',
+      message:
+        'Provide coordinator id (id / coordinator_id), or both name and email, or a unique name from the coordinator directory.',
     });
-    return created._id.toString();
   }
 
   async updateRegistrationInfoForAdmin(
@@ -4290,34 +4419,242 @@ export class CompanyProjectsService {
     };
   }
 
+  private async countCoordinatorsForProject(companyId: string, projectId: string): Promise<number> {
+    return this.companyCoordinatorModel.countDocuments({
+      company_id: companyId,
+      project_id: projectId,
+    });
+  }
+
+  private formatLaunchTrainingSessionForResponse(
+    s: { relative_path: string; original_filename?: string; session_date?: Date; uploaded_at?: Date },
+    index1: number,
+    baseUrl: string,
+  ) {
+    const docPath = s.relative_path;
+    const documentUrl = docPath
+      ? docPath.startsWith('http')
+        ? docPath
+        : `${baseUrl}/${docPath.replace(/^\//, '')}`
+      : null;
+    return {
+      session_index: index1,
+      document_url: documentUrl,
+      document_filename: s.original_filename ?? (docPath ? docPath.split('/').pop() ?? null : null),
+      session_date:
+        s.session_date != null
+          ? typeof s.session_date === 'string'
+            ? s.session_date
+            : (s.session_date as Date).toISOString?.() ?? null
+          : null,
+      uploaded_at:
+        s.uploaded_at != null
+          ? typeof s.uploaded_at === 'string'
+            ? s.uploaded_at
+            : (s.uploaded_at as Date).toISOString?.() ?? null
+          : null,
+    };
+  }
+
   /**
-   * Get Launch And Training (Site Visit Report) page data.
-   * Used by both consultant (upload page) and company (read-only view after upload).
+   * Launch & Training Program: up to 4 sessions + optional legacy single doc (consultant flow).
+   * `section_available` is true once at least one coordinator is assigned.
    */
-  async getLaunchAndTraining(companyId: string, projectId: string) {
+  async getLaunchTrainingProgramPayload(companyId: string, projectId: string) {
     const project = await this.projectModel.findOne({ _id: projectId, company_id: companyId }).lean();
     if (!project) {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
     const projectAny = project as any;
     const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com';
+    const coordCount = await this.countCoordinatorsForProject(companyId, projectId);
+    const sessionsRaw = Array.isArray(projectAny.launch_training_sessions)
+      ? projectAny.launch_training_sessions
+      : [];
+    const sessions = sessionsRaw.map((s: any, i: number) =>
+      this.formatLaunchTrainingSessionForResponse(s, i + 1, baseUrl),
+    );
+
     const docPath = projectAny.launch_training_document;
-    const documentUrl = docPath
-      ? (docPath.startsWith('http') ? docPath : `${baseUrl}/${docPath.replace(/^\//, '')}`)
+    const legacyDocumentUrl = docPath
+      ? docPath.startsWith('http')
+        ? docPath
+        : `${baseUrl}/${docPath.replace(/^\//, '')}`
       : null;
-    const reportDate = projectAny.launch_training_report_date
-      ? (typeof projectAny.launch_training_report_date === 'string'
-          ? projectAny.launch_training_report_date
-          : (projectAny.launch_training_report_date as Date)?.toISOString?.())
+    const legacyReportDate = projectAny.launch_training_report_date
+      ? typeof projectAny.launch_training_report_date === 'string'
+        ? projectAny.launch_training_report_date
+        : (projectAny.launch_training_report_date as Date)?.toISOString?.()
       : null;
+
+    return {
+      status: 'success' as const,
+      message: 'Launch & Training Program data retrieved',
+      data: {
+        project_id: String(projectId),
+        section_available: coordCount > 0,
+        coordinator_assigned: coordCount > 0,
+        max_sessions: CompanyProjectsService.MAX_LAUNCH_TRAINING_SESSIONS,
+        sessions_count: sessions.length,
+        sessions,
+        legacy_single:
+          legacyDocumentUrl != null
+            ? {
+                launch_training_document: legacyDocumentUrl,
+                launch_training_report_date: legacyReportDate,
+                document_filename: docPath?.split('/').pop() ?? null,
+              }
+            : null,
+      },
+    };
+  }
+
+  async getLaunchTrainingProgramForAdmin(projectOrCompanyId: string) {
+    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const cid = String(resolved.company_id);
+    const pid = String(resolved._id);
+    const payload = await this.getLaunchTrainingProgramPayload(cid, pid);
+    const normalizedInput = String(projectOrCompanyId).trim();
+    return {
+      ...payload,
+      data: {
+        ...payload.data,
+        id_resolution: {
+          input_id: normalizedInput,
+          resolved_project_id: pid,
+          resolved_company_id: cid,
+          input_matched_project_id: pid === normalizedInput,
+        },
+      },
+    };
+  }
+
+  async addLaunchTrainingSessionForAdmin(
+    projectOrCompanyId: string,
+    file: Express.Multer.File,
+    sessionDateRaw?: string,
+  ) {
+    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    if (!resolved) {
+      throw new NotFoundException({
+        status: 'error',
+        message: `No project found for id "${projectOrCompanyId}". Use a valid company project _id or company_id.`,
+        code: 'PROJECT_NOT_FOUND',
+      });
+    }
+    if (!resolved.company_id) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Project record has no company_id.',
+        code: 'PROJECT_INVALID',
+      });
+    }
+    const companyId = String(resolved.company_id);
+    const projectId = String(resolved._id);
+
+    const coordCount = await this.countCoordinatorsForProject(companyId, projectId);
+    if (coordCount < 1) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Assign at least one coordinator before uploading Launch & Training documents.',
+      });
+    }
+
+    const project = await this.projectModel.findOne({ _id: projectId, company_id: companyId });
+    if (!project) {
+      throw new NotFoundException({
+        status: 'error',
+        message: `Project "${projectId}" could not be reloaded for company "${companyId}".`,
+        code: 'PROJECT_NOT_FOUND',
+      });
+    }
+
+    const existing = ([...(project as any).launch_training_sessions]) as any[];
+    if (existing.length >= CompanyProjectsService.MAX_LAUNCH_TRAINING_SESSIONS) {
+      throw new BadRequestException({
+        status: 'error',
+        message: `A maximum of ${CompanyProjectsService.MAX_LAUNCH_TRAINING_SESSIONS} Launch & Training sessions are allowed per project.`,
+      });
+    }
+
+    const relativePath = `uploads/companyproject/launchAndTraining/${projectId}/${file.filename}`;
+    const sessionDate = sessionDateRaw
+      ? (() => {
+          const d = new Date(sessionDateRaw);
+          return Number.isNaN(d.getTime()) ? undefined : d;
+        })()
+      : undefined;
+
+    const entry = {
+      relative_path: relativePath,
+      original_filename: file.originalname,
+      session_date: sessionDate,
+      uploaded_at: new Date(),
+    };
+    existing.push(entry);
+    (project as any).launch_training_sessions = existing;
+    await project.save();
+
+    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com';
+    const fullUrl = `${baseUrl}/${relativePath.replace(/^\//, '')}`;
+
+    const company = await this.companyModel.findById(companyId).lean();
+    this.notificationsService
+      .create(
+        'Launch & Training document available',
+        `A Launch & Training session document has been uploaded for your project (${existing.length} of ${CompanyProjectsService.MAX_LAUNCH_TRAINING_SESSIONS}). You can view it in the portal.`,
+        'C',
+        companyId,
+      )
+      .catch((err) => console.error('Launch & training notification failed:', err));
+
+    this.mailService
+      .sendSiteVisitReportUploadedEmail(company?.email, company?.name || 'Company')
+      .catch((err) => console.error('Launch & training email failed:', err));
+
+    return {
+      status: 'success' as const,
+      message: 'Launch & Training session uploaded',
+      data: {
+        project_id: projectId,
+        sessions_count: existing.length,
+        max_sessions: CompanyProjectsService.MAX_LAUNCH_TRAINING_SESSIONS,
+        session: this.formatLaunchTrainingSessionForResponse(entry, existing.length, baseUrl),
+        document_url: fullUrl,
+      },
+    };
+  }
+
+  /**
+   * Get Launch And Training (Site Visit Report) page data.
+   * Used by both consultant (upload page) and company (read-only view after upload).
+   * Includes multi-session list (admin) and legacy single-document fields for older UIs.
+   */
+  async getLaunchAndTraining(companyId: string, projectId: string) {
+    const full = await this.getLaunchTrainingProgramPayload(companyId, projectId);
+    const d = full.data;
+    const firstSession = d.sessions?.[0];
+    const legacy = d.legacy_single;
     return {
       status: 'success',
       message: 'Launch and training data retrieved successfully',
       data: {
-        project_id: projectId,
-        launch_training_document: documentUrl,
-        launch_training_report_date: reportDate,
-        document_filename: documentUrl ? docPath?.split('/').pop() ?? null : null,
+        project_id: d.project_id,
+        launch_training_document:
+          firstSession?.document_url ?? legacy?.launch_training_document ?? null,
+        launch_training_report_date:
+          firstSession?.session_date ?? legacy?.launch_training_report_date ?? null,
+        document_filename:
+          firstSession?.document_filename ?? legacy?.document_filename ?? null,
+        section_available: d.section_available,
+        coordinator_assigned: d.coordinator_assigned,
+        max_sessions: d.max_sessions,
+        sessions_count: d.sessions_count,
+        sessions: d.sessions,
+        legacy_single: d.legacy_single,
       },
     };
   }
@@ -5544,7 +5881,7 @@ export class CompanyProjectsService {
   async assignCoordinator(
     companyId: string,
     projectId: string,
-    dto: AssignCoordinatorDto,
+    body: Record<string, unknown>,
   ) {
     // Validate project first so we do not create coordinator master rows for invalid projects
     const project = await this.projectModel.findOne({
@@ -5572,12 +5909,16 @@ export class CompanyProjectsService {
       });
     }
 
-    let coordinatorId = await this.resolveCoordinatorMasterId(dto);
+    let coordinatorId = await this.resolveCoordinatorMasterId(body);
 
     let coordinator = await this.coordinatorModel.findById(coordinatorId);
-    if (!coordinator && dto.email?.trim()) {
+    const emailForLookup =
+      body.email != null && String(body.email).trim() !== ''
+        ? String(body.email).trim().toLowerCase()
+        : '';
+    if (!coordinator && emailForLookup) {
       const byEmail = await this.coordinatorModel.findOne({
-        email: dto.email.trim().toLowerCase(),
+        email: emailForLookup,
       });
       if (byEmail) {
         coordinator = byEmail;
@@ -5915,9 +6256,9 @@ export class CompanyProjectsService {
     return this.getProjectAssignments(companyId, projectId);
   }
 
-  async assignCoordinatorByProjectId(projectId: string, dto: AssignCoordinatorDto) {
+  async assignCoordinatorByProjectId(projectId: string, body: Record<string, unknown>) {
     const companyId = await this.resolveCompanyIdFromProjectId(projectId);
-    return this.assignCoordinator(companyId, projectId, dto);
+    return this.assignCoordinator(companyId, projectId, body);
   }
 
   async removeCoordinatorAssignmentByProjectId(projectId: string, assignmentId: string) {
@@ -5965,12 +6306,12 @@ export class CompanyProjectsService {
     };
   }
 
-  async assignCoordinatorForAdmin(projectOrCompanyId: string, dto: AssignCoordinatorDto) {
+  async assignCoordinatorForAdmin(projectOrCompanyId: string, body: Record<string, unknown>) {
     const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
     if (!resolved?.company_id) {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
-    return this.assignCoordinator(String(resolved.company_id), String(resolved._id), dto);
+    return this.assignCoordinator(String(resolved.company_id), String(resolved._id), body);
   }
 
   async assignFacilitatorForAdmin(

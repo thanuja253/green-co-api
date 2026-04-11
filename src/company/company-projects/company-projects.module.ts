@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { CompanyProjectsController } from './company-projects.controller';
 import { AdminCompanyFlowController } from './admin-company-flow.controller';
+import { AdminLaunchTrainingController } from './admin-launch-training.controller';
 import { CompanyProjectsService } from './company-projects.service';
 import {
   CompanyProject,
@@ -79,7 +80,11 @@ import { MailModule } from '../../mail/mail.module';
       { name: MasterPrimaryDataChecklist.name, schema: MasterPrimaryDataChecklistSchema },
     ]),
   ],
-  controllers: [CompanyProjectsController, AdminCompanyFlowController],
+  controllers: [
+    CompanyProjectsController,
+    AdminCompanyFlowController,
+    AdminLaunchTrainingController,
+  ],
   providers: [CompanyProjectsService],
   exports: [CompanyProjectsService],
 })

@@ -1,8 +1,8 @@
 import { Transform } from 'class-transformer';
-import { Allow, IsEmail, IsNotEmpty, IsOptional, IsString, ValidateIf } from 'class-validator';
+import { Allow, IsOptional, IsString } from 'class-validator';
 
 /** Accept id shapes from dropdowns / legacy clients (GET coordinators returns `id`). */
-function pickCoordinatorIdFromBody(obj: Record<string, unknown>): string | undefined {
+export function pickCoordinatorIdFromBody(obj: Record<string, unknown>): string | undefined {
   const rawValue = obj.value;
   let valueStr: string | undefined;
   if (rawValue != null && typeof rawValue === 'object' && !Array.isArray(rawValue)) {
@@ -13,6 +13,9 @@ function pickCoordinatorIdFromBody(obj: Record<string, unknown>): string | undef
     obj.coordinator_id,
     obj.id,
     obj.coordinatorId,
+    obj.coordinator,
+    obj.selectedCoordinator,
+    obj.select_coordinator,
     valueStr ?? (typeof rawValue === 'string' || typeof rawValue === 'number' ? String(rawValue).trim() : undefined),
     obj.selectcoordinator,
   ];
@@ -25,21 +28,29 @@ function pickCoordinatorIdFromBody(obj: Record<string, unknown>): string | undef
 }
 
 /**
- * Either coordinator master id (several field aliases) or both name + email
- * (lookup by email or create master, then assign).
- *
- * Note: Global ValidationPipe uses forbidNonWhitelisted — every accepted body key
- * must be declared here (including `id` from the coordinators list API).
+ * Body is lenient: ids may be string or number; name/email are not validated here
+ * (global forbidNonWhitelisted still requires declared keys — use @Allow for extras).
  */
 export class AssignCoordinatorDto {
-  /** Whitelisted aliases merged into coordinator_id via @Transform below. */
   @IsOptional()
-  @IsString()
-  id?: string;
+  @Allow()
+  id?: unknown;
 
   @IsOptional()
-  @IsString()
-  coordinatorId?: string;
+  @Allow()
+  coordinatorId?: unknown;
+
+  @IsOptional()
+  @Allow()
+  coordinator?: unknown;
+
+  @IsOptional()
+  @Allow()
+  selectedCoordinator?: unknown;
+
+  @IsOptional()
+  @Allow()
+  select_coordinator?: unknown;
 
   /** react-select often sends { label, value }; string id also allowed */
   @IsOptional()
@@ -47,21 +58,28 @@ export class AssignCoordinatorDto {
   value?: string | Record<string, unknown>;
 
   @IsOptional()
-  @IsString()
-  selectcoordinator?: string;
+  @Allow()
+  selectcoordinator?: unknown;
 
   @Transform(({ obj }) => pickCoordinatorIdFromBody(obj as Record<string, unknown>))
   @IsOptional()
   @IsString()
   coordinator_id?: string;
 
-  @ValidateIf((o) => !String(o.coordinator_id ?? '').trim())
-  @IsNotEmpty({ message: 'name must be provided when coordinator_id is not set' })
-  @IsString()
-  name?: string;
+  @IsOptional()
+  @Allow()
+  name?: unknown;
 
-  @ValidateIf((o) => !String(o.coordinator_id ?? '').trim())
-  @IsNotEmpty({ message: 'email must be provided when coordinator_id is not set' })
-  @IsEmail()
-  email?: string;
+  @IsOptional()
+  @Allow()
+  email?: unknown;
+
+  /** Ignored; whitelisted so UI may send dropdown label text */
+  @IsOptional()
+  @Allow()
+  label?: unknown;
+
+  @IsOptional()
+  @Allow()
+  display?: unknown;
 }
