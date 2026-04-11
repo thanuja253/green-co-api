@@ -1,5 +1,24 @@
-import { Body, Controller, Get, Param, Patch, Post, Put, Query, Req, Res, UploadedFiles, UseGuards, UseInterceptors, UsePipes, ValidationPipe } from '@nestjs/common';
-import { FileFieldsInterceptor } from '@nestjs/platform-express';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Put,
+  Query,
+  Req,
+  Res,
+  UploadedFile,
+  UploadedFiles,
+  UseGuards,
+  UseInterceptors,
+  UsePipes,
+  ValidationPipe,
+} from '@nestjs/common';
+import { FileFieldsInterceptor, FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { extname, join } from 'path';
 import * as fs from 'fs';
@@ -13,6 +32,10 @@ import { CreateAssessorProfileDto } from './dto/create-assessor-profile.dto';
 import { ListAssessorsQueryDto } from './dto/list-assessors-query.dto';
 import { UpdateAssessorApprovalDto } from './dto/update-assessor-approval.dto';
 import { ReportsQueryDto } from './dto/reports-query.dto';
+import { AssignCoordinatorDto } from './dto/assign-coordinator.dto';
+import { AssignFacilitatorDto } from './dto/assign-facilitator.dto';
+import { CreateCoordinatorDto } from './dto/create-coordinator.dto';
+import { UpdateCoordinatorDto } from './dto/update-coordinator.dto';
 import {
   REGISTRATION_INFO_FILE_FIELDS,
   createRegistrationInfoValidationPipe,
@@ -80,6 +103,112 @@ export class AdminCompanyFlowController {
     @Param('projectId') projectId: string,
   ): Promise<any> {
     return this.companyProjectsService.getQuickviewDataForAdmin(projectId);
+  }
+
+  @Get('api/admin/projects/:projectId/assignments')
+  @Get('admin/projects/:projectId/assignments')
+  async getProjectAssignmentsForAdmin(
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.getProjectAssignmentsForAdmin(projectId);
+  }
+
+  @Post('api/admin/projects/:projectId/assign-coordinator')
+  @Post('admin/projects/:projectId/assign-coordinator')
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  async assignCoordinatorForAdmin(
+    @Param('projectId') projectId: string,
+    @Body() dto: AssignCoordinatorDto,
+  ): Promise<any> {
+    return this.companyProjectsService.assignCoordinatorForAdmin(projectId, dto);
+  }
+
+  @Delete('api/admin/projects/:projectId/coordinators/:assignmentId')
+  @Delete('admin/projects/:projectId/coordinators/:assignmentId')
+  async removeCoordinatorForAdmin(
+    @Param('projectId') projectId: string,
+    @Param('assignmentId') assignmentId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.removeCoordinatorAssignmentForAdmin(projectId, assignmentId);
+  }
+
+  @Post('api/admin/projects/:projectId/assign-facilitator')
+  @Post('admin/projects/:projectId/assign-facilitator')
+  @UseInterceptors(
+    FileInterceptor('contract_document', {
+      storage: diskStorage({
+        destination: (req, file, cb) => {
+          const pid = req.params.projectId;
+          const uploadPath = join(process.cwd(), 'uploads', 'facilitator-contracts', pid);
+          if (!fs.existsSync(uploadPath)) {
+            fs.mkdirSync(uploadPath, { recursive: true });
+          }
+          cb(null, uploadPath);
+        },
+        filename: (req, file, cb) => {
+          const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+          cb(null, `contract-${uniqueSuffix}${extname(file.originalname)}`);
+        },
+      }),
+      fileFilter: (req, file, cb) => {
+        if (file.mimetype === 'application/pdf' || file.mimetype.startsWith('image/')) {
+          cb(null, true);
+        } else {
+          cb(new BadRequestException('Only PDF and image files are allowed for contract document.'), false);
+        }
+      },
+      limits: { fileSize: 10 * 1024 * 1024 },
+    }),
+  )
+  async assignFacilitatorForAdmin(
+    @Param('projectId') projectId: string,
+    @Body() dto: AssignFacilitatorDto,
+    @UploadedFile() contractDocument?: Express.Multer.File,
+  ): Promise<any> {
+    return this.companyProjectsService.assignFacilitatorForAdmin(
+      projectId,
+      dto.facilitator_id,
+      dto.contract_fee,
+      contractDocument,
+    );
+  }
+
+  @Delete('api/admin/projects/:projectId/facilitator')
+  @Delete('admin/projects/:projectId/facilitator')
+  async removeFacilitatorForAdmin(@Param('projectId') projectId: string): Promise<any> {
+    return this.companyProjectsService.removeFacilitatorAssignmentForAdmin(projectId);
+  }
+
+  /** Master coordinator directory (MongoDB): dropdown uses `label` = "Name - mobile". */
+  @Get('api/admin/coordinators')
+  @Get('admin/coordinators')
+  async listCoordinatorsMaster(): Promise<any> {
+    return this.companyProjectsService.listCoordinators();
+  }
+
+  @Post('api/admin/coordinators')
+  @Post('admin/coordinators')
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  async createCoordinatorMaster(@Body() dto: CreateCoordinatorDto): Promise<any> {
+    return this.companyProjectsService.createCoordinatorAdmin(dto);
+  }
+
+  @Patch('api/admin/coordinators/:coordinatorId')
+  @Patch('admin/coordinators/:coordinatorId')
+  @Put('api/admin/coordinators/:coordinatorId')
+  @Put('admin/coordinators/:coordinatorId')
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  async updateCoordinatorMaster(
+    @Param('coordinatorId') coordinatorId: string,
+    @Body() dto: UpdateCoordinatorDto,
+  ): Promise<any> {
+    return this.companyProjectsService.updateCoordinatorAdmin(coordinatorId, dto);
+  }
+
+  @Delete('api/admin/coordinators/:coordinatorId')
+  @Delete('admin/coordinators/:coordinatorId')
+  async deactivateCoordinatorMaster(@Param('coordinatorId') coordinatorId: string): Promise<any> {
+    return this.companyProjectsService.deactivateCoordinatorAdmin(coordinatorId);
   }
 
   @Get('api/admin/projects/:projectId/workflow-status')

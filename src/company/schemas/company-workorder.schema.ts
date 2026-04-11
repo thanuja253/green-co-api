@@ -22,6 +22,14 @@ export class CompanyWorkOrder {
 
   @Prop()
   wo_doc_status_updated_at?: Date;
+
+  /** Purchase order number (admin, after work order accepted). */
+  @Prop()
+  wo_po_number?: string;
+
+  /** Date of acceptance as entered by admin (not future; default suggested = status update time). */
+  @Prop()
+  wo_acceptance_date?: Date;
 }
 
 export const CompanyWorkOrderSchema = SchemaFactory.createForClass(CompanyWorkOrder);

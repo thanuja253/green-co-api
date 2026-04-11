@@ -33,7 +33,10 @@ import { UpdateInvoiceApprovalDto } from './dto/update-invoice-approval.dto';
 import { CreateAssessorProfileDto } from './dto/create-assessor-profile.dto';
 import { ListAssessorsQueryDto } from './dto/list-assessors-query.dto';
 import { ReportsQueryDto } from './dto/reports-query.dto';
-import { join } from 'path';
+import { AssignCoordinatorDto } from './dto/assign-coordinator.dto';
+import { CreateCoordinatorDto } from './dto/create-coordinator.dto';
+import { UpdateCoordinatorDto } from './dto/update-coordinator.dto';
+import { join, relative } from 'path';
 import * as fs from 'fs';
 import { GridFSBucket } from 'mongodb';
 import type { Response } from 'express';
@@ -2060,6 +2063,64 @@ export class CompanyProjectsService {
       .lean();
   }
 
+  private static readonly MAX_COORDINATORS_PER_PROJECT = 3;
+
+  /** Assignment tab: coordinators/facilitators require a project code (`project_id` on CompanyProject). */
+  private assertProjectHasCodeForAssignments(project: { project_id?: string }): void {
+    const code = project?.project_id != null ? String(project.project_id).trim() : '';
+    if (!code) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Enter a project code before assigning coordinators or facilitators.',
+      });
+    }
+  }
+
+  /** For routes that do not send JWT: derive tenant from the project document. */
+  private async resolveCompanyIdFromProjectId(projectId: string): Promise<string> {
+    if (!Types.ObjectId.isValid(projectId)) {
+      throw new BadRequestException({ status: 'error', message: 'Invalid project id' });
+    }
+    const project = await this.projectModel.findById(projectId).select('company_id').lean();
+    if (!project?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return String(project.company_id);
+  }
+
+  /** coordinator_id OR (name + email): email matches master row or creates one. */
+  private async resolveCoordinatorMasterId(dto: AssignCoordinatorDto): Promise<string> {
+    const rawId = dto.coordinator_id?.trim();
+    if (rawId) {
+      if (!Types.ObjectId.isValid(rawId)) {
+        throw new BadRequestException({
+          status: 'error',
+          message:
+            'Invalid coordinator id. Use id from GET /api/company/projects/coordinators (or send name and email).',
+        });
+      }
+      return rawId;
+    }
+    const name = dto.name?.trim();
+    const email = dto.email?.trim().toLowerCase();
+    if (!name || !email) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Provide either coordinator_id or both name and email.',
+      });
+    }
+    const existing = await this.coordinatorModel.findOne({ email }).lean();
+    if (existing) {
+      return String((existing as any)._id);
+    }
+    const created = await this.coordinatorModel.create({
+      name,
+      email,
+      status: '1',
+    });
+    return created._id.toString();
+  }
+
   async updateRegistrationInfoForAdmin(
     projectId: string,
     dto: RegistrationInfoDto,
@@ -2347,7 +2408,7 @@ export class CompanyProjectsService {
       currentActivity,
       workOrder,
       companyFacilitator,
-      companyCoordinator,
+      companyCoordinatorsList,
       companyAssessors,
     ] = await Promise.all([
       this.companyModel.findById(companyId).lean(),
@@ -2368,8 +2429,9 @@ export class CompanyProjectsService {
         .populate('facilitator_id')
         .lean(),
       this.companyCoordinatorModel
-        .findOne({ company_id: cid, project_id: pid })
+        .find({ company_id: cid, project_id: pid })
         .populate('coordinator_id')
+        .sort({ createdAt: 1 })
         .lean(),
       this.companyAssessorModel
         .find({ company_id: cid, project_id: pid })
@@ -2413,11 +2475,22 @@ export class CompanyProjectsService {
       };
     }
 
+    const coordinatorsListData = ((companyCoordinatorsList as any[]) || [])
+      .map((cc: any) => {
+        const c = cc?.coordinator_id;
+        if (!c) return null;
+        return {
+          assignment_id: String(cc._id),
+          coordinator_id: String(c._id || c),
+          Coordinator_Detail: { name: c.name, email: c.email },
+        };
+      })
+      .filter(Boolean);
     let coordinatorData = null;
-    if (companyCoordinator && (companyCoordinator as any).coordinator_id) {
-      const coordinator = (companyCoordinator as any).coordinator_id;
+    if (coordinatorsListData.length > 0) {
       coordinatorData = {
-        Coordinator_Detail: { name: coordinator.name, email: coordinator.email },
+        Coordinator_Detail: coordinatorsListData[0].Coordinator_Detail,
+        assignment_id: coordinatorsListData[0].assignment_id,
       };
     }
 
@@ -2460,6 +2533,74 @@ export class CompanyProjectsService {
       23: { name: 'Feedback Report uploaded', responsibility: 'CII' },
       24: { name: 'Project close‑out / Sustenance phase', responsibility: 'Company' },
     };
+
+    // WO rejected → CII re-uploads proposal → company re-uploads WO (revision cycle)
+    const woEarly = workOrder as any;
+    let proposalRevisionAfterWoReject: {
+      latestName: string;
+      nextId: number;
+      nextName: string;
+      nextResp: string;
+    } | null = null;
+    let proposalWaitingForCiiProposalReupload = false;
+    if (woEarly?.wo_status === 2 && (project as any).proposal_document) {
+      const rejectTs = woEarly.wo_doc_status_updated_at || woEarly.updatedAt;
+      const reuploadAfterReject = (allActivities as any[]).find(
+        (a) =>
+          a.activity_type === 'cii' &&
+          typeof a.description === 'string' &&
+          /CII Re-Uploaded Proposal/i.test(a.description) &&
+          rejectTs &&
+          new Date((a as any).createdAt).getTime() >= new Date(rejectTs).getTime() - 2000,
+      );
+      if (reuploadAfterReject) {
+        proposalRevisionAfterWoReject = {
+          latestName: 'CII Re-Uploaded Proposal Document',
+          nextId: 4,
+          nextName: milestoneSteps[4].name,
+          nextResp: milestoneSteps[4].responsibility,
+        };
+      } else {
+        proposalWaitingForCiiProposalReupload = true;
+      }
+    }
+
+    // Company re-uploaded WO after CII re-uploaded proposal → WO under review; next is CII accept/reject (step 5)
+    let proposalRevisionAwaitingCiiWoReview = false;
+    let proposalRevisionLatestWoActivityLabel = milestoneSteps[4].name;
+    if (
+      woEarly &&
+      Number(woEarly.wo_status) === 0 &&
+      woEarly.wo_doc &&
+      Number((project as any).next_activities_id) === 5
+    ) {
+      const ciiReuploadAct = (allActivities as any[]).find(
+        (a) =>
+          a.activity_type === 'cii' &&
+          typeof a.description === 'string' &&
+          /CII Re-Uploaded Proposal/i.test(a.description),
+      );
+      if (ciiReuploadAct) {
+        const companyWoAct = (allActivities as any[]).find(
+          (a) =>
+            a.activity_type === 'company' &&
+            typeof a.description === 'string' &&
+            /Company (Re-Uploaded|Uploaded) Work Order Document/i.test(a.description),
+        );
+        if (
+          companyWoAct &&
+          new Date((companyWoAct as any).createdAt).getTime() >=
+            new Date((ciiReuploadAct as any).createdAt).getTime() - 1000
+        ) {
+          proposalRevisionAwaitingCiiWoReview = true;
+          if (String((companyWoAct as any).description || '').includes('Re-Uploaded')) {
+            proposalRevisionLatestWoActivityLabel = 'Company Re-Uploaded Work Order Document';
+          } else {
+            proposalRevisionLatestWoActivityLabel = milestoneSteps[4].name;
+          }
+        }
+      }
+    }
 
     // Get all company activities – same step names and responsibility as Latest/Next Step
     const activitiesData = allActivities.map((activity) => {
@@ -2540,7 +2681,19 @@ export class CompanyProjectsService {
 
     // Tab visibility: after Assessor Visit (14) → show Certificate; after Certificate (15+) → show Recertification.
     // Don't return 15+ until certificate is uploaded (so Recertification stays hidden until certificate phase is done).
-    const rawNextId = typeof project.next_activities_id === 'number' ? project.next_activities_id : (project.next_activities_id ? parseInt(String(project.next_activities_id), 10) : 1);
+    const rawNextIdBase =
+      typeof project.next_activities_id === 'number'
+        ? project.next_activities_id
+        : project.next_activities_id
+          ? parseInt(String(project.next_activities_id), 10)
+          : 1;
+    const rawNextId = proposalRevisionAfterWoReject
+      ? 4
+      : proposalWaitingForCiiProposalReupload
+        ? 3
+        : proposalRevisionAwaitingCiiWoReview
+          ? 5
+          : rawNextIdBase;
     const hasCertificate = !!(project as any).certificate_document_url;
     const effectiveNextId = !hasCertificate && rawNextId >= 15 ? 14 : rawNextId;
 
@@ -2548,25 +2701,53 @@ export class CompanyProjectsService {
     const recertificationNewProjectId = (project as any).recertification_project_id?.toString?.() ?? (project as any).recertification_project_id;
     const isRecertifiedAndAtCloseOut = effectiveNextId === 24 && !!recertificationNewProjectId;
     const isAtCloseOutNoRecertify = effectiveNextId === 24 && !recertificationNewProjectId;
-    const nextStepDisplayName = isRecertifiedAndAtCloseOut
-      ? 'Recertification started – open your new project'
-      : isAtCloseOutNoRecertify
-        ? 'Certificate created'
-        : nextActivityInfo.name;
-    const nextStepDisplayStatus = isRecertifiedAndAtCloseOut
-      ? 'Recertification'
-      : isAtCloseOutNoRecertify
-        ? 'Completed'
-        : nextActivityInfo.status;
-    const nextStepDisplayResponsibility = isAtCloseOutNoRecertify
-      ? 'CII'
-      : nextActivityInfo.responsibility;
+    const ciiWoReviewStepName =
+      'CII to Accept or Reject Work Order Document';
+    const nextStepDisplayName = proposalRevisionAfterWoReject
+      ? proposalRevisionAfterWoReject.nextName
+      : proposalWaitingForCiiProposalReupload
+        ? milestoneSteps[3].name
+        : proposalRevisionAwaitingCiiWoReview
+          ? ciiWoReviewStepName
+          : isRecertifiedAndAtCloseOut
+            ? 'Recertification started – open your new project'
+            : isAtCloseOutNoRecertify
+              ? 'Certificate created'
+              : nextActivityInfo.name;
+    const nextStepDisplayStatus =
+      proposalRevisionAfterWoReject ||
+      proposalWaitingForCiiProposalReupload ||
+      proposalRevisionAwaitingCiiWoReview
+        ? 'Pending'
+        : isRecertifiedAndAtCloseOut
+          ? 'Recertification'
+          : isAtCloseOutNoRecertify
+            ? 'Completed'
+            : nextActivityInfo.status;
+    const nextStepDisplayResponsibility = proposalRevisionAfterWoReject
+      ? proposalRevisionAfterWoReject.nextResp
+      : proposalWaitingForCiiProposalReupload
+        ? milestoneSteps[3].responsibility
+        : proposalRevisionAwaitingCiiWoReview
+          ? 'CII'
+          : isAtCloseOutNoRecertify
+            ? 'CII'
+            : nextActivityInfo.responsibility;
 
     // Build profile object
+    const projectCodeStr =
+      (project as any).project_id != null && String((project as any).project_id).trim() !== ''
+        ? String((project as any).project_id).trim()
+        : null;
     const profile = {
       id: project._id.toString(),
       name: company.name,
       reg_id: company.reg_id || '',
+      /** GreenCo manual project code (e.g. CI2604006); null until assigned. */
+      project_code: projectCodeStr,
+      /** MongoDB project document id (use for API paths). */
+      project_mongo_id: project._id.toString(),
+      /** @deprecated Use project_code + project_mongo_id; kept for older UIs. */
       project_id: project.project_id || project._id.toString(),
       email: company.email,
       mobile: company.mobile,
@@ -2598,23 +2779,44 @@ export class CompanyProjectsService {
 
     // Build current activity data (Latest Step Completed)
     // Show the latest completed milestone, or fallback to latest activity description
-    const currentActivityData = latestCompletedMilestoneName
+    const currentActivityData = proposalRevisionAfterWoReject
       ? {
-          activity: latestCompletedMilestoneName,
+          activity: proposalRevisionAfterWoReject.latestName,
           activity_status: 'Completed',
-          responsibility: latestCompletedMilestone?.responsibility || milestoneResponsibilityMap[latestCompletedMilestoneNumber] || 'Company',
+          responsibility: 'CII',
         }
-      : currentActivity
+      : proposalWaitingForCiiProposalReupload
         ? {
-            activity: currentActivity.description,
-            activity_status: 'Done',
-            responsibility: 'Company',
+            activity: 'CII Rejected Work Order Document',
+            activity_status: 'Completed',
+            responsibility: 'CII',
           }
-        : {
-            activity: 'No activity yet',
-            activity_status: 'Pending',
-            responsibility: 'Company',
-          };
+        : proposalRevisionAwaitingCiiWoReview
+          ? {
+              activity: proposalRevisionLatestWoActivityLabel,
+              activity_status: 'Completed',
+              responsibility: 'Company',
+            }
+          : latestCompletedMilestoneName
+          ? {
+              activity: latestCompletedMilestoneName,
+              activity_status: 'Completed',
+              responsibility:
+                latestCompletedMilestone?.responsibility ||
+                milestoneResponsibilityMap[latestCompletedMilestoneNumber] ||
+                'Company',
+            }
+          : currentActivity
+            ? {
+                activity: currentActivity.description,
+                activity_status: 'Done',
+                responsibility: 'Company',
+              }
+            : {
+                activity: 'No activity yet',
+                activity_status: 'Pending',
+                responsibility: 'Company',
+              };
 
     // Build work order data
     const companyWo = workOrder
@@ -2676,18 +2878,65 @@ export class CompanyProjectsService {
       sustenance: 16,    // Preliminary Scoring – show Recertification when nextActivitiesId >= 16
     };
 
-    const next_step = {
-      id: effectiveNextId,
-      name: nextStepDisplayName,
-      status: nextStepDisplayStatus,
-      responsibility: nextStepDisplayResponsibility,
-    };
-    const latest_step = {
-      id: latestCompletedMilestoneNumber || 0,
-      name: latestCompletedMilestoneName || currentActivityData.activity,
-      status: latestCompletedMilestoneNumber != null && latestCompletedMilestoneNumber > 0 ? 'Completed' : (currentActivityData.activity_status === 'Done' ? 'Done' : 'Pending'),
-      responsibility: currentActivityData.responsibility,
-    };
+    const next_step = proposalRevisionAfterWoReject
+      ? {
+          id: proposalRevisionAfterWoReject.nextId,
+          name: proposalRevisionAfterWoReject.nextName,
+          status: 'Pending',
+          responsibility: proposalRevisionAfterWoReject.nextResp,
+        }
+      : proposalWaitingForCiiProposalReupload
+        ? {
+            id: 3,
+            name: milestoneSteps[3].name,
+            status: 'Pending',
+            responsibility: milestoneSteps[3].responsibility,
+          }
+      : proposalRevisionAwaitingCiiWoReview
+        ? {
+            id: 5,
+            name: ciiWoReviewStepName,
+            status: 'Pending',
+            responsibility: 'CII',
+          }
+        : {
+            id: effectiveNextId,
+            name: nextStepDisplayName,
+            status: nextStepDisplayStatus,
+            responsibility: nextStepDisplayResponsibility,
+          };
+    const latest_step = proposalRevisionAfterWoReject
+      ? {
+          id: 3,
+          name: proposalRevisionAfterWoReject.latestName,
+          status: 'Completed',
+          responsibility: 'CII',
+        }
+      : proposalWaitingForCiiProposalReupload
+        ? {
+            id: 5,
+            name: 'CII Rejected Work Order Document',
+            status: 'Completed',
+            responsibility: 'CII',
+          }
+      : proposalRevisionAwaitingCiiWoReview
+        ? {
+            id: 4,
+            name: proposalRevisionLatestWoActivityLabel,
+            status: 'Completed',
+            responsibility: 'Company',
+          }
+        : {
+            id: latestCompletedMilestoneNumber || 0,
+            name: latestCompletedMilestoneName || currentActivityData.activity,
+            status:
+              latestCompletedMilestoneNumber != null && latestCompletedMilestoneNumber > 0
+                ? 'Completed'
+                : currentActivityData.activity_status === 'Done'
+                  ? 'Done'
+                  : 'Pending',
+            responsibility: currentActivityData.responsibility,
+          };
 
     return {
       status: 'success',
@@ -2702,6 +2951,7 @@ export class CompanyProjectsService {
         company_wo: companyWo,
         companies_facilitator: facilitatorData,
         companies_coordinator: coordinatorData,
+        companies_coordinators: coordinatorsListData,
         companies_assessors: assessorsData,
         companies_activty: activitiesData,
         milestoneSteps: Object.keys(milestoneSteps).reduce((acc, key) => {
@@ -2758,6 +3008,10 @@ export class CompanyProjectsService {
       });
     }
 
+    const hadExistingProposal = Boolean(
+      String((project as any).proposal_document || '').trim(),
+    );
+
     const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(/\/+$/, '');
     // Use Laravel-compatible path: uploads/company/{projectId}/
     const relativePath = `uploads/company/${projectId}/${file.filename}`;
@@ -2784,7 +3038,9 @@ export class CompanyProjectsService {
     await this.companyActivityModel.create({
       company_id: companyId,
       project_id: projectId,
-      description: 'CII Uploaded Proposal Document',
+      description: hadExistingProposal
+        ? 'CII Re-Uploaded Proposal Document'
+        : 'CII Uploaded Proposal Document',
       activity_type: 'cii',
       milestone_flow: 3,
       milestone_completed: true,
@@ -2817,10 +3073,15 @@ export class CompanyProjectsService {
     });
 
     if (notifyUserId) {
+      const projLabel = project.project_id || project._id.toString();
       this.notificationsService
         .create(
-          'Proposal document uploaded',
-          `Proposal document has been uploaded for your project ${project.project_id || project._id.toString()}.`,
+          hadExistingProposal
+            ? 'Proposal document reuploaded'
+            : 'Proposal document uploaded',
+          hadExistingProposal
+            ? `Proposal document has been reuploaded for your project ${projLabel}.`
+            : `Proposal document has been uploaded for your project ${projLabel}.`,
           notifyType,
           notifyUserId,
         )
@@ -2838,18 +3099,21 @@ export class CompanyProjectsService {
       String(project._id),
       prevNextActivity,
       4,
-      'Proposal document uploaded',
+      hadExistingProposal ? 'Proposal document reuploaded' : 'Proposal document uploaded',
     );
 
     console.log('[Proposal Document] Uploaded successfully:', {
       projectId: projectId.toString(),
       documentUrl: apiViewUrl,
       next_activities_id: project.next_activities_id,
+      hadExistingProposal,
     });
 
     return {
       status: 'success',
-      message: 'Proposal Document uploaded successfully',
+      message: hadExistingProposal
+        ? 'Proposal Document reuploaded successfully'
+        : 'Proposal Document uploaded successfully',
       data: {
         proposal_status: 0,
         proposal_status_label: 'pending_by_company',
@@ -2859,6 +3123,7 @@ export class CompanyProjectsService {
         document_filename: file.originalname,
         project_id: projectId,
         next_activities_id: project.next_activities_id,
+        reuploaded: hadExistingProposal,
       },
     };
   }
@@ -2873,6 +3138,143 @@ export class CompanyProjectsService {
     }
     const effectiveProjectId = String(project._id);
     return this.uploadProposalDocument(String(project.company_id), effectiveProjectId, file);
+  }
+
+  /**
+   * CII/Admin: replace the proposal PDF after the company’s work order was rejected (latest wo_status = 2).
+   * Does not reset workflow step counters like the first-time upload; notifies the company to review the revised file.
+   */
+  async replaceProposalDocument(
+    companyId: string,
+    projectId: string,
+    file: Express.Multer.File,
+  ) {
+    const project = await this.projectModel.findOne({
+      _id: projectId,
+      company_id: companyId,
+    });
+
+    if (!project) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Project not found',
+      });
+    }
+
+    if (!project.proposal_document) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'No proposal document on file. Use POST /proposal-document for the first upload.',
+      });
+    }
+
+    const latestWo = await this.companyWorkOrderModel
+      .findOne({ company_id: companyId, project_id: projectId })
+      .sort({ createdAt: -1 });
+
+    if (!latestWo || latestWo.wo_status !== 2) {
+      throw new BadRequestException({
+        status: 'error',
+        message:
+          'Proposal can only be replaced when the latest work order is rejected (wo_status = 2).',
+      });
+    }
+
+    const oldRaw = String(project.proposal_document || '').trim();
+    if (oldRaw && !oldRaw.startsWith('http')) {
+      const normalized = oldRaw.replace(/^\/+/, '');
+      const oldFull = join(process.cwd(), normalized);
+      if (normalized && fs.existsSync(oldFull)) {
+        try {
+          fs.unlinkSync(oldFull);
+        } catch (e) {
+          console.warn('[Proposal Document] Could not remove old file:', (e as any)?.message || e);
+        }
+      }
+    }
+
+    const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(/\/+$/, '');
+    const absoluteMulterPath =
+      (file as Express.Multer.File & { path?: string }).path ||
+      join(String((file as any).destination || ''), file.filename);
+    let relativePath = `uploads/company/${projectId}/${file.filename}`;
+    const cwd = process.cwd();
+    if (absoluteMulterPath && fs.existsSync(absoluteMulterPath)) {
+      const rel = relative(cwd, absoluteMulterPath).replace(/\\/g, '/');
+      if (rel && !rel.startsWith('..')) {
+        relativePath = rel.replace(/^\/+/, '');
+      }
+    }
+    const apiViewUrl = `${baseUrl}/api/company/projects/${projectId}/proposal-document/file`;
+
+    project.proposal_document = relativePath;
+    // Company’s turn again: re-upload work order against the revised proposal (same cycle as first time after proposal).
+    project.next_activities_id = 4;
+    await project.save();
+
+    await this.companyActivityModel.create({
+      company_id: companyId,
+      project_id: projectId,
+      description: 'CII Re-Uploaded Proposal Document',
+      activity_type: 'cii',
+      milestone_flow: 3,
+      milestone_completed: true,
+    });
+
+    let notifyType: 'C' | 'F' = project.process_type === 'c' ? 'C' : 'F';
+    let notifyUserId: string = companyId;
+    if (project.process_type === 'f') {
+      const facilitator = await this.companyFacilitatorModel.findOne({
+        company_id: companyId,
+        project_id: projectId,
+      });
+      if (facilitator?.facilitator_id) {
+        notifyUserId = facilitator.facilitator_id.toString();
+      } else {
+        notifyType = 'C';
+        notifyUserId = companyId;
+      }
+    }
+    if (notifyUserId) {
+      const projLabel = project.project_id || projectId;
+      this.notificationsService
+        .create(
+          'Proposal document reuploaded',
+          `Proposal document has been reuploaded for your project ${projLabel}. Please review it and re-upload your work order if needed.`,
+          notifyType,
+          notifyUserId,
+        )
+        .catch((e) =>
+          console.error('[Proposal Document] Replace notification failed:', e?.message || e),
+        );
+    }
+
+    return {
+      status: 'success',
+      message: 'Proposal document replaced successfully',
+      data: {
+        proposal_status: 0,
+        proposal_status_label: 'pending_by_company',
+        proposal_remarks: null,
+        proposal_status_updated_at: new Date().toISOString(),
+        document_url: apiViewUrl,
+        document_filename: file.originalname,
+        project_id: projectId,
+        next_activities_id: 4,
+        replaced: true,
+      },
+    };
+  }
+
+  async replaceProposalDocumentByProjectId(projectId: string, file: Express.Multer.File) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Project not found',
+      });
+    }
+    return this.replaceProposalDocument(String(resolved.company_id), String(resolved._id), file);
   }
 
   /**
@@ -2891,6 +3293,18 @@ export class CompanyProjectsService {
       });
     }
 
+    const latestWoLean = await this.companyWorkOrderModel
+      .findOne({
+        company_id: companyId,
+        project_id: projectId,
+      })
+      .sort({ createdAt: -1 })
+      .lean();
+    const woAny = latestWoLean as any;
+    const woStatus = woAny != null ? (woAny.wo_status ?? null) : null;
+    const woRemarks = woAny?.wo_remarks ?? null;
+    const woRejected = woStatus === 2;
+
     if (!project.proposal_document) {
       return {
         status: 'success',
@@ -2903,31 +3317,42 @@ export class CompanyProjectsService {
           proposal_remarks: null,
           proposal_status_updated_at: null,
           document_url: null,
+          work_order: latestWoLean
+            ? {
+                wo_status: woStatus,
+                wo_remarks: woRemarks,
+                wo_doc_status_updated_at:
+                  woAny?.wo_doc_status_updated_at?.toISOString?.() ??
+                  woAny?.updatedAt?.toISOString?.() ??
+                  woAny?.createdAt?.toISOString?.() ??
+                  null,
+              }
+            : null,
+          can_replace_proposal: false,
         },
       };
     }
 
     // Proposal is considered "approved by company" once company uploads work order for this project.
-    const workOrder = await this.companyWorkOrderModel
-      .findOne({
-        company_id: companyId,
-        project_id: projectId,
-      })
-      .sort({ createdAt: -1 })
-      .lean();
-
-    const proposalAcceptedByCompany = !!workOrder;
-    const proposalStatus = proposalAcceptedByCompany ? 1 : 0;
+    const workOrder = latestWoLean;
+    const proposalAcceptedByCompany = !!workOrder && !woRejected;
+    const proposalStatus = proposalAcceptedByCompany ? 1 : woRejected ? 2 : 0;
     const proposalStatusLabel = proposalAcceptedByCompany
       ? 'accepted_by_company'
-      : 'pending_by_company';
+      : woRejected
+        ? 'work_order_rejected'
+        : 'pending_by_company';
     const proposalStatusUpdatedAt = proposalAcceptedByCompany
       ? (workOrder as any).createdAt?.toISOString?.() ??
         (workOrder as any).updatedAt?.toISOString?.() ??
         null
-      : (project as any).updatedAt?.toISOString?.() ??
-        (project as any).createdAt?.toISOString?.() ??
-        null;
+      : woRejected
+        ? (workOrder as any).wo_doc_status_updated_at?.toISOString?.() ??
+          (workOrder as any).updatedAt?.toISOString?.() ??
+          null
+        : (project as any).updatedAt?.toISOString?.() ??
+          (project as any).createdAt?.toISOString?.() ??
+          null;
 
     const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(/\/+$/, '');
     const apiViewUrl = `${baseUrl}/api/company/projects/${projectId}/proposal-document/file`;
@@ -2941,10 +3366,23 @@ export class CompanyProjectsService {
         has_document: true,
         proposal_status: proposalStatus,
         proposal_status_label: proposalStatusLabel,
-        proposal_remarks: null,
+        proposal_remarks: woRejected ? woRemarks : null,
         proposal_status_updated_at: proposalStatusUpdatedAt,
         document_url: apiViewUrl,
         document_filename: filename,
+        work_order: workOrder
+          ? {
+              wo_status: woStatus,
+              wo_remarks: woRemarks,
+              wo_doc_status_updated_at:
+                woAny?.wo_doc_status_updated_at?.toISOString?.() ??
+                woAny?.updatedAt?.toISOString?.() ??
+                woAny?.createdAt?.toISOString?.() ??
+                null,
+            }
+          : null,
+        /** True when CII may call POST/PUT/PATCH .../proposal-document/reupload (PDF). */
+        can_replace_proposal: woRejected,
       },
     };
   }
@@ -3234,6 +3672,8 @@ export class CompanyProjectsService {
     if (workOrderAny?.wo_doc) {
       const woDocPath = workOrderAny.wo_doc.startsWith('/') ? workOrderAny.wo_doc.substring(1) : workOrderAny.wo_doc;
       const woPath = woDocPath.startsWith('http') ? woDocPath : `${baseUrl}/${woDocPath}`;
+      const woExtras = this.workOrderStatusExtras(workOrderAny);
+      const woAccept = this.workOrderAcceptancePayload(workOrderAny);
       response.work_order = {
         wo_doc: workOrderAny.wo_doc,
         wo_doc_url: woPath,
@@ -3241,6 +3681,22 @@ export class CompanyProjectsService {
         wo_remarks: workOrderAny.wo_remarks || null,
         wo_doc_status_updated_at: workOrderAny.wo_doc_status_updated_at?.toISOString?.() ?? workOrderAny.updatedAt?.toISOString?.() ?? workOrderAny.createdAt?.toISOString?.() ?? new Date().toISOString(),
         uploaded_at: workOrderAny.createdAt?.toISOString?.() ?? new Date().toISOString(),
+        ...woExtras,
+        ...woAccept,
+      };
+    } else if (workOrderAny) {
+      const woExtras = this.workOrderStatusExtras(workOrderAny);
+      const woAccept = this.workOrderAcceptancePayload(workOrderAny);
+      response.work_order = {
+        wo_doc: null,
+        wo_doc_url: null,
+        wo_status: workOrderAny.wo_status ?? null,
+        wo_remarks: workOrderAny.wo_remarks ?? null,
+        wo_doc_status_updated_at:
+          workOrderAny.wo_doc_status_updated_at?.toISOString?.() ?? null,
+        uploaded_at: workOrderAny.createdAt?.toISOString?.() ?? null,
+        ...woExtras,
+        ...woAccept,
       };
     } else {
       response.work_order = null;
@@ -3264,6 +3720,95 @@ export class CompanyProjectsService {
     );
   }
 
+  private parseWorkOrderAcceptanceDate(raw: string): Date {
+    const t = Date.parse(raw);
+    if (Number.isNaN(t)) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Invalid wo_acceptance_date. Use an ISO date string.',
+      });
+    }
+    return new Date(t);
+  }
+
+  /** Acceptance date must be on or before end of today (server local calendar day). */
+  private assertWorkOrderAcceptanceDateNotFuture(d: Date): void {
+    const now = new Date();
+    const endOfToday = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+      23,
+      59,
+      59,
+      999,
+    );
+    if (d.getTime() > endOfToday.getTime()) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Acceptance date cannot be in the future.',
+      });
+    }
+  }
+
+  /**
+   * PO number + acceptance date for admin (after wo_status = 1).
+   * suggested = stored date or time work order was marked accepted.
+   */
+  private workOrderAcceptancePayload(workOrder: any | null | undefined) {
+    if (!workOrder) {
+      return {
+        wo_po_number: null as string | null,
+        wo_acceptance_date: null as string | null,
+        wo_acceptance_date_suggested: null as string | null,
+        needs_acceptance_details: false,
+      };
+    }
+    const st = Number(workOrder.wo_status ?? 0);
+    const po =
+      workOrder.wo_po_number != null && String(workOrder.wo_po_number).trim() !== ''
+        ? String(workOrder.wo_po_number).trim()
+        : null;
+    const accRaw = workOrder.wo_acceptance_date;
+    const accIso =
+      accRaw != null && !Number.isNaN(new Date(accRaw).getTime())
+        ? new Date(accRaw).toISOString()
+        : null;
+    const statusTs = workOrder.wo_doc_status_updated_at || workOrder.updatedAt;
+    const suggestedIso =
+      st === 1 && statusTs
+        ? accIso ?? new Date(statusTs).toISOString()
+        : null;
+    const needs = st === 1 && (!po || accRaw == null);
+    return {
+      wo_po_number: po,
+      wo_acceptance_date: accIso,
+      wo_acceptance_date_suggested: suggestedIso,
+      needs_acceptance_details: needs,
+    };
+  }
+
+  /** 0 = pending CII review, 1 = accepted, 2 = rejected (company may re-upload). */
+  private workOrderStatusExtras(workOrder: any | null | undefined) {
+    if (!workOrder) {
+      return {
+        work_order_id: null as string | null,
+        wo_status_label: null as string | null,
+        can_reupload_work_order: false,
+        awaiting_cii_review: false,
+      };
+    }
+    const st = Number(workOrder.wo_status ?? 0);
+    const woDoc = !!(workOrder as any).wo_doc;
+    return {
+      work_order_id: String((workOrder as any)._id),
+      wo_status_label:
+        st === 1 ? 'accepted' : st === 2 ? 'rejected' : 'pending_review',
+      can_reupload_work_order: st === 2,
+      awaiting_cii_review: st === 0 && woDoc,
+    };
+  }
+
   /**
    * Get latest work order document info for a project.
    */
@@ -3281,8 +3826,10 @@ export class CompanyProjectsService {
     }
 
     const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(/\/+$/, '');
+    const extras = this.workOrderStatusExtras(workOrder as any);
 
     if (!workOrder || !(workOrder as any).wo_doc) {
+      const woAny = workOrder as any;
       return {
         status: 'success',
         message: 'Work order document not uploaded yet',
@@ -3290,9 +3837,15 @@ export class CompanyProjectsService {
           has_document: false,
           document_url: null,
           document_filename: null,
-          wo_status: null,
-          wo_remarks: null,
-          wo_doc_status_updated_at: null,
+          wo_status: woAny?.wo_status ?? null,
+          wo_remarks: woAny?.wo_remarks ?? null,
+          wo_doc_status_updated_at:
+            woAny?.wo_doc_status_updated_at?.toISOString?.() ?? null,
+          work_order_id: extras.work_order_id,
+          wo_status_label: extras.wo_status_label,
+          can_reupload_work_order: extras.can_reupload_work_order ?? false,
+          awaiting_cii_review: extras.awaiting_cii_review ?? false,
+          ...this.workOrderAcceptancePayload(woAny || null),
         },
       };
     }
@@ -3300,6 +3853,7 @@ export class CompanyProjectsService {
     const workOrderAny = workOrder as any;
     const woDocPath = String(workOrderAny.wo_doc || '').replace(/^\/+/, '');
     const url = woDocPath.startsWith('http') ? woDocPath : `${baseUrl}/${woDocPath}`;
+    const acceptance = this.workOrderAcceptancePayload(workOrderAny);
     return {
       status: 'success',
       message: 'Work order document retrieved successfully',
@@ -3314,8 +3868,141 @@ export class CompanyProjectsService {
           workOrderAny.updatedAt?.toISOString?.() ??
           workOrderAny.createdAt?.toISOString?.() ??
           null,
+        work_order_id: extras.work_order_id,
+        wo_status_label: extras.wo_status_label,
+        can_reupload_work_order: extras.can_reupload_work_order,
+        awaiting_cii_review: extras.awaiting_cii_review,
+        ...acceptance,
       },
     };
+  }
+
+  /**
+   * GET only PO + acceptance date fields (after work order accepted).
+   */
+  async getWorkOrderAcceptanceDetails(companyId: string, projectId: string) {
+    const project = await this.projectModel.findOne({ _id: projectId, company_id: companyId }).lean();
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const workOrder = await this.companyWorkOrderModel
+      .findOne({ company_id: companyId, project_id: projectId })
+      .sort({ createdAt: -1 })
+      .lean();
+    if (!workOrder) {
+      return {
+        status: 'success',
+        message: 'No work order for this project',
+        data: {
+          work_order_id: null,
+          wo_status: null,
+          ...this.workOrderAcceptancePayload(null),
+        },
+      };
+    }
+    const wo = workOrder as any;
+    return {
+      status: 'success',
+      message: 'Work order acceptance details',
+      data: {
+        work_order_id: String(wo._id),
+        wo_status: wo.wo_status ?? 0,
+        wo_doc_status_updated_at:
+          wo.wo_doc_status_updated_at?.toISOString?.() ??
+          wo.updatedAt?.toISOString?.() ??
+          null,
+        ...this.workOrderAcceptancePayload(wo),
+      },
+    };
+  }
+
+  async getWorkOrderAcceptanceDetailsByProjectId(projectOrCompanyId: string) {
+    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.getWorkOrderAcceptanceDetails(
+      String(resolved.company_id),
+      String(resolved._id),
+    );
+  }
+
+  /**
+   * Admin: save PO number + acceptance date (work order must already be accepted).
+   */
+  async setWorkOrderAcceptanceDetails(
+    companyId: string,
+    projectId: string,
+    dto: { wo_po_number: string; wo_acceptance_date: string },
+  ) {
+    const latest = await this.companyWorkOrderModel
+      .findOne({ company_id: companyId, project_id: projectId })
+      .sort({ createdAt: -1 });
+
+    if (!latest || !(latest as any).wo_doc) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Work order document not found',
+      });
+    }
+    if (latest.wo_status !== 1) {
+      throw new BadRequestException({
+        status: 'error',
+        message:
+          'PO and acceptance date can only be saved when the work order is accepted (wo_status = 1).',
+      });
+    }
+    const po = String(dto.wo_po_number || '').trim();
+    if (!po) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'PO number is required',
+      });
+    }
+    const acc = this.parseWorkOrderAcceptanceDate(dto.wo_acceptance_date);
+    this.assertWorkOrderAcceptanceDateNotFuture(acc);
+    latest.wo_po_number = po;
+    latest.wo_acceptance_date = acc;
+    await latest.save();
+    const plain = latest.toObject?.() ?? latest;
+    return {
+      status: 'success',
+      message: 'Work order acceptance details saved',
+      data: {
+        work_order_id: String(latest._id),
+        wo_status: latest.wo_status,
+        ...this.workOrderAcceptancePayload(plain),
+      },
+    };
+  }
+
+  async setWorkOrderAcceptanceDetailsByProjectId(
+    projectOrCompanyId: string,
+    dto: { wo_po_number: string; wo_acceptance_date: string },
+  ) {
+    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.setWorkOrderAcceptanceDetails(
+      String(resolved.company_id),
+      String(resolved._id),
+      dto,
+    );
+  }
+
+  /**
+   * GET work order by Mongo project id or company id (admin / cross-panel; same as proposal-document GET).
+   */
+  async getWorkOrderDocumentByProjectId(projectOrCompanyId: string) {
+    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.getWorkOrderDocument(
+      String(resolved.company_id),
+      String(resolved._id),
+    );
   }
 
   /**
@@ -3343,6 +4030,68 @@ export class CompanyProjectsService {
       String((latestWorkOrder as any)._id),
       dto,
     );
+  }
+
+  /**
+   * CII/Admin: accept (1) or reject (2) the latest work order. Path param = Mongo project id or company id.
+   */
+  async updateWorkOrderStatusByProjectId(
+    projectOrCompanyId: string,
+    dto: { wo_status: number; wo_remarks?: string },
+  ) {
+    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.updateWorkOrderStatus(
+      String(resolved.company_id),
+      String(resolved._id),
+      dto,
+    );
+  }
+
+  /**
+   * Upload WO using resolved project/company id (admin / same path style as proposal upload).
+   */
+  async uploadWorkOrderDocumentByProjectId(
+    projectOrCompanyId: string,
+    file: Express.Multer.File,
+  ) {
+    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.uploadWorkOrderDocument(
+      String(resolved.company_id),
+      String(resolved._id),
+      file,
+    );
+  }
+
+  /**
+   * Re-upload WO PDF only when latest WO is rejected (wo_status = 2).
+   */
+  async reuploadWorkOrderDocumentByProjectId(
+    projectOrCompanyId: string,
+    file: Express.Multer.File,
+  ) {
+    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const companyId = String(resolved.company_id);
+    const projectId = String(resolved._id);
+    const latest = await this.companyWorkOrderModel
+      .findOne({ company_id: companyId, project_id: projectId })
+      .sort({ createdAt: -1 });
+    if (!latest || latest.wo_status !== 2) {
+      throw new BadRequestException({
+        status: 'error',
+        message:
+          'Work order can only be re-uploaded when the latest work order is rejected (wo_status = 2).',
+      });
+    }
+    return this.uploadWorkOrderDocument(companyId, projectId, file);
   }
 
   /**
@@ -3406,31 +4155,138 @@ export class CompanyProjectsService {
   }
 
   /**
-   * List all active coordinators (for admin to choose and assign).
+   * List all active coordinators (dropdown: use `label` as "Name - mobile" when mobile is set).
    */
   async listCoordinators(): Promise<{
     status: 'success';
     message: string;
-    data: { coordinators: Array<{ id: string; name: string; email: string }> };
+    data: {
+      coordinators: Array<{
+        id: string;
+        name: string;
+        email: string;
+        mobile?: string;
+        phone?: string;
+        label: string;
+        display: string;
+      }>;
+    };
   }> {
     const docs = await this.coordinatorModel
       .find({
         $or: [{ status: '1' }, { status: 1 }, { status: { $exists: false } }],
       })
       .sort({ name: 1 })
-      .select('_id name email')
+      .select('_id name email mobile')
       .lean();
 
-    const coordinators = (docs as any[]).map((c) => ({
-      id: c._id.toString(),
-      name: c.name,
-      email: c.email,
-    }));
+    const coordinators = (docs as any[]).map((c) => {
+      const name = (c.name || '').trim();
+      const mobile =
+        c.mobile != null && String(c.mobile).trim() !== '' ? String(c.mobile).trim() : '';
+      return {
+        id: c._id.toString(),
+        name,
+        email: c.email,
+        ...(mobile ? { mobile, phone: mobile } : {}),
+        /** Same as label; use either in the UI — "Name - 9398758947" */
+        display: mobile ? `${name} - ${mobile}` : name,
+        label: mobile ? `${name} - ${mobile}` : name,
+      };
+    });
 
     return {
       status: 'success',
       message: 'Coordinators loaded',
       data: { coordinators },
+    };
+  }
+
+  async createCoordinatorAdmin(dto: CreateCoordinatorDto) {
+    const email = dto.email.trim().toLowerCase();
+    const dup = await this.coordinatorModel.findOne({ email }).lean();
+    if (dup) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'A coordinator with this email already exists.',
+      });
+    }
+    const doc = await this.coordinatorModel.create({
+      name: dto.name.trim(),
+      email,
+      mobile: dto.mobile?.trim() || undefined,
+      status: dto.status?.trim() || '1',
+    });
+    const mobile = doc.mobile?.trim() || '';
+    return {
+      status: 'success',
+      message: 'Coordinator created',
+      data: {
+        id: doc._id.toString(),
+        name: doc.name,
+        email: doc.email,
+        ...(mobile ? { mobile } : {}),
+        label: mobile ? `${doc.name} - ${mobile}` : doc.name,
+      },
+    };
+  }
+
+  async updateCoordinatorAdmin(coordinatorId: string, dto: UpdateCoordinatorDto) {
+    if (!Types.ObjectId.isValid(coordinatorId)) {
+      throw new BadRequestException({ status: 'error', message: 'Invalid coordinator id' });
+    }
+    const doc = await this.coordinatorModel.findById(coordinatorId);
+    if (!doc) {
+      throw new NotFoundException({ status: 'error', message: 'Coordinator not found' });
+    }
+    if (dto.email !== undefined) {
+      const email = dto.email.trim().toLowerCase();
+      const other = await this.coordinatorModel
+        .findOne({ email, _id: { $ne: doc._id } })
+        .lean();
+      if (other) {
+        throw new BadRequestException({
+          status: 'error',
+          message: 'Another coordinator already uses this email.',
+        });
+      }
+      doc.email = email;
+    }
+    if (dto.name !== undefined) doc.name = dto.name.trim();
+    if (dto.mobile !== undefined) doc.mobile = dto.mobile.trim() || undefined;
+    if (dto.status !== undefined) doc.status = dto.status.trim();
+    await doc.save();
+    const mobile = doc.mobile?.trim() || '';
+    return {
+      status: 'success',
+      message: 'Coordinator updated',
+      data: {
+        id: doc._id.toString(),
+        name: doc.name,
+        email: doc.email,
+        ...(mobile ? { mobile } : {}),
+        label: mobile ? `${doc.name} - ${mobile}` : doc.name,
+      },
+    };
+  }
+
+  /** Soft-delete: status "0" so they disappear from dropdowns but DB row remains. */
+  async deactivateCoordinatorAdmin(coordinatorId: string) {
+    if (!Types.ObjectId.isValid(coordinatorId)) {
+      throw new BadRequestException({ status: 'error', message: 'Invalid coordinator id' });
+    }
+    const doc = await this.coordinatorModel.findByIdAndUpdate(
+      coordinatorId,
+      { $set: { status: '0' } },
+      { new: true },
+    );
+    if (!doc) {
+      throw new NotFoundException({ status: 'error', message: 'Coordinator not found' });
+    }
+    return {
+      status: 'success',
+      message: 'Coordinator removed from listings',
+      data: { id: coordinatorId },
     };
   }
 
@@ -4050,6 +4906,8 @@ export class CompanyProjectsService {
       existingWorkOrder.wo_doc = relativePath;
       existingWorkOrder.wo_status = 0; // Reset to Under Review
       existingWorkOrder.wo_remarks = null; // Clear previous remarks
+      (existingWorkOrder as any).wo_po_number = undefined;
+      (existingWorkOrder as any).wo_acceptance_date = undefined;
       await existingWorkOrder.save();
       workOrder = existingWorkOrder;
     } else {
@@ -4127,6 +4985,8 @@ export class CompanyProjectsService {
         project_id: projectId,
         wo_status: 0, // Under Review
         next_activities_id: project.next_activities_id,
+        reuploaded: isReUpload,
+        ...this.workOrderStatusExtras(workOrder as any),
       },
     };
   }
@@ -4251,6 +5111,10 @@ export class CompanyProjectsService {
     workOrder.wo_status = dto.wo_status;
     workOrder.wo_remarks = dto.wo_status === 2 ? dto.wo_remarks || null : null;
     workOrder.wo_doc_status_updated_at = new Date();
+    if (dto.wo_status === 2) {
+      (workOrder as any).wo_po_number = undefined;
+      (workOrder as any).wo_acceptance_date = undefined;
+    }
     
     const savedWorkOrder = await workOrder.save();
     
@@ -4296,6 +5160,21 @@ export class CompanyProjectsService {
           'Work order approved',
         );
       }
+    } else if (dto.wo_status === 2) {
+      // Company must re-upload work order; keep GET / panels aligned with step 4
+      const currentNext =
+        typeof (project as any).next_activities_id === 'number'
+          ? (project as any).next_activities_id
+          : 0;
+      (project as any).next_activities_id = 4;
+      await project.save();
+      await this.notifyStepTransition(
+        String(project.company_id),
+        String(project._id),
+        currentNext,
+        4,
+        'Work order rejected — company to re-upload',
+      );
     }
 
     // LOG ACTIVITY 5: CII Approved/Rejected Work Order Document
@@ -4342,6 +5221,8 @@ export class CompanyProjectsService {
       next_activities_id: project.next_activities_id,
     });
 
+    const woForExtras = verifyWorkOrder || savedWorkOrder;
+    const woPlain = (woForExtras as any)?.toObject?.() ?? woForExtras;
     return {
       status: 'success',
       message: dto.wo_status === 1
@@ -4351,6 +5232,8 @@ export class CompanyProjectsService {
         wo_status: dto.wo_status,
         wo_remarks: dto.wo_status === 2 ? dto.wo_remarks : null,
         next_activities_id: project.next_activities_id,
+        ...this.workOrderStatusExtras(woForExtras as any),
+        ...this.workOrderAcceptancePayload(woPlain),
       },
     };
   }
@@ -4400,6 +5283,151 @@ export class CompanyProjectsService {
           : null,
         next_activities_id: project.next_activities_id || null,
         next_activity: null, // Can be derived from milestone steps if needed
+      },
+    };
+  }
+
+  /**
+   * Whether PO + acceptance are saved so admin can assign project code (first time only).
+   */
+  private async isWorkOrderReadyForProjectCodeAssignment(
+    companyId: string,
+    projectId: string,
+  ): Promise<boolean> {
+    const wo = await this.companyWorkOrderModel
+      .findOne({ company_id: companyId, project_id: projectId })
+      .sort({ createdAt: -1 })
+      .lean();
+    if (!wo || !(wo as any).wo_doc || (wo as any).wo_status !== 1) {
+      return false;
+    }
+    const po = String((wo as any).wo_po_number || '').trim();
+    const acc = (wo as any).wo_acceptance_date;
+    return !!(po && acc);
+  }
+
+  private async assertPoReadyForFirstProjectCode(companyId: string, projectId: string) {
+    const ok = await this.isWorkOrderReadyForProjectCodeAssignment(companyId, projectId);
+    if (!ok) {
+      throw new BadRequestException({
+        status: 'error',
+        message:
+          'Assign project code only after the work order is accepted and PO number + acceptance date are saved.',
+      });
+    }
+  }
+
+  /**
+   * GET: project code + flags for Quick View / admin (path = Mongo project id or company id).
+   */
+  async getProjectCodeAssignmentByProjectId(projectOrCompanyId: string) {
+    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const companyId = String(resolved.company_id);
+    const projectId = String(resolved._id);
+    const project = await this.projectModel.findById(projectId).lean();
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const code =
+      (project as any).project_id != null && String((project as any).project_id).trim() !== ''
+        ? String((project as any).project_id).trim()
+        : null;
+    const poReady = await this.isWorkOrderReadyForProjectCodeAssignment(companyId, projectId);
+    return {
+      status: 'success',
+      message: 'Project code assignment',
+      data: {
+        project_mongo_id: projectId,
+        project_code: code,
+        has_project_code: !!code,
+        /** First assignment allowed only when PO step is complete. */
+        po_complete_for_assignment: poReady,
+        /** True when no code yet — UI can show assign field after PO. */
+        needs_project_code: !code,
+        /** Inline edit allowed whenever code exists. */
+        can_edit_project_code: !!code,
+      },
+    };
+  }
+
+  /**
+   * POST: first assign (milestone 6) or update existing code (unique, inline edit).
+   */
+  async upsertProjectCodeByProjectId(projectOrCompanyId: string, rawCode: string) {
+    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const companyId = String(resolved.company_id);
+    const projectId = String(resolved._id);
+    const normalized = String(rawCode || '').trim().toUpperCase();
+    if (!normalized || normalized.length < 3) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Project code must be at least 3 characters.',
+      });
+    }
+    if (!/^[A-Z0-9_-]+$/.test(normalized)) {
+      throw new BadRequestException({
+        status: 'error',
+        message:
+          'Project code may only contain letters, numbers, hyphens, and underscores (A–Z, 0–9, -, _).',
+      });
+    }
+
+    const project = await this.projectModel.findOne({
+      _id: projectId,
+      company_id: companyId,
+    });
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const existingCode = String((project as any).project_id || '').trim();
+
+    if (!existingCode) {
+      await this.assertPoReadyForFirstProjectCode(companyId, projectId);
+      return this.createProjectCode(companyId, projectId, normalized);
+    }
+
+    if (normalized === existingCode.toUpperCase()) {
+      return {
+        status: 'success',
+        message: 'Project code unchanged',
+        data: {
+          project_code: existingCode,
+          project_mongo_id: projectId,
+          updated: false,
+          next_activities_id: (project as any).next_activities_id,
+        },
+      };
+    }
+
+    const duplicate = await this.projectModel.findOne({
+      project_id: normalized,
+      _id: { $ne: project._id },
+    });
+    if (duplicate) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'This project code is already used by another project.',
+      });
+    }
+
+    (project as any).project_id = normalized;
+    await project.save();
+
+    return {
+      status: 'success',
+      message: 'Project code updated successfully',
+      data: {
+        project_code: normalized,
+        project_mongo_id: projectId,
+        updated: true,
+        next_activities_id: (project as any).next_activities_id,
       },
     };
   }
@@ -4516,9 +5544,9 @@ export class CompanyProjectsService {
   async assignCoordinator(
     companyId: string,
     projectId: string,
-    coordinatorId: string,
+    dto: AssignCoordinatorDto,
   ) {
-    // Validate project exists and belongs to company
+    // Validate project first so we do not create coordinator master rows for invalid projects
     const project = await this.projectModel.findOne({
       _id: projectId,
       company_id: companyId,
@@ -4531,8 +5559,31 @@ export class CompanyProjectsService {
       });
     }
 
-    // Validate coordinator exists
-    const coordinator = await this.coordinatorModel.findById(coordinatorId);
+    this.assertProjectHasCodeForAssignments(project as any);
+
+    const coordinatorCount = await this.companyCoordinatorModel.countDocuments({
+      company_id: companyId,
+      project_id: projectId,
+    });
+    if (coordinatorCount >= CompanyProjectsService.MAX_COORDINATORS_PER_PROJECT) {
+      throw new BadRequestException({
+        status: 'error',
+        message: `A maximum of ${CompanyProjectsService.MAX_COORDINATORS_PER_PROJECT} coordinators can be assigned per project.`,
+      });
+    }
+
+    let coordinatorId = await this.resolveCoordinatorMasterId(dto);
+
+    let coordinator = await this.coordinatorModel.findById(coordinatorId);
+    if (!coordinator && dto.email?.trim()) {
+      const byEmail = await this.coordinatorModel.findOne({
+        email: dto.email.trim().toLowerCase(),
+      });
+      if (byEmail) {
+        coordinator = byEmail;
+        coordinatorId = coordinator._id.toString();
+      }
+    }
     if (!coordinator) {
       throw new NotFoundException({
         status: 'error',
@@ -4649,6 +5700,15 @@ export class CompanyProjectsService {
       throw new NotFoundException({
         status: 'error',
         message: 'Project not found',
+      });
+    }
+
+    this.assertProjectHasCodeForAssignments(project as any);
+
+    if ((project as any).process_type !== 'f') {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Facilitator can only be assigned for projects with process type CI + Facilitator.',
       });
     }
 
@@ -4769,6 +5829,239 @@ export class CompanyProjectsService {
         contract_doc_status: 0, // Not signed yet
       },
     };
+  }
+
+  /**
+   * Coordinator / facilitator assignment state for the Assignment tab (GET).
+   */
+  async getProjectAssignments(companyId: string, projectId: string) {
+    const project = await this.projectModel
+      .findOne({
+        _id: projectId,
+        company_id: companyId,
+      })
+      .lean();
+
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const code = project.project_id != null ? String(project.project_id).trim() : '';
+    const assignment_section_enabled = !!code;
+    const processType = (project as any).process_type || 'c';
+    const show_add_facilitator = processType === 'f';
+
+    const coordinatorsDocs = await this.companyCoordinatorModel
+      .find({ company_id: companyId, project_id: projectId })
+      .populate('coordinator_id')
+      .sort({ createdAt: 1 })
+      .lean();
+
+    const coordinators = (coordinatorsDocs as any[])
+      .map((row: any) => {
+        const c = row.coordinator_id;
+        if (!c) return null;
+        return {
+          assignment_id: String(row._id),
+          coordinator_id: String(c._id || c),
+          name: c.name,
+          email: c.email,
+        };
+      })
+      .filter(Boolean);
+
+    const facDoc = await this.companyFacilitatorModel
+      .findOne({ company_id: companyId, project_id: projectId })
+      .populate('facilitator_id')
+      .lean();
+
+    let facilitator: any = null;
+    if (facDoc && (facDoc as any).facilitator_id) {
+      const f = (facDoc as any).facilitator_id;
+      facilitator = {
+        assignment_id: String((facDoc as any)._id),
+        facilitator_id: String(f._id || f),
+        name: f.name,
+        email: f.email,
+        contract_fee: (facDoc as any).contract_fee ?? 0,
+        contract_doc_status: (facDoc as any).contract_doc_status ?? 0,
+      };
+    }
+
+    return {
+      status: 'success',
+      message: 'Assignments loaded',
+      data: {
+        project_id: String(project._id),
+        project_code: code || null,
+        process_type: processType,
+        assignment_section_enabled,
+        show_add_facilitator,
+        max_coordinators: CompanyProjectsService.MAX_COORDINATORS_PER_PROJECT,
+        max_facilitators: 1,
+        coordinator_count: coordinators.length,
+        coordinator_slots_remaining: Math.max(
+          0,
+          CompanyProjectsService.MAX_COORDINATORS_PER_PROJECT - coordinators.length,
+        ),
+        coordinators,
+        facilitator,
+      },
+    };
+  }
+
+  async getProjectAssignmentsByProjectId(projectId: string) {
+    const companyId = await this.resolveCompanyIdFromProjectId(projectId);
+    return this.getProjectAssignments(companyId, projectId);
+  }
+
+  async assignCoordinatorByProjectId(projectId: string, dto: AssignCoordinatorDto) {
+    const companyId = await this.resolveCompanyIdFromProjectId(projectId);
+    return this.assignCoordinator(companyId, projectId, dto);
+  }
+
+  async removeCoordinatorAssignmentByProjectId(projectId: string, assignmentId: string) {
+    const companyId = await this.resolveCompanyIdFromProjectId(projectId);
+    return this.removeCoordinatorAssignment(companyId, projectId, assignmentId);
+  }
+
+  async removeFacilitatorAssignmentByProjectId(projectId: string) {
+    const companyId = await this.resolveCompanyIdFromProjectId(projectId);
+    return this.removeFacilitatorAssignment(companyId, projectId);
+  }
+
+  async assignFacilitatorByProjectId(
+    projectId: string,
+    facilitatorId: string,
+    contractFee?: number,
+    contractDocument?: Express.Multer.File,
+  ) {
+    const companyId = await this.resolveCompanyIdFromProjectId(projectId);
+    return this.assignFacilitator(companyId, projectId, facilitatorId, contractFee, contractDocument);
+  }
+
+  async getProjectAssignmentsForAdmin(projectOrCompanyId: string) {
+    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const result = await this.getProjectAssignments(
+      String(resolved.company_id),
+      String(resolved._id),
+    );
+    const resolvedProjectId = String(resolved._id);
+    const normalizedInput = String(projectOrCompanyId).trim();
+    return {
+      ...result,
+      data: {
+        ...result.data,
+        id_resolution: {
+          input_id: normalizedInput,
+          resolved_project_id: resolvedProjectId,
+          resolved_company_id: String(resolved.company_id),
+          input_matched_project_id: resolvedProjectId === normalizedInput,
+        },
+      },
+    };
+  }
+
+  async assignCoordinatorForAdmin(projectOrCompanyId: string, dto: AssignCoordinatorDto) {
+    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.assignCoordinator(String(resolved.company_id), String(resolved._id), dto);
+  }
+
+  async assignFacilitatorForAdmin(
+    projectOrCompanyId: string,
+    facilitatorId: string,
+    contractFee?: number,
+    contractDocument?: Express.Multer.File,
+  ) {
+    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.assignFacilitator(
+      String(resolved.company_id),
+      String(resolved._id),
+      facilitatorId,
+      contractFee,
+      contractDocument,
+    );
+  }
+
+  async removeCoordinatorAssignment(companyId: string, projectId: string, assignmentId: string) {
+    if (!Types.ObjectId.isValid(assignmentId)) {
+      throw new BadRequestException({ status: 'error', message: 'Invalid assignment id' });
+    }
+    const project = await this.projectModel.findOne({
+      _id: projectId,
+      company_id: companyId,
+    });
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const row = await this.companyCoordinatorModel.findOne({
+      _id: assignmentId,
+      company_id: companyId,
+      project_id: projectId,
+    });
+    if (!row) {
+      throw new NotFoundException({ status: 'error', message: 'Coordinator assignment not found' });
+    }
+    await this.companyCoordinatorModel.deleteOne({ _id: assignmentId });
+    return {
+      status: 'success',
+      message: 'Coordinator assignment removed',
+      data: { assignment_id: assignmentId },
+    };
+  }
+
+  async removeCoordinatorAssignmentForAdmin(projectOrCompanyId: string, assignmentId: string) {
+    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.removeCoordinatorAssignment(
+      String(resolved.company_id),
+      String(resolved._id),
+      assignmentId,
+    );
+  }
+
+  async removeFacilitatorAssignment(companyId: string, projectId: string) {
+    const project = await this.projectModel.findOne({
+      _id: projectId,
+      company_id: companyId,
+    });
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const deleted = await this.companyFacilitatorModel.findOneAndDelete({
+      company_id: companyId,
+      project_id: projectId,
+    });
+    if (!deleted) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'No facilitator assignment for this project',
+      });
+    }
+    return {
+      status: 'success',
+      message: 'Facilitator assignment removed',
+      data: { removed: true },
+    };
+  }
+
+  async removeFacilitatorAssignmentForAdmin(projectOrCompanyId: string) {
+    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.removeFacilitatorAssignment(String(resolved.company_id), String(resolved._id));
   }
 
   /**

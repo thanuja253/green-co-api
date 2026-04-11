@@ -11,6 +11,10 @@ export class Coordinator {
   @Prop({ required: true, unique: true, lowercase: true, trim: true })
   email: string;
 
+  /** Phone / mobile for dropdown display: "Name - 9398758947" */
+  @Prop({ trim: true })
+  mobile?: string;
+
   @Prop({ default: '1' })
   status: string;
 }

@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
@@ -29,6 +30,8 @@ import { join } from 'path';
 import * as fs from 'fs';
 import { CompleteMilestoneDto } from './dto/complete-milestone.dto';
 import { ApproveWorkOrderDto } from './dto/approve-workorder.dto';
+import { WorkOrderAcceptanceDetailsDto } from './dto/work-order-acceptance.dto';
+import { ProjectCodeUpsertDto } from './dto/project-code-upsert.dto';
 import { CreateProjectCodeDto } from './dto/create-project-code.dto';
 import { AssignCoordinatorDto } from './dto/assign-coordinator.dto';
 import { AssignAssessorDto } from './dto/assign-assessor.dto';
@@ -531,6 +534,75 @@ export class CompanyProjectsController {
   }
 
   /**
+   * Replace proposal PDF after the company’s work order was rejected (latest wo_status = 2).
+   * POST|PUT|PATCH /api/company/projects/:projectId/proposal-document/reupload
+   */
+  @Post(':projectId/proposal-document/reupload')
+  @Put(':projectId/proposal-document/reupload')
+  @Patch(':projectId/proposal-document/reupload')
+  @UseInterceptors(
+    FileFieldsInterceptor(
+      [
+        { name: 'proposal_document', maxCount: 1 },
+        { name: 'proposalDocument', maxCount: 1 },
+        { name: 'file', maxCount: 1 },
+      ],
+      {
+        storage: diskStorage({
+          destination: (req, file, cb) => {
+            const projectId = req.params.projectId;
+            const uploadPath = join(process.cwd(), 'uploads', 'company', projectId);
+            if (!fs.existsSync(uploadPath)) {
+              fs.mkdirSync(uploadPath, { recursive: true });
+              console.log(`[Proposal Document Reupload] Created directory: ${uploadPath}`);
+            }
+            cb(null, uploadPath);
+          },
+          filename: (req, file, cb) => {
+            const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+            const ext = extname(file.originalname);
+            const filename = `proposal-${uniqueSuffix}${ext}`;
+            cb(null, filename);
+          },
+        }),
+        limits: {
+          fileSize: 10 * 1024 * 1024,
+        },
+        fileFilter: (req, file, cb) => {
+          const isPdfMime = file.mimetype === 'application/pdf';
+          const isPdfExt = extname(file.originalname || '').toLowerCase() === '.pdf';
+          if (isPdfMime && isPdfExt) {
+            cb(null, true);
+            return;
+          }
+          cb(new Error('Invalid file type. Only PDF is allowed.'), false);
+        },
+      },
+    ),
+  )
+  async replaceProposalDocument(
+    @Param('projectId') projectId: string,
+    @UploadedFiles()
+    files?: {
+      proposal_document?: Express.Multer.File[];
+      proposalDocument?: Express.Multer.File[];
+      file?: Express.Multer.File[];
+    },
+  ): Promise<any> {
+    const file =
+      files?.proposal_document?.[0] ||
+      files?.proposalDocument?.[0] ||
+      files?.file?.[0];
+    if (!file) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'No file uploaded. Use proposal_document, proposalDocument, or file.',
+      });
+    }
+    return this.companyProjectsService.replaceProposalDocumentByProjectId(projectId, file);
+  }
+
+  /**
    * Upload Proposal Document (Admin function - can be called directly or via MongoDB)
    * POST /api/company/projects/:projectId/proposal-document
    */
@@ -610,7 +682,7 @@ export class CompanyProjectsController {
   }
 
   /**
-   * Get Proposal Document
+   * Get proposal metadata (view URL, status, work order summary, can_replace_proposal after WO reject).
    * GET /api/company/projects/:projectId/proposal-document
    */
   @Get(':projectId/proposal-document')
@@ -1284,7 +1356,108 @@ export class CompanyProjectsController {
   }
 
   /**
-   * Upload Work Order Document (Company uploads)
+   * Re-upload work order PDF after CII rejected it (wo_status must be 2).
+   * POST /api/company/projects/:projectId/work-order-document/reupload
+   * Same multipart field as first upload: workorderdocument (PDF).
+   */
+  @Post(':projectId/work-order-document/reupload')
+  @UseInterceptors(
+    FileInterceptor('workorderdocument', {
+      storage: diskStorage({
+        destination: (req, file, cb) => {
+          const projectId = req.params.projectId;
+          const uploadPath = join(process.cwd(), 'uploads', 'companyproject', projectId);
+          if (!fs.existsSync(uploadPath)) {
+            fs.mkdirSync(uploadPath, { recursive: true });
+          }
+          cb(null, uploadPath);
+        },
+        filename: (req, file, cb) => {
+          const timestamp = Date.now();
+          const ext = extname(file.originalname);
+          cb(null, `${timestamp}_${file.originalname}`);
+        },
+      }),
+      limits: { fileSize: 10 * 1024 * 1024 },
+      fileFilter: (req, file, cb) => {
+        if (file.mimetype === 'application/pdf') {
+          cb(null, true);
+        } else {
+          cb(new Error('Invalid file type. Only PDF files are allowed.'), false);
+        }
+      },
+    }),
+  )
+  async reuploadWorkOrderDocument(
+    @Param('projectId') projectId: string,
+    @UploadedFile() file: Express.Multer.File,
+  ): Promise<any> {
+    if (!file) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'No file uploaded. Use field workorderdocument (PDF).',
+      });
+    }
+    return this.companyProjectsService.reuploadWorkOrderDocumentByProjectId(projectId, file);
+  }
+
+  /**
+   * CII/Admin: accept (1) or reject (2) the latest work order for this project.
+   * PATCH /api/company/projects/:projectId/work-order-document/review
+   * Body: { "wo_status": 1 | 2, "wo_remarks": "..." } (remarks required when wo_status is 2)
+   */
+  @Patch(':projectId/work-order-document/review')
+  @UsePipes(
+    new ValidationPipe({
+      transform: true,
+      whitelist: true,
+      forbidNonWhitelisted: true,
+    }),
+  )
+  async reviewWorkOrderDocument(
+    @Param('projectId') projectId: string,
+    @Body() dto: ApproveWorkOrderDto,
+  ): Promise<any> {
+    if (dto.wo_status === 2 && !dto.wo_remarks) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Remarks are required when rejecting work order',
+      });
+    }
+    return this.companyProjectsService.updateWorkOrderStatusByProjectId(projectId, dto);
+  }
+
+  /**
+   * GET PO number + acceptance date (and suggested default date when accepted but not yet saved).
+   * GET /api/company/projects/:projectId/work-order-document/acceptance
+   */
+  @Get(':projectId/work-order-document/acceptance')
+  async getWorkOrderAcceptanceDetails(@Param('projectId') projectId: string): Promise<any> {
+    return this.companyProjectsService.getWorkOrderAcceptanceDetailsByProjectId(projectId);
+  }
+
+  /**
+   * Save PO number + acceptance date after work order is accepted (wo_status = 1).
+   * PATCH /api/company/projects/:projectId/work-order-document/acceptance
+   * Body: { "wo_po_number": "PO-123", "wo_acceptance_date": "2026-04-11" } — date cannot be in the future.
+   */
+  @Patch(':projectId/work-order-document/acceptance')
+  @UsePipes(
+    new ValidationPipe({
+      transform: true,
+      whitelist: true,
+      forbidNonWhitelisted: true,
+    }),
+  )
+  async setWorkOrderAcceptanceDetails(
+    @Param('projectId') projectId: string,
+    @Body() dto: WorkOrderAcceptanceDetailsDto,
+  ): Promise<any> {
+    return this.companyProjectsService.setWorkOrderAcceptanceDetailsByProjectId(projectId, dto);
+  }
+
+  /**
+   * Upload Work Order Document (Company uploads; JWT = company account)
    * POST /api/company/projects/:projectId/work-order-document
    */
   @Post(':projectId/work-order-document')
@@ -1349,29 +1522,24 @@ export class CompanyProjectsController {
   }
 
   /**
-   * Get latest work order document metadata.
+   * Latest work order metadata + status for any panel (Mongo project id or company id in path).
    * GET /api/company/projects/:projectId/work-order-document
+   * data: wo_status (0 pending, 1 accepted, 2 rejected), wo_status_label, can_reupload_work_order, awaiting_cii_review, work_order_id, …
    */
   @Get(':projectId/work-order-document')
-  @UseGuards(JwtAuthGuard, AccountStatusGuard)
-  async getWorkOrderDocument(
-    @Request() req,
-    @Param('projectId') projectId: string,
-  ): Promise<any> {
-    return this.companyProjectsService.getWorkOrderDocument(
-      req.user.userId,
-      projectId,
-    );
+  async getWorkOrderDocument(@Param('projectId') projectId: string): Promise<any> {
+    return this.companyProjectsService.getWorkOrderDocumentByProjectId(projectId);
   }
 
   /**
-   * Update latest work order status (accept/reject + remarks).
+   * Update latest work order status (accept/reject) when caller uses company JWT.
    * PATCH /api/company/projects/:projectId/work-order-document/status
    */
   @Patch(':projectId/work-order-document/status')
   @UseGuards(JwtAuthGuard, AccountStatusGuard)
   @UsePipes(
     new ValidationPipe({
+      transform: true,
       whitelist: true,
       forbidNonWhitelisted: true,
     }),
@@ -1445,6 +1613,56 @@ export class CompanyProjectsController {
   }
 
   /**
+   * GET project code + flags for Quick View (assign after PO / inline edit).
+   * GET /api/company/projects/:projectId/project-code
+   */
+  @Get(':projectId/project-code')
+  async getProjectCodeAssignment(@Param('projectId') projectId: string): Promise<any> {
+    return this.companyProjectsService.getProjectCodeAssignmentByProjectId(projectId);
+  }
+
+  /**
+   * POST assign or update project code (admin; path = Mongo project id or company id).
+   * First assign runs milestone 6; updates only change the code string.
+   * POST /api/company/projects/:projectId/project-code/upsert
+   * Body: { "project_code": "CI2604006" }
+   */
+  @Post(':projectId/project-code/upsert')
+  @UsePipes(
+    new ValidationPipe({
+      transform: true,
+      whitelist: true,
+      forbidNonWhitelisted: true,
+    }),
+  )
+  async upsertProjectCode(
+    @Param('projectId') projectId: string,
+    @Body() dto: ProjectCodeUpsertDto,
+  ): Promise<any> {
+    return this.companyProjectsService.upsertProjectCodeByProjectId(projectId, dto.project_code);
+  }
+
+  /**
+   * Same as POST .../project-code/upsert — shorter URL for UIs.
+   * POST /api/company/projects/:projectId/project-code/assign
+   * Body: { "project_code": "CI2604006" }
+   */
+  @Post(':projectId/project-code/assign')
+  @UsePipes(
+    new ValidationPipe({
+      transform: true,
+      whitelist: true,
+      forbidNonWhitelisted: true,
+    }),
+  )
+  async assignProjectCode(
+    @Param('projectId') projectId: string,
+    @Body() dto: ProjectCodeUpsertDto,
+  ): Promise<any> {
+    return this.companyProjectsService.upsertProjectCodeByProjectId(projectId, dto.project_code);
+  }
+
+  /**
    * Create Project Code (Milestone 6)
    * POST /api/company/projects/:projectId/project-code
    * Admin creates a unique project code for a company project
@@ -1490,17 +1708,38 @@ export class CompanyProjectsController {
    * Admin assigns a coordinator to a company project
    */
   @Post(':projectId/assign-coordinator')
-  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   async assignCoordinator(
-    @Request() req,
     @Param('projectId') projectId: string,
     @Body() dto: AssignCoordinatorDto,
   ): Promise<any> {
-    return this.companyProjectsService.assignCoordinator(
-      req.user.userId,
-      projectId,
-      dto.coordinator_id,
-    );
+    return this.companyProjectsService.assignCoordinatorByProjectId(projectId, dto);
+  }
+
+  /**
+   * GET /api/company/projects/:projectId/assignments — coordinators, facilitator, limits, flags
+   */
+  @Get(':projectId/assignments')
+  async getProjectAssignments(@Param('projectId') projectId: string): Promise<any> {
+    return this.companyProjectsService.getProjectAssignmentsByProjectId(projectId);
+  }
+
+  /**
+   * DELETE /api/company/projects/:projectId/coordinators/:assignmentId — remove one coordinator slot
+   */
+  @Delete(':projectId/coordinators/:assignmentId')
+  async removeCoordinatorAssignment(
+    @Param('projectId') projectId: string,
+    @Param('assignmentId') assignmentId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.removeCoordinatorAssignmentByProjectId(projectId, assignmentId);
+  }
+
+  /**
+   * DELETE /api/company/projects/:projectId/facilitator — remove facilitator (CI + Facilitator flow)
+   */
+  @Delete(':projectId/facilitator')
+  async removeFacilitatorAssignment(@Param('projectId') projectId: string): Promise<any> {
+    return this.companyProjectsService.removeFacilitatorAssignmentByProjectId(projectId);
   }
 
   /**
@@ -1509,7 +1748,6 @@ export class CompanyProjectsController {
    * Admin assigns a facilitator to a company project
    */
   @Post(':projectId/assign-facilitator')
-  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   @UseInterceptors(
     FileInterceptor('contract_document', {
       storage: diskStorage({
@@ -1539,13 +1777,11 @@ export class CompanyProjectsController {
     }),
   )
   async assignFacilitator(
-    @Request() req,
     @Param('projectId') projectId: string,
     @Body() dto: AssignFacilitatorDto,
     @UploadedFile() contractDocument?: Express.Multer.File,
   ): Promise<any> {
-    return this.companyProjectsService.assignFacilitator(
-      req.user.userId,
+    return this.companyProjectsService.assignFacilitatorByProjectId(
       projectId,
       dto.facilitator_id,
       dto.contract_fee,
