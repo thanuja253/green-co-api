@@ -199,9 +199,24 @@ export function countFilledRegistrationFields(ri: Record<string, any> | null | u
  * When the URL id is a company_id, multiple projects may exist (e.g. recertification).
  * Prefer the project that actually has registration data / profile_update.
  */
+function launchTrainingScore(p: any): number {
+  if (!p) return 0;
+  const doc = !!(p.launch_training_document && String(p.launch_training_document).trim());
+  const sess =
+    Array.isArray(p.launch_training_sessions) &&
+    p.launch_training_sessions.some((s: any) => s && String(s.document_path || '').trim());
+  return doc || sess ? 1 : 0;
+}
+
 export function pickBestProjectForRegistration(projects: any[]): any | null {
   if (!projects?.length) return null;
   return [...projects].sort((a, b) => {
+    const la = launchTrainingScore(a);
+    const lb = launchTrainingScore(b);
+    if (la !== lb) return lb - la;
+    const na = Number(a?.next_activities_id || 0);
+    const nb = Number(b?.next_activities_id || 0);
+    if (na !== nb) return nb - na;
     const pua = a.profile_update === 1 ? 1 : 0;
     const pub = b.profile_update === 1 ? 1 : 0;
     if (pua !== pub) return pub - pua;

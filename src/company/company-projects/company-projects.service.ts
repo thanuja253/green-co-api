@@ -1031,7 +1031,9 @@ export class CompanyProjectsService {
       resolution = 'company_id';
       const candidates = await this.projectModel
         .find({ company_id: new Types.ObjectId(projectIdOrCompanyId) })
-        .select('company_id registration_info profile_update updatedAt createdAt')
+        .select(
+          'company_id registration_info profile_update updatedAt createdAt launch_training_document launch_training_sessions next_activities_id project_id',
+        )
         .lean();
       project = pickBestProjectForRegistration(candidates as any[]);
     }
@@ -1448,6 +1450,13 @@ export class CompanyProjectsService {
     // Match GET .../proposal-workorder-documents work-order lookup (ObjectId project_id + string|ObjectId company_id).
     const projectOidForWo = new Types.ObjectId(String(projectId));
     const companyOidForWo = new Types.ObjectId(String(companyId));
+    // Activities may have been stored with string or ObjectId refs — match loosely like work-order queries.
+    const activityScope = {
+      $and: [
+        { $or: [{ project_id: pid }, { project_id: String(projectId) }, { project_id: projectOidForWo }] },
+        { $or: [{ company_id: cid }, { company_id: String(companyId) }, { company_id: companyOidForWo }] },
+      ],
+    };
 
     const [
       company,
@@ -1457,14 +1466,12 @@ export class CompanyProjectsService {
       companyFacilitator,
       companyCoordinator,
       companyAssessors,
+      launchTrainingResourceDoc,
     ] = await Promise.all([
       this.companyModel.findById(companyId).lean(),
+      this.companyActivityModel.find(activityScope).sort({ createdAt: -1 }).lean(),
       this.companyActivityModel
-        .find({ company_id: cid, project_id: pid })
-        .sort({ createdAt: -1 })
-        .lean(),
-      this.companyActivityModel
-        .findOne({ company_id: cid, project_id: pid, activity_type: 'cii' })
+        .findOne({ ...activityScope, activity_type: 'cii' })
         .sort({ createdAt: -1 })
         .lean(),
       this.companyWorkOrderModel
@@ -1484,6 +1491,14 @@ export class CompanyProjectsService {
         .lean(),
       this.companyAssessorModel
         .find({ company_id: cid, project_id: pid })
+        .lean(),
+      this.companyResourceDocumentModel
+        .findOne({
+          project_id: projectOidForWo,
+          is_active: true,
+          document_type: 'launch_training',
+        })
+        .sort({ createdAt: -1 })
         .lean(),
     ]);
 
@@ -1547,6 +1562,16 @@ export class CompanyProjectsService {
         description.includes('greenco rating online')
       ) {
         return 1;
+      }
+      // Launch & Training rows are stored with milestone_flow 63; map to step 7 so quickview
+      // next/latest math stays between coordinator assignment and PI (step 8), and never jumps to late milestones.
+      const launchTrainingUpload =
+        Number(rawFlow) === 63 ||
+        (description.includes('launch') &&
+          description.includes('training') &&
+          (description.includes('uploaded') || description.includes('document')));
+      if (launchTrainingUpload) {
+        return 7;
       }
 
       return Number.isFinite(rawFlow as number) ? rawFlow : null;
@@ -1793,10 +1818,15 @@ export class CompanyProjectsService {
       ? 'CII'
       : nextActivityInfo.responsibility;
     const proposalStatus = Number((project as any).proposal_status ?? 0);
+    /** WO uploaded ⇒ company moved past proposal gate even if `proposal_status` was never set to 1. */
+    const proposalAcceptedForWorkflow =
+      proposalStatus === 1 || (proposalStatus === 0 && hasWorkOrderDocument);
     const isProposalPendingCompanyDecision =
       hasProposalDocument &&
       proposalStatus === 0 &&
+      !hasWorkOrderDocument &&
       effectiveNextId <= 3 &&
+      latestCompletedMilestoneNumber <= 3 &&
       !isRecertifiedAndAtCloseOut &&
       !isAtCloseOutNoRecertify;
     if (isProposalPendingCompanyDecision) {
@@ -1811,7 +1841,7 @@ export class CompanyProjectsService {
       'Company';
     const isProposalAcceptedByCompany =
       hasProposalDocument &&
-      proposalStatus === 1 &&
+      proposalAcceptedForWorkflow &&
       !isRecertifiedAndAtCloseOut &&
       !isAtCloseOutNoRecertify;
     // Only while still before work order upload — do not overwrite later milestones (WO / PO / project code / PI…).
@@ -1823,7 +1853,7 @@ export class CompanyProjectsService {
     }
     const workOrderPendingAdminReview =
       hasProposalDocument &&
-      proposalStatus === 1 &&
+      proposalAcceptedForWorkflow &&
       hasWorkOrderDocument &&
       woStatusNum === 0 &&
       !isRecertifiedAndAtCloseOut &&
@@ -1836,7 +1866,7 @@ export class CompanyProjectsService {
     }
     const workOrderAcceptedByAdmin =
       hasProposalDocument &&
-      proposalStatus === 1 &&
+      proposalAcceptedForWorkflow &&
       hasWorkOrderDocument &&
       woStatusNum === 1 &&
       !isRecertifiedAndAtCloseOut &&
@@ -1869,7 +1899,12 @@ export class CompanyProjectsService {
       companyCoordinator && (companyCoordinator as any).coordinator_id
     );
     const projectCodeAssigned = !!String((project as any).project_id || '').trim();
-    const nextActIdNum = Number((project as any).next_activities_id || 0);
+    const nextActIdNumRaw = Number((project as any).next_activities_id || 0);
+    /** Coordinator + project code imply the PI/L&T gate (8); DB pointer is sometimes 0 or still 7 after legacy flows. */
+    const nextActIdNum =
+      hasCoordinatorAssigned && projectCodeAssigned && (nextActIdNumRaw === 0 || nextActIdNumRaw === 7)
+        ? 8
+        : nextActIdNumRaw;
     // Project code exists but coordinator not assigned — always show this pair (even if next_activities_id jumped to 8+).
     if (
       projectCodeAssigned &&
@@ -1883,10 +1918,23 @@ export class CompanyProjectsService {
       nextStepDisplayName = milestoneSteps[7].name;
       nextStepDisplayResponsibility = milestoneSteps[7].responsibility;
     }
+    const launchTrainingActivityDone = (allActivities as any[]).some((a) => {
+      if (!a?.milestone_completed) return false;
+      const d = String(a?.description || '').toLowerCase();
+      const descMatch =
+        d.includes('launch') &&
+        d.includes('training') &&
+        (d.includes('uploaded') || d.includes('document'));
+      return Number(a?.milestone_flow) === 63 || descMatch;
+    });
+    const launchTrainingFromResourceDoc = !!(
+      launchTrainingResourceDoc &&
+      String((launchTrainingResourceDoc as any).document_url || '').trim()
+    );
     const launchTrainingDone =
-      !!(project as any).launch_training_document ||
-      (Array.isArray((project as any).launch_training_sessions) &&
-        (project as any).launch_training_sessions.some((s: any) => s?.document_path));
+      this.mergeLaunchTrainingSessionsFromDb(project as any).length > 0 ||
+      launchTrainingActivityDone ||
+      launchTrainingFromResourceDoc;
     // After coordinator: next is Launch & Training, then PI invoice (both use next_activities_id 8 until PI is uploaded).
     if (
       hasCoordinatorAssigned &&
@@ -1899,21 +1947,10 @@ export class CompanyProjectsService {
       latestStepDisplayResponsibility = milestoneSteps[7].responsibility;
       nextStepDisplayName = 'Launch & Training (Site Visit Report)';
       nextStepDisplayResponsibility = 'Consultant';
-    } else if (
-      hasCoordinatorAssigned &&
-      nextActIdNum === 8 &&
-      launchTrainingDone &&
-      !isRecertifiedAndAtCloseOut &&
-      !isAtCloseOutNoRecertify
-    ) {
-      latestStepDisplayName = 'Launch & Training (Site Visit Report)';
-      latestStepDisplayResponsibility = 'Consultant';
-      nextStepDisplayName = milestoneSteps[8].name;
-      nextStepDisplayResponsibility = milestoneSteps[8].responsibility;
     }
     const workOrderRejectedByAdmin =
       hasProposalDocument &&
-      proposalStatus === 1 &&
+      proposalAcceptedForWorkflow &&
       hasWorkOrderDocument &&
       woStatusNum === 2 &&
       !isRecertifiedAndAtCloseOut &&
@@ -1934,6 +1971,21 @@ export class CompanyProjectsService {
       latestStepDisplayResponsibility = 'Company';
       nextStepDisplayName = 'CII will Upload Proposal Document';
       nextStepDisplayResponsibility = 'CII';
+    }
+    // Apply last so stale `next_activities_id` / milestone labels do not leave quickview on "Assign coordinator" after L&T upload.
+    if (
+      hasCoordinatorAssigned &&
+      nextActIdNum === 8 &&
+      launchTrainingDone &&
+      !workOrderRejectedByAdmin &&
+      !isProposalRejectedByCompany &&
+      !isRecertifiedAndAtCloseOut &&
+      !isAtCloseOutNoRecertify
+    ) {
+      latestStepDisplayName = 'Launch & Training (Site Visit Report) uploaded by CII';
+      latestStepDisplayResponsibility = 'CII';
+      nextStepDisplayName = milestoneSteps[8].name;
+      nextStepDisplayResponsibility = milestoneSteps[8].responsibility;
     }
 
     const projectCodePresent = !!String((project as any).project_id || '').trim();
@@ -1962,6 +2014,12 @@ export class CompanyProjectsService {
           : `${baseUrl}/${project.proposal_document}`
         : null,
       proposal_status: (project as any).proposal_status ?? 0,
+      /** Use for Resources / headers: WO on file ⇒ treat as accepted even when DB `proposal_status` stayed 0. */
+      proposal_ui_status:
+        proposalStatus === 2 ? 2 : proposalStatus === 1 ? 1 : hasWorkOrderDocument ? 1 : 0,
+      proposal_ui_status_label: this.mapProposalStatusLabel(
+        proposalStatus === 2 ? 2 : proposalStatus === 1 ? 1 : hasWorkOrderDocument ? 1 : 0,
+      ),
       proposal_remarks: (project as any).proposal_remarks ?? null,
       work_order_po_number:
         String((project as any).work_order_po_number || '').trim() ||
@@ -2790,6 +2848,9 @@ export class CompanyProjectsService {
       const fileName = pathRaw.split('/').pop() || 'proposal.pdf';
       const absUrl = pathRaw.startsWith('http') ? pathRaw : `${baseUrl}/${pathRaw.replace(/^\//, '')}`;
       const proposalRemarksVal = projectAny.proposal_remarks ?? null;
+      const rawPr = Number(projectAny.proposal_status ?? 0);
+      const hasWoDoc = !!(workOrderAny?.wo_doc && String(workOrderAny.wo_doc).trim());
+      const proposalUiStatus = rawPr === 2 ? 2 : rawPr === 1 ? 1 : hasWoDoc ? 1 : 0;
       response.proposal_document = {
         has_document: true,
         document_url: absUrl,
@@ -2797,6 +2858,8 @@ export class CompanyProjectsService {
         filename: fileName,
         path: pathRaw,
         proposal_status: projectAny.proposal_status ?? 0,
+        proposal_ui_status: proposalUiStatus,
+        proposal_ui_status_label: this.mapProposalStatusLabel(proposalUiStatus),
         proposal_remarks: proposalRemarksVal,
         remarks: proposalRemarksVal,
         proposal_status_updated_at: projectAny.proposal_status_updated_at
@@ -2979,7 +3042,14 @@ export class CompanyProjectsService {
       }
     >();
     for (const s of raw) {
-      const idx = Number(s.session_index);
+      let idx = Number(s.session_index);
+      if (!Number.isFinite(idx) || idx < 1 || idx > CompanyProjectsService.LAUNCH_TRAINING_MAX_SESSIONS) {
+        let slot = 1;
+        while (slot <= CompanyProjectsService.LAUNCH_TRAINING_MAX_SESSIONS && byIndex.has(slot)) {
+          slot += 1;
+        }
+        idx = slot;
+      }
       if (idx >= 1 && idx <= CompanyProjectsService.LAUNCH_TRAINING_MAX_SESSIONS) {
         byIndex.set(idx, {
           session_index: idx,
@@ -3332,6 +3402,10 @@ export class CompanyProjectsService {
 
     pAny.launch_training_sessions = sessions;
     this.syncLegacyLaunchTrainingFieldsFromSessions(project, sessions);
+    const curNext = Number((pAny as any).next_activities_id || 0);
+    if (curNext < 8) {
+      (pAny as any).next_activities_id = 8;
+    }
     await project.save();
 
     await this.companyActivityModel.create({
@@ -3514,6 +3588,10 @@ export class CompanyProjectsService {
       }
     }
 
+    const rawPr = Number(projectAny.proposal_status ?? 0);
+    const hasWoForUi = !!(workOrder as any)?.wo_doc && String((workOrder as any).wo_doc).trim();
+    const proposalUiStatus = rawPr === 2 ? 2 : rawPr === 1 ? 1 : hasWoForUi ? 1 : 0;
+
     return {
       status: 'success',
       message: 'Resources center documents retrieved successfully',
@@ -3523,6 +3601,8 @@ export class CompanyProjectsService {
         // approval_status_options removed so frontend does not render status dropdown
         documents,
         process_type: projectAny.process_type || 'c',
+        proposal_ui_status: proposalUiStatus,
+        proposal_ui_status_label: this.mapProposalStatusLabel(proposalUiStatus),
       },
     };
   }
