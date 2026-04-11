@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Header,
   Param,
   Patch,
   Post,
@@ -43,6 +44,7 @@ import { AdminJwtAuthGuard } from '../../admin/admin-auth/guards/admin-jwt-auth.
 import { UpdateQuickviewDataDto } from './dto/update-quickview-data.dto';
 import { ReviewProposalDto } from './dto/review-proposal.dto';
 import { UpdateProposalStatusDto } from './dto/update-proposal-status.dto';
+import { WorkOrderPoDetailsDto } from './dto/work-order-po-details.dto';
 import { mergeNestedRegistrationBody } from './registration-info-normalize';
 
 @Controller('api/company/projects')
@@ -348,6 +350,8 @@ export class CompanyProjectsController {
    * Open route (no JWT): param may be project _id or company _id — matches admin workflow-status / registration-data.
    */
   @Get(':projectId/quickview')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+  @Header('Pragma', 'no-cache')
   async getQuickview(@Param('projectId') projectId: string): Promise<any> {
     return this.companyProjectsService.getQuickviewDataForAdmin(projectId);
   }
@@ -1068,6 +1072,44 @@ export class CompanyProjectsController {
       });
     }
     return this.companyProjectsService.uploadProposalDocumentForAdmin(projectId, file);
+  }
+
+  /**
+   * Admin: form defaults + saved PO fields (after WO approved, before project code).
+   * GET /api/company/projects/:projectId/admin/work-order-po
+   */
+  @Get(':projectId/admin/work-order-po')
+  @UseGuards(AdminJwtAuthGuard)
+  async getWorkOrderPoAdmin(@Param('projectId') projectId: string): Promise<any> {
+    return this.companyProjectsService.getWorkOrderPoAdminFormForAdmin(projectId);
+  }
+
+  /**
+   * Admin: save PO number + acceptance date (not in the future). Required before project code if WO was approved.
+   * PATCH /api/company/projects/:projectId/admin/work-order-po
+   */
+  @Patch(':projectId/admin/work-order-po')
+  @UseGuards(AdminJwtAuthGuard)
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  async patchWorkOrderPoAdmin(
+    @Param('projectId') projectId: string,
+    @Body() dto: WorkOrderPoDetailsDto,
+  ): Promise<any> {
+    return this.companyProjectsService.saveWorkOrderPoDetailsForAdmin(projectId, dto);
+  }
+
+  /**
+   * Admin: create project code (same rules as company route + PO gate when WO approved).
+   * POST /api/company/projects/:projectId/admin/project-code
+   */
+  @Post(':projectId/admin/project-code')
+  @UseGuards(AdminJwtAuthGuard)
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  async createProjectCodeAdmin(
+    @Param('projectId') projectId: string,
+    @Body() dto: CreateProjectCodeDto,
+  ): Promise<any> {
+    return this.companyProjectsService.createProjectCodeForAdmin(projectId, dto.project_id);
   }
 
   /**

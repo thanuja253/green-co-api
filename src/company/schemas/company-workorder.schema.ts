@@ -22,6 +22,13 @@ export class CompanyWorkOrder {
 
   @Prop()
   wo_doc_status_updated_at?: Date;
+
+  /** Mirrored from project when CII saves PO + acceptance date (quickview / acceptance API). */
+  @Prop()
+  wo_po_number?: string;
+
+  @Prop()
+  wo_acceptance_date?: Date;
 }
 
 export const CompanyWorkOrderSchema = SchemaFactory.createForClass(CompanyWorkOrder);

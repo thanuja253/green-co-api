@@ -105,6 +105,14 @@ export class CompanyProject {
   @Prop()
   project_id?: string; // Project code/identifier
 
+  /** Admin-entered PO number after work order approval, before project code is assigned. */
+  @Prop()
+  work_order_po_number?: string;
+
+  /** Admin-entered date of acceptance (not in the future); defaults from client WO upload in UI. */
+  @Prop()
+  work_order_po_acceptance_date?: Date;
+
   // Raw registration info from the big Registration Info form
   // (industry/entity/sector/state, addresses, SEZ, turnover, etc.)
   @Prop({ type: Object, default: {} })

@@ -31,6 +31,7 @@ import { RegistrationInfoDto } from './dto/registration-info.dto';
 import { SubmitPaymentDto } from './dto/submit-payment.dto';
 import { UpdateInvoiceApprovalDto } from './dto/update-invoice-approval.dto';
 import { UpdateQuickviewDataDto } from './dto/update-quickview-data.dto';
+import { WorkOrderPoDetailsDto } from './dto/work-order-po-details.dto';
 import { CompleteMilestoneDto } from './dto/complete-milestone.dto';
 import { join, extname } from 'path';
 import * as fs from 'fs';
@@ -53,6 +54,38 @@ import {
   getMilestoneCompletionNotifications,
   type WorkflowActor,
 } from './workflow-step-notifications';
+
+function parseUtcCalendarDateFromYmd(input: string): Date {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(input || '').trim());
+  if (!m) {
+    throw new BadRequestException({
+      status: 'error',
+      message: 'Invalid acceptance_date; use YYYY-MM-DD',
+    });
+  }
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) {
+    throw new BadRequestException({ status: 'error', message: 'Invalid acceptance_date' });
+  }
+  return new Date(Date.UTC(y, mo - 1, d, 12, 0, 0, 0));
+}
+
+function utcCalendarDayStart(d: Date): Date {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+}
+
+function assertAcceptanceDateNotFuture(acceptanceUtc: Date): void {
+  const todayStart = utcCalendarDayStart(new Date());
+  const chosenStart = utcCalendarDayStart(acceptanceUtc);
+  if (chosenStart.getTime() > todayStart.getTime()) {
+    throw new BadRequestException({
+      status: 'error',
+      message: 'Acceptance date cannot be in the future.',
+    });
+  }
+}
 
 /** View Certificate score band: 9 rows × 20 numbers (points bands 1–10 … 191–200). Normalize so frontend always gets number[][]. */
 function normalizeScoreBandRows(rows: any[]): number[][] {
@@ -1031,6 +1064,134 @@ export class CompanyProjectsService {
     return { companyId, resolvedProjectId, resolution };
   }
 
+  /** Latest work order row for a project (aligns with proposal-workorder WO query). */
+  private async findLatestWorkOrderForProject(companyId: string, projectId: string) {
+    const pOid = new Types.ObjectId(String(projectId));
+    const cOid = new Types.ObjectId(String(companyId));
+    return this.companyWorkOrderModel
+      .findOne({
+        project_id: pOid,
+        $or: [{ company_id: String(companyId) }, { company_id: cOid }],
+      })
+      .sort({ createdAt: -1 })
+      .lean();
+  }
+
+  /**
+   * Admin: save PO number + acceptance date after work order is approved, before project code.
+   */
+  async saveWorkOrderPoDetails(
+    companyId: string,
+    projectId: string,
+    dto: WorkOrderPoDetailsDto,
+  ) {
+    const project = await this.projectModel.findOne({
+      _id: projectId,
+      company_id: companyId,
+    });
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    if (String((project as any).project_id || '').trim()) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Project code is already assigned; PO details cannot be changed here.',
+      });
+    }
+    const wo = await this.findLatestWorkOrderForProject(companyId, projectId);
+    if (!wo || Number((wo as any).wo_status) !== 1) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Work order must be approved before recording PO details.',
+      });
+    }
+    const acceptanceUtc = parseUtcCalendarDateFromYmd(dto.acceptance_date);
+    assertAcceptanceDateNotFuture(acceptanceUtc);
+    const po = String(dto.po_number || '').trim();
+    if (!po) {
+      throw new BadRequestException({ status: 'error', message: 'PO number is required.' });
+    }
+    (project as any).work_order_po_number = po;
+    (project as any).work_order_po_acceptance_date = acceptanceUtc;
+    await project.save();
+
+    const woRow = await this.companyWorkOrderModel
+      .findOne({
+        project_id: new Types.ObjectId(String(projectId)),
+        $or: [
+          { company_id: String(companyId) },
+          { company_id: new Types.ObjectId(String(companyId)) },
+        ],
+      })
+      .sort({ createdAt: -1 });
+    if (woRow) {
+      (woRow as any).wo_po_number = po;
+      (woRow as any).wo_acceptance_date = acceptanceUtc;
+      await woRow.save();
+    }
+
+    return {
+      status: 'success',
+      message: 'Work order PO details saved',
+      data: {
+        work_order_po_number: po,
+        work_order_po_acceptance_date: acceptanceUtc.toISOString(),
+        wo_po_number: po,
+        wo_acceptance_date: acceptanceUtc.toISOString(),
+        needs_acceptance_details: false,
+      },
+    };
+  }
+
+  async saveWorkOrderPoDetailsForAdmin(projectIdOrCompanyId: string, dto: WorkOrderPoDetailsDto) {
+    const { companyId, resolvedProjectId } =
+      await this.resolveRegistrationIdsForAdminParam(projectIdOrCompanyId);
+    return this.saveWorkOrderPoDetails(companyId, resolvedProjectId, dto);
+  }
+
+  /** Defaults for PO form: suggested date = work order record createdAt (client submission). */
+  async getWorkOrderPoAdminForm(companyId: string, projectId: string) {
+    const project = await this.projectModel
+      .findOne({ _id: projectId, company_id: companyId })
+      .lean();
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const wo = await this.findLatestWorkOrderForProject(companyId, projectId);
+    const submitted = (wo as any)?.createdAt
+      ? new Date((wo as any).createdAt).toISOString()
+      : null;
+    const ymd = (d: Date | string | undefined | null) => {
+      if (d == null) return null;
+      const x = d instanceof Date ? d : new Date(d);
+      if (isNaN(x.getTime())) return null;
+      const y = x.getUTCFullYear();
+      const m = String(x.getUTCMonth() + 1).padStart(2, '0');
+      const day = String(x.getUTCDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    };
+    const suggested = wo && (wo as any).createdAt ? ymd((wo as any).createdAt) : null;
+    const savedDate = (project as any).work_order_po_acceptance_date;
+    return {
+      status: 'success',
+      message: 'Work order PO form data',
+      data: {
+        po_number: (project as any).work_order_po_number ?? null,
+        acceptance_date: savedDate ? ymd(savedDate) : null,
+        suggested_acceptance_date: suggested,
+        work_order_submitted_at: submitted,
+        work_order_approved: !!(wo && Number((wo as any).wo_status) === 1),
+        project_code_assigned: !!String((project as any).project_id || '').trim(),
+      },
+    };
+  }
+
+  async getWorkOrderPoAdminFormForAdmin(projectIdOrCompanyId: string) {
+    const { companyId, resolvedProjectId } =
+      await this.resolveRegistrationIdsForAdminParam(projectIdOrCompanyId);
+    return this.getWorkOrderPoAdminForm(companyId, resolvedProjectId);
+  }
+
   /**
    * Admin registration-data: `:projectId` may be a real project _id **or** a company _id
    * (the registered-companies list only exposes company ids, so the admin UI often passes that).
@@ -1283,12 +1444,15 @@ export class CompanyProjectsService {
     // Use project's own _id and company_id for queries (same as check-quickview-activities.js) so activities are found reliably.
     const pid = (project as any)._id;
     const cid = (project as any).company_id;
+    // Match GET .../proposal-workorder-documents work-order lookup (ObjectId project_id + string|ObjectId company_id).
+    const projectOidForWo = new Types.ObjectId(String(projectId));
+    const companyOidForWo = new Types.ObjectId(String(companyId));
 
     const [
       company,
       allActivities,
       currentActivity,
-      workOrder,
+      workOrderInitial,
       companyFacilitator,
       companyCoordinator,
       companyAssessors,
@@ -1303,7 +1467,10 @@ export class CompanyProjectsService {
         .sort({ createdAt: -1 })
         .lean(),
       this.companyWorkOrderModel
-        .findOne({ company_id: cid, project_id: pid })
+        .findOne({
+          project_id: projectOidForWo,
+          $or: [{ company_id: String(companyId) }, { company_id: companyOidForWo }],
+        })
         .sort({ createdAt: -1 })
         .lean(),
       this.companyFacilitatorModel
@@ -1319,6 +1486,17 @@ export class CompanyProjectsService {
         .lean(),
     ]);
 
+    let workOrder: any = workOrderInitial;
+    if (!workOrder?.wo_doc || !String(workOrder.wo_doc).trim()) {
+      const byProjectOnly = await this.companyWorkOrderModel
+        .findOne({ project_id: projectOidForWo })
+        .sort({ createdAt: -1 })
+        .lean();
+      if (byProjectOnly && String((byProjectOnly as any).wo_doc || '').trim()) {
+        workOrder = byProjectOnly;
+      }
+    }
+
     if (!company) {
       throw new NotFoundException({ status: 'error', message: 'Company not found.' });
     }
@@ -1328,6 +1506,11 @@ export class CompanyProjectsService {
       : null;
 
     const hasProposalDocument = !!(project as any).proposal_document;
+    const workOrderAny = workOrder as any;
+    const hasWorkOrderDocument = !!(
+      workOrderAny?.wo_doc && String(workOrderAny.wo_doc).trim()
+    );
+    const woStatusNum = Number(workOrderAny?.wo_status ?? 0);
 
     const normalizeMilestoneFlow = (activity: any): number | null => {
       const description = String(activity?.description || '').toLowerCase();
@@ -1391,6 +1574,19 @@ export class CompanyProjectsService {
       latestCompletedMilestoneNumberFromActivities = Math.min(
         latestCompletedMilestoneNumberFromActivities,
         2,
+      );
+    }
+    // WO on file ⇒ step 4 complete for quickview/next-id math even when no activity row exists.
+    if (hasProposalDocument && hasWorkOrderDocument) {
+      latestCompletedMilestoneNumberFromActivities = Math.max(
+        latestCompletedMilestoneNumberFromActivities,
+        4,
+      );
+    }
+    if (hasProposalDocument && hasWorkOrderDocument && woStatusNum === 1) {
+      latestCompletedMilestoneNumberFromActivities = Math.max(
+        latestCompletedMilestoneNumberFromActivities,
+        5,
       );
     }
 
@@ -1617,11 +1813,86 @@ export class CompanyProjectsService {
       proposalStatus === 1 &&
       !isRecertifiedAndAtCloseOut &&
       !isAtCloseOutNoRecertify;
-    if (isProposalAcceptedByCompany) {
-      // Keep quickview aligned with proposal decision flow shown to the company.
+    // Only while still before work order upload — do not overwrite later milestones (WO / PO / project code / PI…).
+    if (isProposalAcceptedByCompany && !hasWorkOrderDocument) {
       latestStepDisplayName = 'Company Accepted Proposal Document';
       latestStepDisplayResponsibility = 'Company';
       nextStepDisplayName = 'Company Will Upload Work order';
+      nextStepDisplayResponsibility = 'Company';
+    }
+    const workOrderPendingAdminReview =
+      hasProposalDocument &&
+      proposalStatus === 1 &&
+      hasWorkOrderDocument &&
+      woStatusNum === 0 &&
+      !isRecertifiedAndAtCloseOut &&
+      !isAtCloseOutNoRecertify;
+    if (workOrderPendingAdminReview) {
+      latestStepDisplayName = milestoneSteps[4].name;
+      latestStepDisplayResponsibility = milestoneSteps[4].responsibility;
+      nextStepDisplayName = 'CII will Accept or Reject Work Order Document';
+      nextStepDisplayResponsibility = 'CII';
+    }
+    const workOrderAcceptedByAdmin =
+      hasProposalDocument &&
+      proposalStatus === 1 &&
+      hasWorkOrderDocument &&
+      woStatusNum === 1 &&
+      !isRecertifiedAndAtCloseOut &&
+      !isAtCloseOutNoRecertify;
+    const projectCodeNotAssigned = !String((project as any).project_id || '').trim();
+    const poNumberResolved =
+      String((project as any).work_order_po_number || '').trim() ||
+      String((workOrder as any)?.wo_po_number || '').trim();
+    const poDateResolved =
+      (project as any).work_order_po_acceptance_date || (workOrder as any)?.wo_acceptance_date;
+    const hasWorkOrderPoDetails =
+      !!poNumberResolved &&
+      !!poDateResolved &&
+      !isNaN(new Date(poDateResolved as any).getTime());
+    if (workOrderAcceptedByAdmin && projectCodeNotAssigned) {
+      if (!hasWorkOrderPoDetails) {
+        latestStepDisplayName = milestoneSteps[5].name;
+        latestStepDisplayResponsibility = milestoneSteps[5].responsibility;
+        nextStepDisplayName = 'Enter PO number and date of acceptance';
+        nextStepDisplayResponsibility = 'CII';
+      } else {
+        // PO saved → latest = admin submission; next = project code (CII).
+        latestStepDisplayName = 'PO number and date of acceptance submitted by CII';
+        latestStepDisplayResponsibility = 'CII';
+        nextStepDisplayName = milestoneSteps[6].name;
+        nextStepDisplayResponsibility = milestoneSteps[6].responsibility;
+      }
+    }
+    const hasCoordinatorAssigned = !!(
+      companyCoordinator && (companyCoordinator as any).coordinator_id
+    );
+    const projectCodeAssigned = !!String((project as any).project_id || '').trim();
+    const nextActIdNum = Number((project as any).next_activities_id || 0);
+    // Project code exists but coordinator not assigned — always show this pair (even if next_activities_id jumped to 8+).
+    if (
+      projectCodeAssigned &&
+      !hasCoordinatorAssigned &&
+      nextActIdNum < 11 &&
+      !isRecertifiedAndAtCloseOut &&
+      !isAtCloseOutNoRecertify
+    ) {
+      latestStepDisplayName = milestoneSteps[6].name;
+      latestStepDisplayResponsibility = milestoneSteps[6].responsibility;
+      nextStepDisplayName = milestoneSteps[7].name;
+      nextStepDisplayResponsibility = milestoneSteps[7].responsibility;
+    }
+    const workOrderRejectedByAdmin =
+      hasProposalDocument &&
+      proposalStatus === 1 &&
+      hasWorkOrderDocument &&
+      woStatusNum === 2 &&
+      !isRecertifiedAndAtCloseOut &&
+      !isAtCloseOutNoRecertify;
+    if (workOrderRejectedByAdmin) {
+      latestStepDisplayName = 'Work Order Document Rejected by CII';
+      latestStepDisplayResponsibility = 'CII';
+      nextStepDisplayName = 'Company Will Re-upload Work Order Document';
       nextStepDisplayResponsibility = 'Company';
     }
     const isProposalRejectedByCompany =
@@ -1635,6 +1906,8 @@ export class CompanyProjectsService {
       nextStepDisplayName = 'CII will Upload Proposal Document';
       nextStepDisplayResponsibility = 'CII';
     }
+
+    const projectCodePresent = !!String((project as any).project_id || '').trim();
 
     // Build profile object
     const profile = {
@@ -1661,6 +1934,26 @@ export class CompanyProjectsService {
         : null,
       proposal_status: (project as any).proposal_status ?? 0,
       proposal_remarks: (project as any).proposal_remarks ?? null,
+      work_order_po_number:
+        String((project as any).work_order_po_number || '').trim() ||
+        String((workOrder as any)?.wo_po_number || '').trim() ||
+        null,
+      work_order_po_acceptance_date: (() => {
+        const p = (project as any).work_order_po_acceptance_date;
+        const w = (workOrder as any)?.wo_acceptance_date;
+        const d = p != null ? new Date(p) : w != null ? new Date(w) : null;
+        return d && !isNaN(d.getTime()) ? d.toISOString() : null;
+      })(),
+      suggested_work_order_acceptance_date: (() => {
+        const c = (workOrder as any)?.createdAt;
+        if (!c) return null;
+        const x = new Date(c);
+        if (isNaN(x.getTime())) return null;
+        const y = x.getUTCFullYear();
+        const m = String(x.getUTCMonth() + 1).padStart(2, '0');
+        const d = String(x.getUTCDate()).padStart(2, '0');
+        return `${y}-${m}-${d}`;
+      })(),
       feedback_document: project.feedback_document_url
         ? project.feedback_document_url.startsWith('http')
           ? project.feedback_document_url
@@ -1668,6 +1961,8 @@ export class CompanyProjectsService {
         : null,
       next_activities_id: effectiveNextId,
       nextActivitiesId: effectiveNextId,
+      /** Show Assessment tab only after project code is assigned (use with milestoneStepIds.assessment for step 13+). */
+      assessment_tab_visible: projectCodePresent,
       next_activity: nextStepDisplayName,
       next_activity_status: nextStepDisplayStatus,
       next_responsibility: nextStepDisplayResponsibility,
@@ -1703,6 +1998,10 @@ export class CompanyProjectsService {
               : `${baseUrl}/${workOrder.wo_doc}`
             : null,
           wo_status: workOrder.wo_status || 0,
+          wo_po_number: (workOrder as any).wo_po_number ?? null,
+          wo_acceptance_date: (workOrder as any).wo_acceptance_date
+            ? new Date((workOrder as any).wo_acceptance_date).toISOString()
+            : null,
           wo_doc_status_updated_at: workOrder.wo_doc_status_updated_at
             ? workOrder.wo_doc_status_updated_at.toISOString()
             : (workOrder as any).updatedAt
@@ -1712,6 +2011,8 @@ export class CompanyProjectsService {
       : {
           wo_doc: null,
           wo_status: 0,
+          wo_po_number: null,
+          wo_acceptance_date: null,
           wo_doc_status_updated_at: null,
         };
 
@@ -2090,9 +2391,15 @@ export class CompanyProjectsService {
       });
     }
 
+    const rawRemarks = dto.proposal_remarks;
+    const remarksStored =
+      rawRemarks != null && String(rawRemarks).trim() !== ''
+        ? String(rawRemarks).trim()
+        : null;
+
     (project as any).proposal_status = dto.proposal_status;
-    (project as any).proposal_remarks =
-      dto.proposal_status === 2 ? (dto.proposal_remarks || null) : null;
+    // Persist optional remarks on accept and required remarks on reject (GET / proposal-workorder echoes this).
+    (project as any).proposal_remarks = remarksStored;
     (project as any).proposal_status_updated_at = new Date();
 
     if (dto.proposal_status === 1) {
@@ -2124,8 +2431,8 @@ export class CompanyProjectsService {
       .create(
         dto.proposal_status === 1 ? 'Proposal accepted' : 'Proposal rejected',
         dto.proposal_status === 1
-          ? `You accepted the proposal for project ${project.project_id || projectId}. You can now upload work order.`
-          : `You rejected the proposal.${dto.proposal_remarks ? ` Remarks: ${dto.proposal_remarks}` : ''}`,
+          ? `You accepted the proposal for project ${project.project_id || projectId}. You can now upload work order.${remarksStored ? ` Remarks: ${remarksStored}` : ''}`
+          : `You rejected the proposal.${remarksStored ? ` Remarks: ${remarksStored}` : ''}`,
         'C',
         companyId,
       )
@@ -2133,7 +2440,7 @@ export class CompanyProjectsService {
     this.notificationsService
       .create(
         dto.proposal_status === 1 ? 'Proposal accepted by company' : 'Proposal rejected by company',
-        `Company ${dto.proposal_status === 1 ? 'accepted' : 'rejected'} the proposal for project ${project.project_id || projectId}.${dto.proposal_status === 2 && dto.proposal_remarks ? ` Remarks: ${dto.proposal_remarks}` : ''}`,
+        `Company ${dto.proposal_status === 1 ? 'accepted' : 'rejected'} the proposal for project ${project.project_id || projectId}.${remarksStored ? ` Remarks: ${remarksStored}` : ''}`,
         'A',
         null,
       )
@@ -2148,7 +2455,8 @@ export class CompanyProjectsService {
       data: {
         proposal_status: dto.proposal_status,
         proposal_status_label: this.mapProposalStatusLabel(dto.proposal_status),
-        proposal_remarks: dto.proposal_status === 2 ? dto.proposal_remarks || null : null,
+        proposal_remarks: remarksStored,
+        remarks: remarksStored,
         next_activities_id: (project as any).next_activities_id,
       },
     };
@@ -2183,6 +2491,7 @@ export class CompanyProjectsService {
       };
     }
 
+    const pr = (project as any).proposal_remarks ?? null;
     return {
       status: 'success',
       message: 'Proposal document retrieved successfully',
@@ -2192,7 +2501,8 @@ export class CompanyProjectsService {
         document_filename: project.proposal_document.split('/').pop() || 'proposal.pdf',
         proposal_status: (project as any).proposal_status ?? 0,
         proposal_status_label: this.mapProposalStatusLabel((project as any).proposal_status ?? 0),
-        proposal_remarks: (project as any).proposal_remarks ?? null,
+        proposal_remarks: pr,
+        remarks: pr,
         proposal_status_updated_at: (project as any).proposal_status_updated_at
           ? new Date((project as any).proposal_status_updated_at).toISOString()
           : null,
@@ -2450,6 +2760,7 @@ export class CompanyProjectsService {
       const pathRaw = proposalDocValue.trim();
       const fileName = pathRaw.split('/').pop() || 'proposal.pdf';
       const absUrl = pathRaw.startsWith('http') ? pathRaw : `${baseUrl}/${pathRaw.replace(/^\//, '')}`;
+      const proposalRemarksVal = projectAny.proposal_remarks ?? null;
       response.proposal_document = {
         has_document: true,
         document_url: absUrl,
@@ -2457,7 +2768,8 @@ export class CompanyProjectsService {
         filename: fileName,
         path: pathRaw,
         proposal_status: projectAny.proposal_status ?? 0,
-        proposal_remarks: projectAny.proposal_remarks ?? null,
+        proposal_remarks: proposalRemarksVal,
+        remarks: proposalRemarksVal,
         proposal_status_updated_at: projectAny.proposal_status_updated_at
           ? new Date(projectAny.proposal_status_updated_at).toISOString()
           : null,
@@ -2478,6 +2790,7 @@ export class CompanyProjectsService {
         path: null,
         proposal_status: 0,
         proposal_remarks: null,
+        remarks: null,
         proposal_status_updated_at: null,
         can_reupload: false,
         reupload_responsibility: null,
@@ -3255,8 +3568,12 @@ export class CompanyProjectsService {
       existingWorkOrder.wo_doc = relativePath;
       existingWorkOrder.wo_status = 0; // Reset to Under Review
       existingWorkOrder.wo_remarks = null; // Clear previous remarks
+      (existingWorkOrder as any).wo_po_number = undefined;
+      (existingWorkOrder as any).wo_acceptance_date = undefined;
       await existingWorkOrder.save();
       workOrder = existingWorkOrder;
+      (project as any).work_order_po_number = undefined;
+      (project as any).work_order_po_acceptance_date = undefined;
     } else {
       // Create new work order document
       workOrder = await this.companyWorkOrderModel.create({
@@ -3551,6 +3868,16 @@ export class CompanyProjectsService {
         (project as any).next_activities_id = 6;
         await project.save();
       }
+    } else if (dto.wo_status === 2) {
+      (project as any).work_order_po_number = undefined;
+      (project as any).work_order_po_acceptance_date = undefined;
+      await project.save();
+      const woClear = await this.companyWorkOrderModel.findById(workOrder._id);
+      if (woClear) {
+        (woClear as any).wo_po_number = undefined;
+        (woClear as any).wo_acceptance_date = undefined;
+        await woClear.save();
+      }
     }
 
     // LOG ACTIVITY 5: CII Approved/Rejected Work Order Document
@@ -3640,6 +3967,30 @@ export class CompanyProjectsService {
       })
       .sort({ createdAt: -1 });
 
+    const prDetails = (project as any).proposal_remarks ?? null;
+    const woAny = workOrder as any;
+    const suggestedAccept = woAny?.createdAt
+      ? (() => {
+          const x = new Date(woAny.createdAt);
+          if (isNaN(x.getTime())) return null;
+          const y = x.getUTCFullYear();
+          const m = String(x.getUTCMonth() + 1).padStart(2, '0');
+          const d = String(x.getUTCDate()).padStart(2, '0');
+          return `${y}-${m}-${d}`;
+        })()
+      : null;
+    const poSaved = (project as any).work_order_po_acceptance_date;
+    const poAcceptYmd =
+      poSaved != null
+        ? (() => {
+            const x = new Date(poSaved);
+            if (isNaN(x.getTime())) return null;
+            const y = x.getUTCFullYear();
+            const m = String(x.getUTCMonth() + 1).padStart(2, '0');
+            const d = String(x.getUTCDate()).padStart(2, '0');
+            return `${y}-${m}-${d}`;
+          })()
+        : null;
     return {
       status: 'success',
       message: 'Project details retrieved successfully',
@@ -3647,7 +3998,8 @@ export class CompanyProjectsService {
         profile_update: (project as any).profile_update || 0,
         proposal_document: project.proposal_document || null,
         proposal_status: (project as any).proposal_status ?? 0,
-        proposal_remarks: (project as any).proposal_remarks ?? null,
+        proposal_remarks: prDetails,
+        remarks: prDetails,
         process_type: project.process_type || 'c',
         facilitator: !!facilitator,
         work_order: workOrder
@@ -3655,6 +4007,9 @@ export class CompanyProjectsService {
               wo_status: workOrder.wo_status || null,
             }
           : null,
+        work_order_po_number: (project as any).work_order_po_number ?? null,
+        work_order_po_acceptance_date: poAcceptYmd,
+        suggested_work_order_acceptance_date: suggestedAccept,
         next_activities_id: project.next_activities_id || null,
         next_activity: null, // Can be derived from milestone steps if needed
       },
@@ -3681,6 +4036,18 @@ export class CompanyProjectsService {
         status: 'error',
         message: 'Project not found',
       });
+    }
+
+    const latestWoForCode = await this.findLatestWorkOrderForProject(companyId, projectId);
+    if (latestWoForCode && Number((latestWoForCode as any).wo_status) === 1) {
+      const poNum = String((project as any).work_order_po_number || '').trim();
+      if (!poNum || !(project as any).work_order_po_acceptance_date) {
+        throw new BadRequestException({
+          status: 'error',
+          message:
+            'Record PO number and date of acceptance before assigning project code.',
+        });
+      }
     }
 
     // Validate project code is unique (check in both companyprojects and companies)
@@ -3756,6 +4123,12 @@ export class CompanyProjectsService {
         next_responsibility: 'CII',
       },
     };
+  }
+
+  async createProjectCodeForAdmin(projectIdOrCompanyId: string, projectCode: string) {
+    const { companyId, resolvedProjectId } =
+      await this.resolveRegistrationIdsForAdminParam(projectIdOrCompanyId);
+    return this.createProjectCode(companyId, resolvedProjectId, projectCode);
   }
 
   /**
