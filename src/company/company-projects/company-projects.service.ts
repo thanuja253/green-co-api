@@ -2516,6 +2516,15 @@ export class CompanyProjectsService {
   }
 
   /**
+   * Same payload as {@link getProposalWorkOrderDocuments}; `:projectId` may be project _id or company _id (admin list).
+   */
+  async getProposalWorkOrderDocumentsForAdmin(projectIdOrCompanyId: string) {
+    const { companyId, resolvedProjectId } =
+      await this.resolveRegistrationIdsForAdminParam(projectIdOrCompanyId);
+    return this.getProposalWorkOrderDocuments(companyId, resolvedProjectId);
+  }
+
+  /**
    * Create a proposal/work order notification for the company (used by dev/test button).
    * Chooses message based on which documents exist.
    */

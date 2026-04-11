@@ -1276,17 +1276,25 @@ export class CompanyProjectsController {
   /**
    * Get Proposal/Work Order Documents (combined endpoint)
    * GET /api/company/projects/:projectId/proposal-workorder-documents
+   *
+   * Open route (no company JWT): same id resolution as quickview — `:projectId` may be project _id or company _id.
+   * Lets admin dashboard load this page without a company Bearer token.
    */
   @Get(':projectId/proposal-workorder-documents')
-  @UseGuards(JwtAuthGuard, AccountStatusGuard)
-  async getProposalWorkOrderDocuments(
-    @Request() req,
+  async getProposalWorkOrderDocuments(@Param('projectId') projectId: string): Promise<any> {
+    return this.companyProjectsService.getProposalWorkOrderDocumentsForAdmin(projectId);
+  }
+
+  /**
+   * Admin: identical JSON to GET .../proposal-workorder-documents; requires admin JWT.
+   * `:projectId` may be project _id or company _id.
+   */
+  @Get(':projectId/admin/proposal-workorder-documents')
+  @UseGuards(AdminJwtAuthGuard)
+  async getProposalWorkOrderDocumentsAdmin(
     @Param('projectId') projectId: string,
   ): Promise<any> {
-    return this.companyProjectsService.getProposalWorkOrderDocuments(
-      req.user.userId,
-      projectId,
-    );
+    return this.companyProjectsService.getProposalWorkOrderDocumentsForAdmin(projectId);
   }
 
   /**
