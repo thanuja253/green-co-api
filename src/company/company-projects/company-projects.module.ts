@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { CompanyProjectsController } from './company-projects.controller';
+import { AdminProjectsController } from './admin-projects.controller';
 import { CompanyProjectsService } from './company-projects.service';
 import {
   CompanyProject,
@@ -82,7 +83,7 @@ import { AdminAuthModule } from '../../admin/admin-auth/admin-auth.module';
       { name: MasterPrimaryDataChecklist.name, schema: MasterPrimaryDataChecklistSchema },
     ]),
   ],
-  controllers: [CompanyProjectsController],
+  controllers: [CompanyProjectsController, AdminProjectsController],
   providers: [CompanyProjectsService],
 })
 export class CompanyProjectsModule {}

@@ -86,6 +86,27 @@ export class CompanyProject {
   @Prop()
   launch_training_report_date?: Date;
 
+  /** Up to 4 Launch & Training sessions (document + date each). Legacy single fields above remain for backward compatibility. */
+  @Prop({
+    type: [
+      {
+        session_index: { type: Number, required: true },
+        document_path: { type: String, required: true },
+        document_filename: { type: String },
+        session_date: { type: Date },
+        uploaded_at: { type: Date, default: Date.now },
+      },
+    ],
+    default: [],
+  })
+  launch_training_sessions?: Array<{
+    session_index: number;
+    document_path: string;
+    document_filename?: string;
+    session_date?: Date;
+    uploaded_at?: Date;
+  }>;
+
   @Prop()
   hand_holding_document?: string;
 

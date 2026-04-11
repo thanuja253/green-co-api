@@ -36,6 +36,7 @@ import { AssignFacilitatorDto } from './dto/assign-facilitator.dto';
 import { SubmitPaymentDto } from './dto/submit-payment.dto';
 import { UpdateInvoiceApprovalDto } from './dto/update-invoice-approval.dto';
 import { UploadLaunchAndTrainingDto } from './dto/upload-launch-and-training.dto';
+import { AddLaunchTrainingSessionDto } from './dto/add-launch-training-session.dto';
 import { PrimaryDataStoreDto } from './dto/primary-data-store.dto';
 import { PrimaryDataFormApprovalDto } from './dto/primary-data-approval.dto';
 import { UpdateAssessmentSubmittalDto } from './dto/update-assessment-submittal.dto';
@@ -1372,8 +1373,12 @@ export class CompanyProjectsController {
   }
 
   /**
-   * Get Launch And Training (Site Visit Report) – consultant/company page data.
+   * Get Launch And Training – up to 4 sessions, read-only for company.
    * GET /api/company/projects/:projectId/launch-and-training
+   *
+   * `data.sessions`: uploaded sessions (document_url, document_filename, session_date, uploaded_at, session_index).
+   * `data.launch_training_document` / `launch_training_report_date`: first session or legacy (older UIs).
+   * Also: sessions_count, max_sessions (4), coordinator_assigned, section_available, legacy_single.
    */
   @Get(':projectId/launch-and-training')
   @UseGuards(JwtAuthGuard, AccountStatusGuard)
@@ -1388,9 +1393,128 @@ export class CompanyProjectsController {
   }
 
   /**
+   * Admin: same GET as company; projectId may be company _id or project _id.
+   * GET /api/company/projects/:projectId/admin/launch-and-training
+   *
+   * Prefer dashboard route: GET /api/admin/projects/:projectId/launch-training-program (includes id_resolution).
+   */
+  @Get(':projectId/admin/launch-and-training')
+  @UseGuards(AdminJwtAuthGuard)
+  async getLaunchAndTrainingAdmin(@Param('projectId') projectId: string): Promise<any> {
+    return this.companyProjectsService.getLaunchAndTrainingForAdmin(projectId);
+  }
+
+  /**
+   * Add/replace Launch & Training session 1–4 (PDF). Requires coordinator assigned.
+   * POST /api/company/projects/:projectId/launch-and-training/sessions
+   * Multipart: launch_upload (file), session_index (1–4), session_date (optional).
+   */
+  @Post(':projectId/launch-and-training/sessions')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
+  @UseInterceptors(
+    FileInterceptor('launch_upload', {
+      storage: diskStorage({
+        destination: (req, file, cb) => {
+          const companyId = (req as any).user?.userId;
+          if (!companyId) {
+            cb(new Error('Unauthorized'), '');
+            return;
+          }
+          const uploadPath = join(
+            process.cwd(),
+            'uploads',
+            'companyproject',
+            'launchAndTraining',
+            companyId,
+          );
+          if (!fs.existsSync(uploadPath)) {
+            fs.mkdirSync(uploadPath, { recursive: true });
+          }
+          cb(null, uploadPath);
+        },
+        filename: (req, file, cb) => {
+          const now = new Date();
+          const ymdhis =
+            now.getFullYear() +
+            String(now.getMonth() + 1).padStart(2, '0') +
+            String(now.getDate()).padStart(2, '0') +
+            String(now.getHours()).padStart(2, '0') +
+            String(now.getMinutes()).padStart(2, '0') +
+            String(now.getSeconds()).padStart(2, '0');
+          const filename = `${ymdhis}_${file.originalname}`;
+          cb(null, filename);
+        },
+      }),
+      limits: { fileSize: 10 * 1024 * 1024 },
+      fileFilter: (req, file, cb) => {
+        if (file.mimetype === 'application/pdf') {
+          cb(null, true);
+        } else {
+          cb(new Error('Invalid file type. Only PDF files are allowed.'), false);
+        }
+      },
+    }),
+  )
+  @UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
+  async addLaunchTrainingSession(
+    @Request() req,
+    @Param('projectId') projectId: string,
+    @UploadedFile() file: Express.Multer.File,
+    @Body() dto: AddLaunchTrainingSessionDto,
+  ): Promise<any> {
+    if (!file) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'No file uploaded. Please select a PDF file (launch_upload).',
+      });
+    }
+    return this.companyProjectsService.addLaunchTrainingSession(
+      req.user.userId,
+      projectId,
+      file,
+      dto,
+    );
+  }
+
+  /**
+   * Admin: add/replace Launch & Training session (resolved company + project like other admin routes).
+   * POST /api/company/projects/:projectId/admin/launch-and-training/sessions
+   */
+  @Post(':projectId/admin/launch-and-training/sessions')
+  @UseGuards(AdminJwtAuthGuard)
+  @UseInterceptors(
+    FileInterceptor('launch_upload', {
+      storage: memoryStorage(),
+      limits: { fileSize: 10 * 1024 * 1024 },
+      fileFilter: (req, file, cb) => {
+        if (file.mimetype === 'application/pdf') {
+          cb(null, true);
+        } else {
+          cb(new Error('Invalid file type. Only PDF files are allowed.'), false);
+        }
+      },
+    }),
+  )
+  @UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
+  async addLaunchTrainingSessionAdmin(
+    @Param('projectId') projectId: string,
+    @UploadedFile() file: Express.Multer.File,
+    @Body() dto: AddLaunchTrainingSessionDto,
+  ): Promise<any> {
+    if (!file) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'No file uploaded. Please select a PDF file (launch_upload).',
+      });
+    }
+    return this.companyProjectsService.addLaunchTrainingSessionForAdmin(projectId, file, dto);
+  }
+
+  /**
    * Upload Launch And Training (Site Visit Report) – consultant/facilitator upload.
    * POST /api/company/projects/:projectId/launch-and-training-document
    * Body (multipart): launch_upload (file, PDF), launch_training_report_date (string).
+   * Same as session_index 1 on POST .../launch-and-training/sessions.
    */
   @Post(':projectId/launch-and-training-document')
   @UseGuards(JwtAuthGuard, AccountStatusGuard)
@@ -1453,6 +1577,44 @@ export class CompanyProjectsController {
     }
     return this.companyProjectsService.uploadLaunchAndTraining(
       req.user.userId,
+      projectId,
+      file,
+      dto.launch_training_report_date,
+    );
+  }
+
+  /**
+   * Admin: legacy session-1 upload (memory → saved under resolved company folder in service).
+   * POST /api/company/projects/:projectId/admin/launch-and-training-document
+   */
+  @Post(':projectId/admin/launch-and-training-document')
+  @UseGuards(AdminJwtAuthGuard)
+  @UseInterceptors(
+    FileInterceptor('launch_upload', {
+      storage: memoryStorage(),
+      limits: { fileSize: 10 * 1024 * 1024 },
+      fileFilter: (req, file, cb) => {
+        if (file.mimetype === 'application/pdf') {
+          cb(null, true);
+        } else {
+          cb(new Error('Invalid file type. Only PDF files are allowed.'), false);
+        }
+      },
+    }),
+  )
+  @UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
+  async uploadLaunchAndTrainingAdmin(
+    @Param('projectId') projectId: string,
+    @UploadedFile() file: Express.Multer.File,
+    @Body() dto: UploadLaunchAndTrainingDto,
+  ): Promise<any> {
+    if (!file) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'No file uploaded. Please select a PDF file (launch_upload).',
+      });
+    }
+    return this.companyProjectsService.uploadLaunchAndTrainingForAdmin(
       projectId,
       file,
       dto.launch_training_report_date,

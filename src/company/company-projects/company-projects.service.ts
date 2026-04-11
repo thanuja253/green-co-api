@@ -32,6 +32,7 @@ import { SubmitPaymentDto } from './dto/submit-payment.dto';
 import { UpdateInvoiceApprovalDto } from './dto/update-invoice-approval.dto';
 import { UpdateQuickviewDataDto } from './dto/update-quickview-data.dto';
 import { WorkOrderPoDetailsDto } from './dto/work-order-po-details.dto';
+import { AddLaunchTrainingSessionDto } from './dto/add-launch-training-session.dto';
 import { CompleteMilestoneDto } from './dto/complete-milestone.dto';
 import { join, extname } from 'path';
 import * as fs from 'fs';
@@ -1882,6 +1883,34 @@ export class CompanyProjectsService {
       nextStepDisplayName = milestoneSteps[7].name;
       nextStepDisplayResponsibility = milestoneSteps[7].responsibility;
     }
+    const launchTrainingDone =
+      !!(project as any).launch_training_document ||
+      (Array.isArray((project as any).launch_training_sessions) &&
+        (project as any).launch_training_sessions.some((s: any) => s?.document_path));
+    // After coordinator: next is Launch & Training, then PI invoice (both use next_activities_id 8 until PI is uploaded).
+    if (
+      hasCoordinatorAssigned &&
+      nextActIdNum === 8 &&
+      !launchTrainingDone &&
+      !isRecertifiedAndAtCloseOut &&
+      !isAtCloseOutNoRecertify
+    ) {
+      latestStepDisplayName = milestoneSteps[7].name;
+      latestStepDisplayResponsibility = milestoneSteps[7].responsibility;
+      nextStepDisplayName = 'Launch & Training (Site Visit Report)';
+      nextStepDisplayResponsibility = 'Consultant';
+    } else if (
+      hasCoordinatorAssigned &&
+      nextActIdNum === 8 &&
+      launchTrainingDone &&
+      !isRecertifiedAndAtCloseOut &&
+      !isAtCloseOutNoRecertify
+    ) {
+      latestStepDisplayName = 'Launch & Training (Site Visit Report)';
+      latestStepDisplayResponsibility = 'Consultant';
+      nextStepDisplayName = milestoneSteps[8].name;
+      nextStepDisplayResponsibility = milestoneSteps[8].responsibility;
+    }
     const workOrderRejectedByAdmin =
       hasProposalDocument &&
       proposalStatus === 1 &&
@@ -2926,9 +2955,203 @@ export class CompanyProjectsService {
     };
   }
 
+  private static readonly LAUNCH_TRAINING_MAX_SESSIONS = 4;
+
+  private mergeLaunchTrainingSessionsFromDb(projectAny: any): Array<{
+    session_index: number;
+    document_path: string;
+    document_filename?: string;
+    session_date?: Date;
+    uploaded_at?: Date;
+    from_legacy?: boolean;
+  }> {
+    const raw = [...(projectAny.launch_training_sessions || [])].filter(
+      (s: any) => s && s.document_path,
+    );
+    const byIndex = new Map<
+      number,
+      {
+        session_index: number;
+        document_path: string;
+        document_filename?: string;
+        session_date?: Date;
+        uploaded_at?: Date;
+      }
+    >();
+    for (const s of raw) {
+      const idx = Number(s.session_index);
+      if (idx >= 1 && idx <= CompanyProjectsService.LAUNCH_TRAINING_MAX_SESSIONS) {
+        byIndex.set(idx, {
+          session_index: idx,
+          document_path: String(s.document_path),
+          document_filename: s.document_filename,
+          session_date: s.session_date,
+          uploaded_at: s.uploaded_at,
+        });
+      }
+    }
+    const list: Array<{
+      session_index: number;
+      document_path: string;
+      document_filename?: string;
+      session_date?: Date;
+      uploaded_at?: Date;
+      from_legacy?: boolean;
+    }> = [...byIndex.values()].sort((a, b) => a.session_index - b.session_index);
+    if (list.length === 0 && projectAny.launch_training_document) {
+      list.push({
+        session_index: 1,
+        document_path: String(projectAny.launch_training_document),
+        document_filename: String(projectAny.launch_training_document).split('/').pop(),
+        session_date: projectAny.launch_training_report_date,
+        uploaded_at: undefined,
+        from_legacy: true,
+      });
+    }
+    return list;
+  }
+
+  /**
+   * Shared JSON for GET launch-and-training (company) and GET launch-training-program (admin dashboard).
+   */
+  private buildLaunchTrainingProgramData(
+    projectAny: any,
+    projectId: string,
+    baseUrl: string,
+    coordinator_assigned: boolean,
+  ): {
+    project_id: string;
+    coordinator_assigned: boolean;
+    section_available: boolean;
+    max_sessions: number;
+    sessions_count: number;
+    sessions: Array<{
+      session_index: number;
+      document_url: string | null;
+      document_filename: string | null;
+      session_date: string | null;
+      uploaded_at: string | null;
+      from_legacy?: boolean;
+    }>;
+    launch_training_document: string | null;
+    launch_training_report_date: string | null;
+    document_filename: string | null;
+    purely_informational: boolean;
+    legacy_single: {
+      document_url: string;
+      document_filename: string | null;
+      session_date: string | null;
+    } | null;
+  } {
+    const merged = this.mergeLaunchTrainingSessionsFromDb(projectAny);
+    const sessions = merged.map((s) => this.formatLaunchTrainingSessionRow(s, baseUrl));
+    const first = sessions[0];
+    const maxSessions = CompanyProjectsService.LAUNCH_TRAINING_MAX_SESSIONS;
+    const toIso = (d: any) =>
+      d
+        ? typeof d === 'string'
+          ? d
+          : (d as Date)?.toISOString?.() ?? null
+        : null;
+    const legacyPath = projectAny.launch_training_document
+      ? String(projectAny.launch_training_document)
+      : '';
+    const legacy_single = legacyPath
+      ? {
+          document_url: legacyPath.startsWith('http')
+            ? legacyPath
+            : `${baseUrl}/${legacyPath.replace(/^\//, '')}`,
+          document_filename:
+            (legacyPath.split('/').pop() || null) as string | null,
+          session_date: toIso(projectAny.launch_training_report_date),
+        }
+      : null;
+    return {
+      project_id: projectId,
+      coordinator_assigned,
+      section_available: coordinator_assigned,
+      max_sessions: maxSessions,
+      sessions_count: sessions.length,
+      sessions,
+      launch_training_document: first?.document_url ?? null,
+      launch_training_report_date: first?.session_date ?? null,
+      document_filename: first?.document_filename ?? null,
+      purely_informational: true,
+      legacy_single,
+    };
+  }
+
+  private formatLaunchTrainingSessionRow(
+    s: {
+      session_index: number;
+      document_path: string;
+      document_filename?: string;
+      session_date?: Date;
+      uploaded_at?: Date;
+      from_legacy?: boolean;
+    },
+    baseUrl: string,
+  ): {
+    session_index: number;
+    document_url: string | null;
+    document_filename: string | null;
+    session_date: string | null;
+    uploaded_at: string | null;
+    from_legacy?: boolean;
+  } {
+    const path = s.document_path;
+    const documentUrl = path
+      ? path.startsWith('http')
+        ? path
+        : `${baseUrl}/${String(path).replace(/^\//, '')}`
+      : null;
+    const toIso = (d: any) =>
+      d
+        ? typeof d === 'string'
+          ? d
+          : (d as Date)?.toISOString?.() ?? null
+        : null;
+    return {
+      session_index: s.session_index,
+      document_url: documentUrl,
+      document_filename: s.document_filename || (path ? path.split('/').pop() ?? null : null),
+      session_date: toIso(s.session_date),
+      uploaded_at: toIso(s.uploaded_at),
+      ...(s.from_legacy ? { from_legacy: true } : {}),
+    };
+  }
+
+  private syncLegacyLaunchTrainingFieldsFromSessions(
+    project: CompanyProjectDocument,
+    sessions: Array<{ session_index: number; document_path: string; session_date?: Date }>,
+  ): void {
+    const sorted = [...sessions].sort((a, b) => a.session_index - b.session_index);
+    const first = sorted[0];
+    const p = project as any;
+    if (first?.document_path) {
+      p.launch_training_document = first.document_path;
+      p.launch_training_report_date = first.session_date ?? undefined;
+    }
+  }
+
+  private async assertCoordinatorAssignedForLaunchTraining(
+    companyId: string,
+    projectId: string,
+  ): Promise<void> {
+    const row = await this.companyCoordinatorModel
+      .findOne({ company_id: companyId, project_id: projectId })
+      .lean();
+    if (!(row as any)?.coordinator_id) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Assign at least one project coordinator before Launch & Training uploads.',
+      });
+    }
+  }
+
   /**
    * Get Launch And Training (Site Visit Report) page data.
-   * Used by both consultant (upload page) and company (read-only view after upload).
+   * Used by admin (upload), consultant, and company (read-only). Up to 4 sessions; no approval workflow.
    */
   async getLaunchAndTraining(companyId: string, projectId: string) {
     const project = await this.projectModel.findOne({ _id: projectId, company_id: companyId }).lean();
@@ -2937,25 +3160,227 @@ export class CompanyProjectsService {
     }
     const projectAny = project as any;
     const baseUrl = process.env.API_BASE_URL || 'http://localhost:3019';
-    const docPath = projectAny.launch_training_document;
-    const documentUrl = docPath
-      ? (docPath.startsWith('http') ? docPath : `${baseUrl}/${docPath.replace(/^\//, '')}`)
-      : null;
-    const reportDate = projectAny.launch_training_report_date
-      ? (typeof projectAny.launch_training_report_date === 'string'
-          ? projectAny.launch_training_report_date
-          : (projectAny.launch_training_report_date as Date)?.toISOString?.())
-      : null;
+    const coord = await this.companyCoordinatorModel
+      .findOne({ company_id: companyId, project_id: projectId })
+      .lean();
+    const coordinator_assigned = !!(coord as any)?.coordinator_id;
+    const data = this.buildLaunchTrainingProgramData(
+      projectAny,
+      projectId,
+      baseUrl,
+      coordinator_assigned,
+    );
     return {
       status: 'success',
       message: 'Launch and training data retrieved successfully',
+      data,
+    };
+  }
+
+  /**
+   * Admin dashboard: same payload as {@link getLaunchAndTraining}; `:id` may be project _id or company _id.
+   */
+  async getLaunchAndTrainingForAdmin(projectIdOrCompanyId: string) {
+    const { companyId, resolvedProjectId } =
+      await this.resolveRegistrationIdsForAdminParam(projectIdOrCompanyId);
+    return this.getLaunchAndTraining(companyId, resolvedProjectId);
+  }
+
+  /**
+   * Admin dashboard canonical read: same as company GET plus `id_resolution`.
+   * Param may be project Mongo _id or company _id (latest project), same as other admin project routes.
+   */
+  async getLaunchTrainingProgramForAdmin(projectIdOrCompanyId: string) {
+    const { companyId, resolvedProjectId, resolution } =
+      await this.resolveRegistrationIdsForAdminParam(projectIdOrCompanyId);
+    const project = await this.projectModel
+      .findOne({ _id: resolvedProjectId, company_id: companyId })
+      .lean();
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const projectAny = project as any;
+    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3019';
+    const coord = await this.companyCoordinatorModel
+      .findOne({ company_id: companyId, project_id: resolvedProjectId })
+      .lean();
+    const coordinator_assigned = !!(coord as any)?.coordinator_id;
+    const data = this.buildLaunchTrainingProgramData(
+      projectAny,
+      resolvedProjectId,
+      baseUrl,
+      coordinator_assigned,
+    );
+    return {
+      status: 'success',
+      message: 'Launch and training program retrieved successfully',
       data: {
-        project_id: projectId,
-        launch_training_document: documentUrl,
-        launch_training_report_date: reportDate,
-        document_filename: documentUrl ? docPath?.split('/').pop() ?? null : null,
+        ...data,
+        id_resolution: {
+          param: projectIdOrCompanyId,
+          resolution,
+          resolved_project_id: resolvedProjectId,
+          company_id: companyId,
+        },
       },
     };
+  }
+
+  /**
+   * Add or replace one Launch & Training session (1–4). Requires coordinator assigned. Notifies company on upload.
+   */
+  async addLaunchTrainingSession(
+    companyId: string,
+    projectId: string,
+    file: Express.Multer.File,
+    dto: AddLaunchTrainingSessionDto,
+  ) {
+    await this.assertCoordinatorAssignedForLaunchTraining(companyId, projectId);
+
+    const project = await this.projectModel.findOne({
+      _id: projectId,
+      company_id: companyId,
+    });
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const sessionIndex = dto.session_index;
+    if (
+      sessionIndex < 1 ||
+      sessionIndex > CompanyProjectsService.LAUNCH_TRAINING_MAX_SESSIONS
+    ) {
+      throw new BadRequestException({
+        status: 'error',
+        message: `session_index must be between 1 and ${CompanyProjectsService.LAUNCH_TRAINING_MAX_SESSIONS}.`,
+      });
+    }
+
+    const reportDate = dto.session_date
+      ? (() => {
+          const d = new Date(dto.session_date);
+          return isNaN(d.getTime()) ? undefined : d;
+        })()
+      : undefined;
+
+    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3019';
+    const companyFolder = String(companyId);
+    let storedFilename: string;
+    let relativePath: string;
+    const buf = (file as Express.Multer.File & { buffer?: Buffer }).buffer;
+    if (buf && Buffer.isBuffer(buf)) {
+      const safeOrig = String(file.originalname || 'document.pdf').replace(/[^a-zA-Z0-9._-]+/g, '_');
+      storedFilename = `${Date.now()}_${Math.round(Math.random() * 1e9)}_${safeOrig}`;
+      const dir = join(process.cwd(), 'uploads', 'companyproject', 'launchAndTraining', companyFolder);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      const abs = join(dir, storedFilename);
+      await fs.promises.writeFile(abs, buf);
+      relativePath = `uploads/companyproject/launchAndTraining/${companyFolder}/${storedFilename}`;
+    } else {
+      storedFilename = file.filename;
+      relativePath = `uploads/companyproject/launchAndTraining/${companyFolder}/${storedFilename}`;
+    }
+    const fullUrl = `${baseUrl}/${relativePath}`;
+
+    const pAny = project as any;
+    let sessions: Array<{
+      session_index: number;
+      document_path: string;
+      document_filename?: string;
+      session_date?: Date;
+      uploaded_at?: Date;
+    }> = [...(pAny.launch_training_sessions || [])]
+      .filter((s: any) => s?.document_path)
+      .map((s: any) => ({
+        session_index: Number(s.session_index),
+        document_path: String(s.document_path),
+        document_filename: s.document_filename,
+        session_date: s.session_date ? new Date(s.session_date) : undefined,
+        uploaded_at: s.uploaded_at ? new Date(s.uploaded_at) : new Date(),
+      }));
+
+    if (sessions.length === 0 && pAny.launch_training_document) {
+      sessions.push({
+        session_index: 1,
+        document_path: String(pAny.launch_training_document),
+        document_filename: String(pAny.launch_training_document).split('/').pop(),
+        session_date: pAny.launch_training_report_date
+          ? new Date(pAny.launch_training_report_date)
+          : undefined,
+        uploaded_at: new Date(0),
+      });
+    }
+
+    sessions = sessions.filter((s) => s.session_index !== sessionIndex);
+    sessions.push({
+      session_index: sessionIndex,
+      document_path: relativePath,
+      document_filename: file.originalname,
+      session_date: reportDate,
+      uploaded_at: new Date(),
+    });
+    sessions.sort((a, b) => a.session_index - b.session_index);
+
+    if (sessions.length > CompanyProjectsService.LAUNCH_TRAINING_MAX_SESSIONS) {
+      throw new BadRequestException({
+        status: 'error',
+        message: `Maximum ${CompanyProjectsService.LAUNCH_TRAINING_MAX_SESSIONS} Launch & Training sessions allowed.`,
+      });
+    }
+
+    pAny.launch_training_sessions = sessions;
+    this.syncLegacyLaunchTrainingFieldsFromSessions(project, sessions);
+    await project.save();
+
+    await this.companyActivityModel.create({
+      company_id: companyId,
+      project_id: projectId,
+      description: `Launch & Training session ${sessionIndex} document uploaded`,
+      activity_type: 'cii',
+      milestone_flow: 63,
+      milestone_completed: true,
+    });
+
+    const company = await this.companyModel.findById(companyId).lean();
+    this.notificationsService
+      .create(
+        'Launch & Training document uploaded',
+        `A Launch & Training session ${sessionIndex} document has been uploaded for your project.`,
+        'C',
+        companyId,
+      )
+      .catch((err) => console.error('Launch & training notification failed:', err));
+
+    this.mailService
+      .sendSiteVisitReportUploadedEmail(company?.email, company?.name || 'Company')
+      .catch((err) => console.error('Launch & training email failed:', err));
+
+    const merged = this.mergeLaunchTrainingSessionsFromDb(pAny);
+    const apiSessions = merged.map((s) => this.formatLaunchTrainingSessionRow(s, baseUrl));
+
+    return {
+      status: 'success',
+      message: 'Launch & Training session uploaded successfully',
+      data: {
+        session_index: sessionIndex,
+        document_url: fullUrl,
+        document_filename: file.originalname,
+        session_date: reportDate?.toISOString?.() ?? dto.session_date ?? null,
+        sessions: apiSessions,
+      },
+    };
+  }
+
+  async addLaunchTrainingSessionForAdmin(
+    projectIdOrCompanyId: string,
+    file: Express.Multer.File,
+    dto: AddLaunchTrainingSessionDto,
+  ) {
+    const { companyId, resolvedProjectId } =
+      await this.resolveRegistrationIdsForAdminParam(projectIdOrCompanyId);
+    return this.addLaunchTrainingSession(companyId, resolvedProjectId, file, dto);
   }
 
   /**
@@ -3005,11 +3430,24 @@ export class CompanyProjectsService {
 
     const projectAny = project as any;
 
+    const ltMerged = this.mergeLaunchTrainingSessionsFromDb(projectAny);
+    const launchTrainingSessionsFormatted = ltMerged.map((s) =>
+      this.formatLaunchTrainingSessionRow(s, baseUrl),
+    );
+
     const documents: {
       proposal_document: string | null;
       work_order_document: string | null;
       launch_training_document: string | null;
       launch_training_report_date: string | null;
+      launch_training_sessions: Array<{
+        session_index: number;
+        document_url: string | null;
+        document_filename: string | null;
+        session_date: string | null;
+        uploaded_at: string | null;
+        from_legacy?: boolean;
+      }>;
       hand_holding_document: string | null;
       hand_holding_document2: string | null;
       hand_holding_document3: string | null;
@@ -3036,6 +3474,7 @@ export class CompanyProjectsService {
             ? projectAny.launch_training_report_date
             : (projectAny.launch_training_report_date as Date)?.toISOString?.()) ?? null
         : null,
+      launch_training_sessions: launchTrainingSessionsFormatted,
       hand_holding_document: toUrl(projectAny.hand_holding_document) ?? null,
       hand_holding_document2: toUrl(projectAny.hand_holding_document2) ?? null,
       hand_holding_document3: toUrl(projectAny.hand_holding_document3) ?? null,
@@ -3231,6 +3670,19 @@ export class CompanyProjectsService {
         payable_amount: 0,
         tax_amount: 0,
         total_amount: 0,
+      });
+    }
+
+    const invoiceHadDocument = !!String(invoice.invoice_document || '').trim();
+    const hasLaunchTraining =
+      !!(project as any).launch_training_document ||
+      (Array.isArray((project as any).launch_training_sessions) &&
+        (project as any).launch_training_sessions.some((s: any) => s?.document_path));
+    if (!invoiceHadDocument && !hasLaunchTraining) {
+      throw new BadRequestException({
+        status: 'error',
+        message:
+          'Upload Launch & Training (Site Visit Report) before uploading the Proforma / Tax invoice.',
       });
     }
 
@@ -3711,9 +4163,7 @@ export class CompanyProjectsService {
   }
 
   /**
-   * Upload Launch And Training (Site Visit Report) – consultant/facilitator upload.
-   * Saves to uploads/companyproject/launchAndTraining/{company_id}/, updates companies_projects,
-   * and logs activity 63 (Consultant Uploaded Site Visit Report).
+   * Legacy single-file upload: same as session 1 on {@link addLaunchTrainingSession} (field `launch_upload`).
    */
   async uploadLaunchAndTraining(
     companyId: string,
@@ -3721,68 +4171,37 @@ export class CompanyProjectsService {
     file: Express.Multer.File,
     launchTrainingReportDate?: string,
   ) {
-    const project = await this.projectModel.findOne({
-      _id: projectId,
-      company_id: companyId,
+    const out = await this.addLaunchTrainingSession(companyId, projectId, file, {
+      session_index: 1,
+      session_date: launchTrainingReportDate,
     });
-
-    if (!project) {
-      throw new NotFoundException({
-        status: 'error',
-        message: 'Project not found',
-      });
-    }
-
-    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3019';
-    const relativePath = `uploads/companyproject/launchAndTraining/${companyId}/${file.filename}`;
-    const fullUrl = `${baseUrl}/${relativePath}`;
-
-    const reportDate = launchTrainingReportDate
-      ? (() => {
-          const d = new Date(launchTrainingReportDate);
-          return isNaN(d.getTime()) ? undefined : d;
-        })()
-      : undefined;
-
-    (project as any).launch_training_document = relativePath;
-    if (reportDate) (project as any).launch_training_report_date = reportDate;
-    await project.save();
-
-    await this.companyActivityModel.create({
-      company_id: companyId,
-      project_id: projectId,
-      description: 'Consultant Uploaded Site Visit Report',
-      activity_type: 'company',
-      milestone_flow: 63,
-      milestone_completed: true,
-    });
-
-    // In-app: notify Company (C)
-    const company = await this.companyModel.findById(companyId).lean();
-    this.notificationsService
-      .create(
-        'Site Visit Report uploaded',
-        'The Site Visit Report (Launch & Training) has been uploaded for your project. You can view it in the portal.',
-        'C',
-        companyId,
-      )
-      .catch((err) => console.error('Site visit notification failed:', err));
-
-    // Email: notify company that site visit report has been uploaded
-    this.mailService
-      .sendSiteVisitReportUploadedEmail(company?.email, company?.name || 'Company')
-      .catch((err) => console.error('Site visit report email failed:', err));
-
+    const d = out.data as {
+      document_url: string;
+      document_filename: string;
+      session_date: string | null;
+      sessions: unknown[];
+    };
     return {
       status: 'success',
       message: 'Launch And Training Program uploaded Successfully!',
       data: {
-        document_url: fullUrl,
+        document_url: d.document_url,
         document_filename: file.originalname,
         project_id: projectId,
-        launch_training_report_date: reportDate?.toISOString?.() ?? launchTrainingReportDate ?? null,
+        launch_training_report_date: d.session_date ?? launchTrainingReportDate ?? null,
+        sessions: d.sessions,
       },
     };
+  }
+
+  async uploadLaunchAndTrainingForAdmin(
+    projectIdOrCompanyId: string,
+    file: Express.Multer.File,
+    launchTrainingReportDate?: string,
+  ) {
+    const { companyId, resolvedProjectId } =
+      await this.resolveRegistrationIdsForAdminParam(projectIdOrCompanyId);
+    return this.uploadLaunchAndTraining(companyId, resolvedProjectId, file, launchTrainingReportDate);
   }
 
   /**
@@ -4189,7 +4608,7 @@ export class CompanyProjectsService {
       coordinatorName: coordinator.name,
     });
 
-    // Update next_activities_id to 8 (CII uploaded the PI/Tax Invoice)
+    // Next workflow pointer: Launch & Training before PI (quickview uses launch_training_document to split step 8).
     project.next_activities_id = 8;
     await project.save();
 
@@ -4235,9 +4654,9 @@ export class CompanyProjectsService {
           email: coordinator.email,
         },
         next_activities_id: project.next_activities_id,
-        next_activity: 'CII uploaded the PI/Tax Invoice',
+        next_activity: 'Launch & Training (Site Visit Report)',
         next_activity_status: 'Pending',
-        next_responsibility: 'CII',
+        next_responsibility: 'Consultant',
       },
     };
   }
