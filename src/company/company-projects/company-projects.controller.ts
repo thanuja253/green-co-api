@@ -1575,12 +1575,11 @@ export class CompanyProjectsController {
         message: 'No file uploaded. Please select a PDF file (launch_upload).',
       });
     }
-    return this.companyProjectsService.uploadLaunchAndTraining(
-      req.user.userId,
-      projectId,
-      file,
-      dto.launch_training_report_date,
-    );
+    return this.companyProjectsService.uploadLaunchAndTraining(req.user.userId, projectId, file, {
+      launch_training_report_date: dto.launch_training_report_date,
+      session_date: dto.session_date,
+      session_index: dto.session_index,
+    });
   }
 
   /**
@@ -1614,11 +1613,11 @@ export class CompanyProjectsController {
         message: 'No file uploaded. Please select a PDF file (launch_upload).',
       });
     }
-    return this.companyProjectsService.uploadLaunchAndTrainingForAdmin(
-      projectId,
-      file,
-      dto.launch_training_report_date,
-    );
+    return this.companyProjectsService.uploadLaunchAndTrainingForAdmin(projectId, file, {
+      launch_training_report_date: dto.launch_training_report_date,
+      session_date: dto.session_date,
+      session_index: dto.session_index,
+    });
   }
 
   /**
@@ -1635,6 +1634,16 @@ export class CompanyProjectsController {
       req.user.userId,
       projectId,
     );
+  }
+
+  /**
+   * Dashboard alias (fixes 404 on some clients). Same payload as assignment-details.
+   * Open route: `:projectId` may be project _id or company _id (same resolution as quickview).
+   * GET /api/company/projects/:projectId/assignments
+   */
+  @Get(':projectId/assignments')
+  async getAssignmentsAlias(@Param('projectId') projectId: string): Promise<any> {
+    return this.companyProjectsService.getAssignmentDetailsForAdmin(projectId);
   }
 
   /**

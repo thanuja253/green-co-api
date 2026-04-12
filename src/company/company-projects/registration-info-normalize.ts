@@ -204,7 +204,9 @@ function launchTrainingScore(p: any): number {
   const doc = !!(p.launch_training_document && String(p.launch_training_document).trim());
   const sess =
     Array.isArray(p.launch_training_sessions) &&
-    p.launch_training_sessions.some((s: any) => s && String(s.document_path || '').trim());
+    p.launch_training_sessions.some(
+      (s: any) => s && String(s.document_path || s.document_url || '').trim(),
+    );
   return doc || sess ? 1 : 0;
 }
 

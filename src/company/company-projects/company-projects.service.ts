@@ -1433,16 +1433,27 @@ export class CompanyProjectsService {
     message: string;
     data: any;
   }> {
-    const project = await this.projectModel
-      .findOne({ _id: projectId, company_id: companyId })
-      .lean();
-
+    if (!Types.ObjectId.isValid(projectId)) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Project not found or quickview not available.',
+      });
+    }
+    const project = await this.projectModel.findById(projectId).lean();
     if (!project) {
       throw new NotFoundException({
         status: 'error',
         message: 'Project not found or quickview not available.',
       });
     }
+    const ownerCompanyId = this.normalizeOwnerCompanyId((project as any).company_id);
+    if (!ownerCompanyId || ownerCompanyId !== String(companyId)) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Project not found or quickview not available.',
+      });
+    }
+    await this.overlayLaunchTrainingFieldsFromRawCollection(projectId, project as any);
 
     // Use project's own _id and company_id for queries (same as check-quickview-activities.js) so activities are found reliably.
     const pid = (project as any)._id;
@@ -1486,8 +1497,13 @@ export class CompanyProjectsService {
         .populate('facilitator_id')
         .lean(),
       this.companyCoordinatorModel
-        .findOne({ company_id: cid, project_id: pid })
-        .populate('coordinator_id')
+        .findOne({
+          $or: [
+            { company_id: cid, project_id: pid },
+            { company_id: companyOidForWo, project_id: projectOidForWo },
+            { company_id: String(companyId), project_id: String(projectId) },
+          ],
+        })
         .lean(),
       this.companyAssessorModel
         .find({ company_id: cid, project_id: pid })
@@ -1631,10 +1647,26 @@ export class CompanyProjectsService {
 
     let coordinatorData = null;
     if (companyCoordinator && (companyCoordinator as any).coordinator_id) {
-      const coordinator = (companyCoordinator as any).coordinator_id;
-      coordinatorData = {
-        Coordinator_Detail: { name: coordinator.name, email: coordinator.email },
-      };
+      const cref = (companyCoordinator as any).coordinator_id;
+      const coordOid =
+        cref instanceof Types.ObjectId
+          ? cref
+          : cref && typeof cref === 'object' && (cref as { _id?: unknown })._id != null
+            ? new Types.ObjectId(String((cref as { _id: unknown })._id))
+            : Types.ObjectId.isValid(String(cref))
+              ? new Types.ObjectId(String(cref))
+              : null;
+      if (coordOid) {
+        const coordinator = await this.coordinatorModel.findById(coordOid).select('name email').lean();
+        if (coordinator) {
+          coordinatorData = {
+            Coordinator_Detail: {
+              name: (coordinator as any).name,
+              email: (coordinator as any).email,
+            },
+          };
+        }
+      }
     }
 
     const assessorIds = (companyAssessors as any[]).map((a) => a.assessor_id).filter(Boolean);
@@ -1895,8 +1927,11 @@ export class CompanyProjectsService {
         nextStepDisplayResponsibility = milestoneSteps[6].responsibility;
       }
     }
+    /** Use raw assignment row only — do not rely on populated Coordinator doc (populate null if coordinator was removed). */
     const hasCoordinatorAssigned = !!(
-      companyCoordinator && (companyCoordinator as any).coordinator_id
+      companyCoordinator &&
+      (companyCoordinator as any).coordinator_id != null &&
+      String((companyCoordinator as any).coordinator_id).length > 0
     );
     const projectCodeAssigned = !!String((project as any).project_id || '').trim();
     const nextActIdNumRaw = Number((project as any).next_activities_id || 0);
@@ -1931,11 +1966,24 @@ export class CompanyProjectsService {
       launchTrainingResourceDoc &&
       String((launchTrainingResourceDoc as any).document_url || '').trim()
     );
+    /** Align with `GET /api/admin/projects/:id/launch-training-program` (`buildLaunchTrainingProgramData`). */
+    const ltProgramSnapshot = this.buildLaunchTrainingProgramData(
+      project as any,
+      String(projectId),
+      baseUrl,
+      hasCoordinatorAssigned,
+    );
+    const launchTrainingDoneFromLaunchTrainingGet =
+      ltProgramSnapshot.sessions_count > 0 ||
+      !!(
+        ltProgramSnapshot.legacy_single?.document_url &&
+        String(ltProgramSnapshot.legacy_single.document_url).trim()
+      );
     const launchTrainingDone =
-      this.mergeLaunchTrainingSessionsFromDb(project as any).length > 0 ||
+      launchTrainingDoneFromLaunchTrainingGet ||
       launchTrainingActivityDone ||
       launchTrainingFromResourceDoc;
-    // After coordinator: next is Launch & Training, then PI invoice (both use next_activities_id 8 until PI is uploaded).
+    // After coordinator: next is Launch & Training (consultant), then Resource Center / PI phase (next_activities_id 8 until PI is uploaded).
     if (
       hasCoordinatorAssigned &&
       nextActIdNum === 8 &&
@@ -1973,19 +2021,26 @@ export class CompanyProjectsService {
       nextStepDisplayResponsibility = 'CII';
     }
     // Apply last so stale `next_activities_id` / milestone labels do not leave quickview on "Assign coordinator" after L&T upload.
-    if (
+    let quickviewLaunchTrainingHeadline = false;
+    const ltSessionUploadSignal =
+      launchTrainingDoneFromLaunchTrainingGet ||
+      this.projectLaunchTrainingSessionsIndicateUpload(project as any);
+    // Pre–PI / payment (next_activities_id < 9). Do not require specific raw 6/7/8 — staging DBs use other values while L&T is still the gate.
+    const atPostCoordinatorPrePi =
       hasCoordinatorAssigned &&
-      nextActIdNum === 8 &&
+      (projectCodeAssigned || ltSessionUploadSignal) &&
       launchTrainingDone &&
       !workOrderRejectedByAdmin &&
       !isProposalRejectedByCompany &&
       !isRecertifiedAndAtCloseOut &&
-      !isAtCloseOutNoRecertify
-    ) {
-      latestStepDisplayName = 'Launch & Training (Site Visit Report) uploaded by CII';
-      latestStepDisplayResponsibility = 'CII';
-      nextStepDisplayName = milestoneSteps[8].name;
-      nextStepDisplayResponsibility = milestoneSteps[8].responsibility;
+      !isAtCloseOutNoRecertify &&
+      nextActIdNumRaw < 9;
+    if (atPostCoordinatorPrePi) {
+      quickviewLaunchTrainingHeadline = true;
+      latestStepDisplayName = 'Launch & Training (Site Visit Report) completed (Admin)';
+      latestStepDisplayResponsibility = 'Admin';
+      nextStepDisplayName = 'Resource Center';
+      nextStepDisplayResponsibility = 'Admin';
     }
 
     const projectCodePresent = !!String((project as any).project_id || '').trim();
@@ -2151,7 +2206,9 @@ export class CompanyProjectsService {
       responsibility: nextStepDisplayResponsibility,
     };
     const latest_step = {
-      id: latestCompletedMilestoneNumber || 0,
+      id: quickviewLaunchTrainingHeadline
+        ? 8
+        : latestCompletedMilestoneNumber || 0,
       name: latestStepDisplayName || currentActivityData.activity,
       status:
         latestCompletedMilestoneNumber != null && latestCompletedMilestoneNumber > 0
@@ -2159,7 +2216,9 @@ export class CompanyProjectsService {
           : currentActivityData.activity_status === 'Done'
             ? 'Done'
             : 'Pending',
-      responsibility: currentActivityData.responsibility,
+      responsibility: quickviewLaunchTrainingHeadline
+        ? latestStepDisplayResponsibility
+        : currentActivityData.responsibility,
     };
 
     // Per-step completion: merge explicit activity completions with a linear pipeline fill so the
@@ -2280,7 +2339,10 @@ export class CompanyProjectsService {
   async getQuickviewDataForAdmin(projectIdOrCompanyId: string) {
     const { companyId, resolvedProjectId, resolution } =
       await this.resolveRegistrationIdsForAdminParam(projectIdOrCompanyId);
-    const payload = await this.getQuickviewData(companyId, resolvedProjectId);
+    const [payload, launchTrainingProgram] = await Promise.all([
+      this.getQuickviewData(companyId, resolvedProjectId),
+      this.getLaunchTrainingProgramForAdmin(projectIdOrCompanyId),
+    ]);
     return {
       ...payload,
       data: {
@@ -2291,6 +2353,8 @@ export class CompanyProjectsService {
           company_id: companyId,
           resolution,
         },
+        /** Same shape as `GET /api/admin/projects/:id/launch-training-program` for a single response. */
+        launch_training_program: launchTrainingProgram.data,
       },
     };
   }
@@ -3020,6 +3084,88 @@ export class CompanyProjectsService {
 
   private static readonly LAUNCH_TRAINING_MAX_SESSIONS = 4;
 
+  /** Normalize `company_id` from a lean project (ObjectId, string, or populated `{ _id }`). */
+  private normalizeOwnerCompanyId(companyRef: unknown): string | null {
+    if (companyRef == null) return null;
+    if (companyRef instanceof Types.ObjectId) return companyRef.toString();
+    if (typeof companyRef === 'string' && Types.ObjectId.isValid(companyRef)) {
+      return String(companyRef);
+    }
+    if (typeof companyRef === 'object' && (companyRef as { _id?: unknown })._id != null) {
+      return this.normalizeOwnerCompanyId((companyRef as { _id: unknown })._id);
+    }
+    return String(companyRef);
+  }
+
+  /**
+   * Re-read L&T fields via the native collection so BSON matches GET launch-training-program
+   * even if Mongoose subdoc casting omits `launch_training_sessions` on `lean()`.
+   */
+  /** Coordinator row for a project (ObjectId vs string refs in DB). */
+  private async findCompanyCoordinatorAssignmentLean(
+    companyId: string,
+    projectId: string,
+    projectLean: any,
+  ): Promise<any> {
+    const projectOid = new Types.ObjectId(String(projectId));
+    const companyOid = new Types.ObjectId(String(companyId));
+    const pid = projectLean?._id ?? projectOid;
+    const cid = projectLean?.company_id ?? companyOid;
+    return this.companyCoordinatorModel
+      .findOne({
+        $or: [
+          { company_id: cid, project_id: pid },
+          { company_id: companyOid, project_id: projectOid },
+          { company_id: String(companyId), project_id: String(projectId) },
+        ],
+      })
+      .lean();
+  }
+
+  private async overlayLaunchTrainingFieldsFromRawCollection(
+    projectId: string,
+    project: Record<string, unknown>,
+  ): Promise<void> {
+    try {
+      const oid = new Types.ObjectId(String(projectId));
+      const doc = await this.projectModel.collection.findOne(
+        { _id: oid },
+        {
+          projection: {
+            launch_training_sessions: 1,
+            launch_training_document: 1,
+            launch_training_report_date: 1,
+          },
+        },
+      );
+      if (!doc) return;
+      const d = doc as Record<string, unknown>;
+      if (Array.isArray(d.launch_training_sessions)) {
+        (project as any).launch_training_sessions = d.launch_training_sessions;
+      }
+      if (d.launch_training_document != null && String(d.launch_training_document).trim()) {
+        (project as any).launch_training_document = d.launch_training_document;
+      }
+      if (d.launch_training_report_date != null) {
+        (project as any).launch_training_report_date = d.launch_training_report_date;
+      }
+    } catch {
+      // Non-fatal: quickview still uses the hydrated document from findById.
+    }
+  }
+
+  /** True when stored sessions show an L&T row (path/url) or session 1 exists (API shape the dashboard sends). */
+  private projectLaunchTrainingSessionsIndicateUpload(projectAny: any): boolean {
+    const arr = projectAny?.launch_training_sessions;
+    if (!Array.isArray(arr)) return false;
+    return arr.some(
+      (s: any) =>
+        s &&
+        (Number(s.session_index) === 1 ||
+          String(s.document_url || s.document_path || '').trim()),
+    );
+  }
+
   private mergeLaunchTrainingSessionsFromDb(projectAny: any): Array<{
     session_index: number;
     document_path: string;
@@ -3029,7 +3175,7 @@ export class CompanyProjectsService {
     from_legacy?: boolean;
   }> {
     const raw = [...(projectAny.launch_training_sessions || [])].filter(
-      (s: any) => s && s.document_path,
+      (s: any) => s && String(s.document_path || s.document_url || '').trim(),
     );
     const byIndex = new Map<
       number,
@@ -3051,9 +3197,10 @@ export class CompanyProjectsService {
         idx = slot;
       }
       if (idx >= 1 && idx <= CompanyProjectsService.LAUNCH_TRAINING_MAX_SESSIONS) {
+        const pathOrUrl = String(s.document_path || s.document_url || '').trim();
         byIndex.set(idx, {
           session_index: idx,
-          document_path: String(s.document_path),
+          document_path: pathOrUrl,
           document_filename: s.document_filename,
           session_date: s.session_date,
           uploaded_at: s.uploaded_at,
@@ -3208,9 +3355,12 @@ export class CompanyProjectsService {
     companyId: string,
     projectId: string,
   ): Promise<void> {
-    const row = await this.companyCoordinatorModel
-      .findOne({ company_id: companyId, project_id: projectId })
-      .lean();
+    const projectLean = await this.projectModel.findById(projectId).select('company_id').lean();
+    const row = await this.findCompanyCoordinatorAssignmentLean(
+      companyId,
+      projectId,
+      projectLean as any,
+    );
     if (!(row as any)?.coordinator_id) {
       throw new BadRequestException({
         status: 'error',
@@ -3224,15 +3374,21 @@ export class CompanyProjectsService {
    * Used by admin (upload), consultant, and company (read-only). Up to 4 sessions; no approval workflow.
    */
   async getLaunchAndTraining(companyId: string, projectId: string) {
-    const project = await this.projectModel.findOne({ _id: projectId, company_id: companyId }).lean();
+    if (!Types.ObjectId.isValid(projectId)) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const project = await this.projectModel.findById(projectId).lean();
     if (!project) {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
+    const owner = this.normalizeOwnerCompanyId((project as any).company_id);
+    if (!owner || owner !== String(companyId)) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    await this.overlayLaunchTrainingFieldsFromRawCollection(projectId, project as any);
     const projectAny = project as any;
     const baseUrl = process.env.API_BASE_URL || 'http://localhost:3019';
-    const coord = await this.companyCoordinatorModel
-      .findOne({ company_id: companyId, project_id: projectId })
-      .lean();
+    const coord = await this.findCompanyCoordinatorAssignmentLean(companyId, projectId, projectAny);
     const coordinator_assigned = !!(coord as any)?.coordinator_id;
     const data = this.buildLaunchTrainingProgramData(
       projectAny,
@@ -3263,17 +3419,25 @@ export class CompanyProjectsService {
   async getLaunchTrainingProgramForAdmin(projectIdOrCompanyId: string) {
     const { companyId, resolvedProjectId, resolution } =
       await this.resolveRegistrationIdsForAdminParam(projectIdOrCompanyId);
-    const project = await this.projectModel
-      .findOne({ _id: resolvedProjectId, company_id: companyId })
-      .lean();
+    if (!Types.ObjectId.isValid(resolvedProjectId)) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const project = await this.projectModel.findById(resolvedProjectId).lean();
     if (!project) {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
+    const owner = this.normalizeOwnerCompanyId((project as any).company_id);
+    if (!owner || owner !== String(companyId)) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    await this.overlayLaunchTrainingFieldsFromRawCollection(resolvedProjectId, project as any);
     const projectAny = project as any;
     const baseUrl = process.env.API_BASE_URL || 'http://localhost:3019';
-    const coord = await this.companyCoordinatorModel
-      .findOne({ company_id: companyId, project_id: resolvedProjectId })
-      .lean();
+    const coord = await this.findCompanyCoordinatorAssignmentLean(
+      companyId,
+      resolvedProjectId,
+      projectAny,
+    );
     const coordinator_assigned = !!(coord as any)?.coordinator_id;
     const data = this.buildLaunchTrainingProgramData(
       projectAny,
@@ -3288,9 +3452,11 @@ export class CompanyProjectsService {
         ...data,
         id_resolution: {
           param: projectIdOrCompanyId,
+          input_id: projectIdOrCompanyId,
           resolution,
           resolved_project_id: resolvedProjectId,
           company_id: companyId,
+          input_matched_project_id: resolution === 'project_id',
         },
       },
     };
@@ -3362,10 +3528,10 @@ export class CompanyProjectsService {
       session_date?: Date;
       uploaded_at?: Date;
     }> = [...(pAny.launch_training_sessions || [])]
-      .filter((s: any) => s?.document_path)
+      .filter((s: any) => s && String(s.document_path || s.document_url || '').trim())
       .map((s: any) => ({
         session_index: Number(s.session_index),
-        document_path: String(s.document_path),
+        document_path: String(s.document_path || s.document_url || '').trim(),
         document_filename: s.document_filename,
         session_date: s.session_date ? new Date(s.session_date) : undefined,
         uploaded_at: s.uploaded_at ? new Date(s.uploaded_at) : new Date(),
@@ -3660,6 +3826,15 @@ export class CompanyProjectsService {
   }
 
   /**
+   * Same as getAssignmentDetails; `:projectId` may be project Mongo _id or company _id (admin / open quickview).
+   */
+  async getAssignmentDetailsForAdmin(projectIdOrCompanyId: string) {
+    const { companyId, resolvedProjectId } =
+      await this.resolveRegistrationIdsForAdminParam(projectIdOrCompanyId);
+    return this.getAssignmentDetails(companyId, resolvedProjectId);
+  }
+
+  /**
    * Get invoices for project by type (Payments/Proforma = per_inv, Tax Invoices = inv).
    */
   async getInvoices(
@@ -3757,7 +3932,9 @@ export class CompanyProjectsService {
     const hasLaunchTraining =
       !!(project as any).launch_training_document ||
       (Array.isArray((project as any).launch_training_sessions) &&
-        (project as any).launch_training_sessions.some((s: any) => s?.document_path));
+        (project as any).launch_training_sessions.some(
+          (s: any) => s && String(s.document_path || s.document_url || '').trim(),
+        ));
     if (!invoiceHadDocument && !hasLaunchTraining) {
       throw new BadRequestException({
         status: 'error',
@@ -4243,17 +4420,27 @@ export class CompanyProjectsService {
   }
 
   /**
-   * Legacy single-file upload: same as session 1 on {@link addLaunchTrainingSession} (field `launch_upload`).
+   * Legacy single-file upload: same as {@link addLaunchTrainingSession} (field `launch_upload`).
+   * Accepts optional `session_index` (1–4) and date via `session_date` or `launch_training_report_date`.
    */
   async uploadLaunchAndTraining(
     companyId: string,
     projectId: string,
     file: Express.Multer.File,
-    launchTrainingReportDate?: string,
+    fields: {
+      launch_training_report_date?: string;
+      session_date?: string;
+      session_index?: number;
+    } = {},
   ) {
+    const sessionDate = fields.session_date ?? fields.launch_training_report_date;
+    const sessionIndex =
+      fields.session_index != null && Number.isFinite(Number(fields.session_index))
+        ? Math.min(4, Math.max(1, Number(fields.session_index)))
+        : 1;
     const out = await this.addLaunchTrainingSession(companyId, projectId, file, {
-      session_index: 1,
-      session_date: launchTrainingReportDate,
+      session_index: sessionIndex,
+      session_date: sessionDate,
     });
     const d = out.data as {
       document_url: string;
@@ -4268,7 +4455,7 @@ export class CompanyProjectsService {
         document_url: d.document_url,
         document_filename: file.originalname,
         project_id: projectId,
-        launch_training_report_date: d.session_date ?? launchTrainingReportDate ?? null,
+        launch_training_report_date: d.session_date ?? sessionDate ?? null,
         sessions: d.sessions,
       },
     };
@@ -4277,11 +4464,15 @@ export class CompanyProjectsService {
   async uploadLaunchAndTrainingForAdmin(
     projectIdOrCompanyId: string,
     file: Express.Multer.File,
-    launchTrainingReportDate?: string,
+    fields: {
+      launch_training_report_date?: string;
+      session_date?: string;
+      session_index?: number;
+    } = {},
   ) {
     const { companyId, resolvedProjectId } =
       await this.resolveRegistrationIdsForAdminParam(projectIdOrCompanyId);
-    return this.uploadLaunchAndTraining(companyId, resolvedProjectId, file, launchTrainingReportDate);
+    return this.uploadLaunchAndTraining(companyId, resolvedProjectId, file, fields);
   }
 
   /**

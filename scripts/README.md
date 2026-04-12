@@ -95,4 +95,31 @@ When you upload a proposal document:
 
 ---
 
+## Local company / admin UI + Nest API (ports 3001 vs 3002)
+
+The Nest app listens on **`PORT`** (default **3019** in `src/main.ts`, unless you set `PORT=3001`).
+
+If the browser shows **`http://localhost:3002/...`** but API calls go to **`http://localhost:3002/api/...`**, those requests hit the **Next.js server on 3002**, not Nest, unless you add a **rewrite/proxy** to Nest.
+
+**Fix:** In the **frontend** repo `next.config.js` (or env), proxy API traffic to Nest, for example:
+
+```js
+// next.config.js — rewrites (example)
+async rewrites() {
+  const api = process.env.NEST_API_URL || 'http://localhost:3019';
+  return [{ source: '/api/:path*', destination: `${api}/api/:path*` }];
+}
+```
+
+Set **`NEST_API_URL=http://localhost:3001`** (or whatever port you run Nest on). Then “use 3001” means: **Nest listens on 3001**, and **Next must forward `/api/*` to that host**.
+
+Launch & Training read endpoints on this backend:
+
+- `GET /api/admin/projects/:id/launch-training-program` (canonical)
+- `GET /api/admin/projects/:id/launch-training` (same JSON, alias)
+
+Quickview (open, no company JWT): `GET /api/company/projects/:id/quickview`
+
+---
+
 **Choose the method that works best for you!** ✅

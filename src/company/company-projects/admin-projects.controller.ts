@@ -21,4 +21,15 @@ export class AdminProjectsController {
   async getLaunchTrainingProgram(@Param('projectId') projectId: string): Promise<any> {
     return this.companyProjectsService.getLaunchTrainingProgramForAdmin(projectId);
   }
+
+  /**
+   * GET /api/admin/projects/:projectId/launch-training
+   * Alias of {@link getLaunchTrainingProgram} — same JSON. Prefer `launch-training-program` for new code;
+   * many local frontends still call this path.
+   */
+  @Get(':projectId/launch-training')
+  @UseGuards(AdminJwtAuthGuard)
+  async getLaunchTraining(@Param('projectId') projectId: string): Promise<any> {
+    return this.companyProjectsService.getLaunchTrainingProgramForAdmin(projectId);
+  }
 }

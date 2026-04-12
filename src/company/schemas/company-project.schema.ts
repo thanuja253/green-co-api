@@ -92,6 +92,8 @@ export class CompanyProject {
       {
         session_index: { type: Number, required: true },
         document_path: { type: String, required: true },
+        /** Optional full URL if stored separately from path (quickview merge reads either). */
+        document_url: { type: String },
         document_filename: { type: String },
         session_date: { type: Date },
         uploaded_at: { type: Date, default: Date.now },
@@ -102,6 +104,7 @@ export class CompanyProject {
   launch_training_sessions?: Array<{
     session_index: number;
     document_path: string;
+    document_url?: string;
     document_filename?: string;
     session_date?: Date;
     uploaded_at?: Date;
