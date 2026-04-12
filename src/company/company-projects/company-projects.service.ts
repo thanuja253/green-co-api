@@ -160,14 +160,17 @@ function isWorkOrderRejected(woStatus: unknown): boolean {
   return Number(woStatus) === 2;
 }
 
-/** Cache-bust query so browsers/iframes load the PDF after reupload (`document_url` stays stable otherwise). */
+/**
+ * Viewer URL for proposal PDF. Uses a **relative** `/api/...` path so the browser uses the **current page origin**
+ * (e.g. React on :3001 + dev proxy). Absolute URLs from `API_BASE_URL` often point at the dev server without a proxy
+ * rule for `/proposal-document/file`, so PDFs 404 — relative fixes that.
+ */
 function buildProposalDocumentViewUrl(
-  baseUrl: string,
   projectId: string,
   proposalRaw: string,
   projectUpdatedAt?: Date | null,
 ): { document_url: string; document_cache_bust: string } {
-  const apiViewUrl = `${baseUrl}/api/company/projects/${projectId}/proposal-document/file`;
+  const path = `/api/company/projects/${projectId}/proposal-document/file`;
   let bust = proposalDocumentFileMtimeMs(proposalRaw);
   if (bust == null && projectUpdatedAt) {
     bust = projectUpdatedAt.getTime();
@@ -176,7 +179,7 @@ function buildProposalDocumentViewUrl(
   // Integer string avoids `v=...4502` floats that break some clients parsing URLs as filenames.
   const document_cache_bust = String(Math.round(Number(bust)));
   return {
-    document_url: `${apiViewUrl}?v=${encodeURIComponent(document_cache_bust)}`,
+    document_url: `${path}?v=${encodeURIComponent(document_cache_bust)}`,
     document_cache_bust,
   };
 }
@@ -3439,14 +3442,17 @@ export class CompanyProjectsService {
     const refreshed = await this.getProposalDocument(companyId, projectId);
     const proposalWorkorder = await this.getProposalWorkOrderDocuments(companyId, projectId);
     const pw = proposalWorkorder.data as { proposal_document?: unknown; work_order?: unknown };
+    const { work_order: _woRoot, ...refreshedProposalOnly } = refreshed.data as Record<string, unknown>;
     return {
       status: 'success',
       message: 'Proposal document replaced successfully',
       data: {
-        ...refreshed.data,
+        ...refreshedProposalOnly,
         proposal_document: pw?.proposal_document ?? null,
-        work_order: pw?.work_order ?? null,
-        proposal_workorder_documents: proposalWorkorder.data,
+        /** Proposal reupload response is proposal-only; no `work_order`. Use GET …/proposal-workorder-documents for combined tab data. */
+        proposal_workorder_documents: {
+          proposal_document: pw?.proposal_document ?? null,
+        },
         project_id: projectId,
         next_activities_id: 4,
         replaced: true,
@@ -3558,11 +3564,9 @@ export class CompanyProjectsService {
         null;
     }
 
-    const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(/\/+$/, '');
     const proposalRaw = String(project.proposal_document || '');
     const filename = proposalRaw.split('/').pop() || 'proposal.pdf';
     const { document_url, document_cache_bust } = buildProposalDocumentViewUrl(
-      baseUrl,
       projectId,
       proposalRaw,
       (project as any).updatedAt,
@@ -3660,11 +3664,6 @@ export class CompanyProjectsService {
     const proposalRaw = String((project as any).proposal_document || '').trim();
     const reupload_allowed = Boolean(proposalRaw) && woRejected;
 
-    const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(
-      /\/+$/,
-      '',
-    );
-
     if (!proposalRaw) {
       return {
         status: 'success' as const,
@@ -3683,7 +3682,6 @@ export class CompanyProjectsService {
 
     const filename = proposalRaw.split('/').pop() || 'proposal.pdf';
     const { document_url, document_cache_bust } = buildProposalDocumentViewUrl(
-      baseUrl,
       effectiveProjectId,
       proposalRaw,
       (project as any).updatedAt,
@@ -3995,7 +3993,6 @@ export class CompanyProjectsService {
       const proposalRaw = String(proposalDocValue).trim();
       const storageFilename = proposalRaw.split('/').pop() || 'proposal.pdf';
       const { document_url, document_cache_bust } = buildProposalDocumentViewUrl(
-        baseUrl,
         projectId,
         proposalRaw,
         projectAny.updatedAt,

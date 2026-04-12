@@ -539,8 +539,14 @@ export class CompanyProjectsController {
   }
 
   /**
-   * Single proposal PDF reupload (CII). Allowed when GET …/proposal-workorder-documents has proposal_badge_label "Rejected by company".
-   * Response merges GET …/proposal-document fields at `data` root plus `data.proposal_document` / `proposal_workorder_documents` (same as combined GET).
+   * **Proposal reupload (CII)** — use for the “Reupload” button when work order is rejected (same gate as badge `"Rejected by company"`).
+   *
+   * **Client flow**
+   * 1. `POST|PUT|PATCH` this URL with `multipart/form-data` and field `proposal_document` | `proposalDocument` | `file` (PDF).
+   * 2. `response.data` is **proposal-only** (no `work_order` root or inside `proposal_workorder_documents`). For WO + proposal together, `GET …/proposal-workorder-documents/refresh`.
+   * 3. Optional refetch: `GET …/proposal-workorder-documents/refresh` with `cache: 'no-store'`.
+   *
+   * Same multipart rules as `POST …/proposal-document` (first upload).
    * POST|PUT|PATCH …/proposal-document/reupload
    */
   @Post(':projectId/proposal-document/reupload')
@@ -860,6 +866,17 @@ export class CompanyProjectsController {
         document_remarks: dto.document_remarks,
       },
     );
+  }
+
+  /**
+   * **Refetch after proposal upload/reupload** — same body as `GET …/proposal-workorder-documents`, dedicated URL for dashboards (`useProposalRefresh()`).
+   * Use `response.data.proposal_document` for proposal-only state; `data.work_order` for WO. Headers: `no-store`.
+   * GET /api/company/projects/:projectId/proposal-workorder-documents/refresh
+   */
+  @Get(':projectId/proposal-workorder-documents/refresh')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+  async refreshProposalWorkOrderDocuments(@Param('projectId') projectId: string): Promise<any> {
+    return this.companyProjectsService.getProposalWorkOrderDocumentsByProjectId(projectId);
   }
 
   /**
