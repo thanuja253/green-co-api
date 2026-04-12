@@ -128,6 +128,59 @@ function uploadsRelativePathFromUrl(filePath: string): string | null {
   return null;
 }
 
+/** Relative path under `process.cwd()` for a stored proposal_document field. */
+function proposalDocumentNormalizedRelativePath(proposalRaw: string): string | null {
+  const trimmed = String(proposalRaw || '').trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith('http')) {
+    return uploadsRelativePathFromUrl(trimmed);
+  }
+  return trimmed.replace(/^\/+/, '');
+}
+
+function proposalDocumentFileMtimeMs(proposalRaw: string): number | null {
+  const normalized = proposalDocumentNormalizedRelativePath(proposalRaw);
+  if (!normalized) return null;
+  const fullPath = join(process.cwd(), normalized);
+  try {
+    if (fs.existsSync(fullPath)) {
+      return fs.statSync(fullPath).mtimeMs;
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+/**
+ * Latest work order “rejected / not accepted” is `wo_status = 2` (schema default is number).
+ * Values sometimes arrive as string `"2"` from Mongo/JSON — use `Number(woStatus) === 2` for reliable checks.
+ */
+function isWorkOrderRejected(woStatus: unknown): boolean {
+  return Number(woStatus) === 2;
+}
+
+/** Cache-bust query so browsers/iframes load the PDF after reupload (`document_url` stays stable otherwise). */
+function buildProposalDocumentViewUrl(
+  baseUrl: string,
+  projectId: string,
+  proposalRaw: string,
+  projectUpdatedAt?: Date | null,
+): { document_url: string; document_cache_bust: string } {
+  const apiViewUrl = `${baseUrl}/api/company/projects/${projectId}/proposal-document/file`;
+  let bust = proposalDocumentFileMtimeMs(proposalRaw);
+  if (bust == null && projectUpdatedAt) {
+    bust = projectUpdatedAt.getTime();
+  }
+  if (bust == null) bust = Date.now();
+  // Integer string avoids `v=...4502` floats that break some clients parsing URLs as filenames.
+  const document_cache_bust = String(Math.round(Number(bust)));
+  return {
+    document_url: `${apiViewUrl}?v=${encodeURIComponent(document_cache_bust)}`,
+    document_cache_bust,
+  };
+}
+
 const REGISTRATION_GRIDFS_BUCKET = 'registration_uploads';
 const WORKFLOW_STEP_LABELS: Record<number, string> = {
   1: 'Company Registered',
@@ -2672,7 +2725,7 @@ export class CompanyProjectsService {
       nextResp: string;
     } | null = null;
     let proposalWaitingForCiiProposalReupload = false;
-    if (woEarly?.wo_status === 2 && (project as any).proposal_document) {
+    if (isWorkOrderRejected(woEarly?.wo_status) && (project as any).proposal_document) {
       const rejectTs = woEarly.wo_doc_status_updated_at || woEarly.updatedAt;
       const reuploadAfterReject = (allActivities as any[]).find(
         (a) =>
@@ -3141,10 +3194,8 @@ export class CompanyProjectsService {
       String((project as any).proposal_document || '').trim(),
     );
 
-    const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(/\/+$/, '');
     // Use Laravel-compatible path: uploads/company/{projectId}/
     const relativePath = `uploads/company/${projectId}/${file.filename}`;
-    const apiViewUrl = `${baseUrl}/api/company/projects/${projectId}/proposal-document/file`;
 
     // Save proposal document as relative path so server can move host/base URL safely.
     project.proposal_document = relativePath;
@@ -3231,25 +3282,27 @@ export class CompanyProjectsService {
       hadExistingProposal ? 'Proposal document reuploaded' : 'Proposal document uploaded',
     );
 
+    const refreshed = await this.getProposalDocument(companyId, projectId);
+    const proposalWorkorder = await this.getProposalWorkOrderDocuments(companyId, projectId);
     console.log('[Proposal Document] Uploaded successfully:', {
       projectId: projectId.toString(),
-      documentUrl: apiViewUrl,
+      document_url: refreshed.data?.document_url,
       next_activities_id: project.next_activities_id,
       hadExistingProposal,
     });
 
+    const pw = proposalWorkorder.data as { proposal_document?: unknown; work_order?: unknown };
     return {
       status: 'success',
       message: hadExistingProposal
         ? 'Proposal Document reuploaded successfully'
         : 'Proposal Document uploaded successfully',
       data: {
-        proposal_status: 0,
-        proposal_status_label: 'pending_by_company',
-        proposal_remarks: null,
-        proposal_status_updated_at: new Date().toISOString(),
-        document_url: apiViewUrl,
-        document_filename: file.originalname,
+        ...refreshed.data,
+        /** Same as GET …/proposal-workorder-documents → data.proposal_document (use for UI state after upload). */
+        proposal_document: pw?.proposal_document ?? null,
+        work_order: pw?.work_order ?? null,
+        proposal_workorder_documents: proposalWorkorder.data,
         project_id: projectId,
         next_activities_id: project.next_activities_id,
         reuploaded: hadExistingProposal,
@@ -3270,8 +3323,9 @@ export class CompanyProjectsService {
   }
 
   /**
-   * CII/Admin: replace the proposal PDF after the company’s work order was rejected (latest wo_status = 2).
-   * Does not reset workflow step counters like the first-time upload; notifies the company to review the revised file.
+   * Single CII proposal PDF reupload: allowed when `GET …/proposal-workorder-documents` shows
+   * `proposal_badge_label: "Rejected by company"` (latest work order rejected, proposal already on file).
+   * Response includes the same `data` shape as that GET so the client does not need a second fetch.
    */
   async replaceProposalDocument(
     companyId: string,
@@ -3301,11 +3355,18 @@ export class CompanyProjectsService {
       .findOne({ company_id: companyId, project_id: projectId })
       .sort({ createdAt: -1 });
 
-    if (!latestWo || latestWo.wo_status !== 2) {
+    const woRejected = latestWo != null && isWorkOrderRejected(latestWo.wo_status);
+
+    if (!woRejected) {
       throw new BadRequestException({
         status: 'error',
+        code: 'PROPOSAL_REUPLOAD_NOT_ALLOWED',
         message:
-          'Proposal can only be replaced when the latest work order is rejected (wo_status = 2).',
+          'Proposal reupload is only allowed when the latest work order is rejected (wo_status = 2) — the same state as proposal_badge_label "Rejected by company" on GET …/proposal-workorder-documents. First upload: POST …/proposal-document.',
+        data: {
+          latest_wo_status: latestWo?.wo_status ?? null,
+          documents_path: `GET /api/company/projects/${projectId}/proposal-workorder-documents`,
+        },
       });
     }
 
@@ -3322,7 +3383,6 @@ export class CompanyProjectsService {
       }
     }
 
-    const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(/\/+$/, '');
     const absoluteMulterPath =
       (file as Express.Multer.File & { path?: string }).path ||
       join(String((file as any).destination || ''), file.filename);
@@ -3334,8 +3394,6 @@ export class CompanyProjectsService {
         relativePath = rel.replace(/^\/+/, '');
       }
     }
-    const apiViewUrl = `${baseUrl}/api/company/projects/${projectId}/proposal-document/file`;
-
     project.proposal_document = relativePath;
     // Company’s turn again: re-upload work order against the revised proposal (same cycle as first time after proposal).
     project.next_activities_id = 4;
@@ -3378,16 +3436,17 @@ export class CompanyProjectsService {
         );
     }
 
+    const refreshed = await this.getProposalDocument(companyId, projectId);
+    const proposalWorkorder = await this.getProposalWorkOrderDocuments(companyId, projectId);
+    const pw = proposalWorkorder.data as { proposal_document?: unknown; work_order?: unknown };
     return {
       status: 'success',
       message: 'Proposal document replaced successfully',
       data: {
-        proposal_status: 0,
-        proposal_status_label: 'pending_by_company',
-        proposal_remarks: null,
-        proposal_status_updated_at: new Date().toISOString(),
-        document_url: apiViewUrl,
-        document_filename: file.originalname,
+        ...refreshed.data,
+        proposal_document: pw?.proposal_document ?? null,
+        work_order: pw?.work_order ?? null,
+        proposal_workorder_documents: proposalWorkorder.data,
         project_id: projectId,
         next_activities_id: 4,
         replaced: true,
@@ -3432,7 +3491,7 @@ export class CompanyProjectsService {
     const woAny = latestWoLean as any;
     const woStatus = woAny != null ? (woAny.wo_status ?? null) : null;
     const woRemarks = woAny?.wo_remarks ?? null;
-    const woRejected = woStatus === 2;
+    const woRejected = isWorkOrderRejected(woStatus);
 
     if (!project.proposal_document) {
       return {
@@ -3440,9 +3499,11 @@ export class CompanyProjectsService {
         message: 'Proposal document not uploaded yet',
         data: {
           has_document: false,
+          is_proposal_pdf_on_server: false,
           document_filename: null,
           proposal_status: 'not_uploaded',
           proposal_status_label: 'not_uploaded',
+          proposal_status_code: null,
           proposal_remarks: null,
           proposal_status_updated_at: null,
           document_url: null,
@@ -3465,39 +3526,74 @@ export class CompanyProjectsService {
     // Proposal is considered "approved by company" once company uploads work order for this project.
     const workOrder = latestWoLean;
     const proposalAcceptedByCompany = !!workOrder && !woRejected;
-    const proposalStatus = proposalAcceptedByCompany ? 1 : woRejected ? 2 : 0;
-    const proposalStatusLabel = proposalAcceptedByCompany
-      ? 'accepted_by_company'
-      : woRejected
-        ? 'work_order_rejected'
-        : 'pending_by_company';
-    const proposalStatusUpdatedAt = proposalAcceptedByCompany
-      ? (workOrder as any).createdAt?.toISOString?.() ??
+
+    let proposalStatus: number;
+    let proposalStatusLabel: string;
+    let proposalRemarks: string | null;
+    let proposalStatusUpdatedAt: string | null;
+
+    if (woRejected) {
+      proposalStatus = 2;
+      proposalStatusLabel = 'work_order_rejected';
+      proposalRemarks = woRemarks ?? null;
+      proposalStatusUpdatedAt =
+        (workOrder as any)?.wo_doc_status_updated_at?.toISOString?.() ??
+        (workOrder as any)?.updatedAt?.toISOString?.() ??
+        null;
+    } else if (proposalAcceptedByCompany) {
+      proposalStatus = 1;
+      proposalStatusLabel = 'accepted_by_company';
+      proposalRemarks = null;
+      proposalStatusUpdatedAt =
+        (workOrder as any).createdAt?.toISOString?.() ??
         (workOrder as any).updatedAt?.toISOString?.() ??
-        null
-      : woRejected
-        ? (workOrder as any).wo_doc_status_updated_at?.toISOString?.() ??
-          (workOrder as any).updatedAt?.toISOString?.() ??
-          null
-        : (project as any).updatedAt?.toISOString?.() ??
-          (project as any).createdAt?.toISOString?.() ??
-          null;
+        null;
+    } else {
+      proposalStatus = 0;
+      proposalStatusLabel = 'pending_by_company';
+      proposalRemarks = null;
+      proposalStatusUpdatedAt =
+        (project as any).updatedAt?.toISOString?.() ??
+        (project as any).createdAt?.toISOString?.() ??
+        null;
+    }
 
     const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(/\/+$/, '');
-    const apiViewUrl = `${baseUrl}/api/company/projects/${projectId}/proposal-document/file`;
     const proposalRaw = String(project.proposal_document || '');
     const filename = proposalRaw.split('/').pop() || 'proposal.pdf';
+    const { document_url, document_cache_bust } = buildProposalDocumentViewUrl(
+      baseUrl,
+      projectId,
+      proposalRaw,
+      (project as any).updatedAt,
+    );
+    const fileMtimeMs = proposalDocumentFileMtimeMs(proposalRaw);
+    const proposal_file_updated_at = fileMtimeMs
+      ? new Date(fileMtimeMs).toISOString()
+      : (project as any).updatedAt?.toISOString?.() ?? null;
 
     return {
       status: 'success',
       message: 'Proposal document retrieved successfully',
       data: {
         has_document: true,
-        proposal_status: proposalStatus,
+        /** Explicit boolean so UIs never treat numeric `0` workflow as “no file”. */
+        is_proposal_pdf_on_server: true,
+        /**
+         * Workflow as string (same as `proposal_status_label`). Never numeric `0` — many clients wrongly treat `0` as “not uploaded”.
+         */
+        proposal_status: proposalStatusLabel,
         proposal_status_label: proposalStatusLabel,
-        proposal_remarks: woRejected ? woRemarks : null,
+        /** Numeric workflow: 0 = pending company / WO, 1 = accepted, 2 = WO rejected. */
+        proposal_status_code: proposalStatus,
+        proposal_remarks: proposalRemarks,
+        /** Last change to workflow / WO relative to proposal review (may differ from file upload time). */
         proposal_status_updated_at: proposalStatusUpdatedAt,
-        document_url: apiViewUrl,
+        /** When the PDF on disk was last modified (best for showing “latest file” after reupload). */
+        proposal_file_updated_at,
+        document_url,
+        /** Same as `v` on `document_url` — use to force-refresh embedded PDF viewers. */
+        document_cache_bust,
         document_filename: filename,
         work_order: workOrder
           ? {
@@ -3510,7 +3606,7 @@ export class CompanyProjectsService {
                 null,
             }
           : null,
-        /** True when CII may call POST/PUT/PATCH .../proposal-document/reupload (PDF). */
+        /** True when CII may call POST/PUT/PATCH …/proposal-document/reupload (latest WO rejected). */
         can_replace_proposal: woRejected,
       },
     };
@@ -3526,6 +3622,92 @@ export class CompanyProjectsService {
     }
     const effectiveProjectId = String(project._id);
     return this.getProposalDocument(String(project.company_id), effectiveProjectId);
+  }
+
+  /**
+   * Proposal PDF only — no work-order payload (for UIs that only need file + view URL after upload/reupload).
+   * `reupload_allowed` is true when a proposal PDF exists and the latest work order is rejected (same as proposal reupload gate).
+   */
+  async getProposalDocumentFileInfoByProjectId(projectId: string) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Project not found',
+      });
+    }
+    const companyId = String(resolved.company_id);
+    const effectiveProjectId = String(resolved._id);
+
+    const project = await this.projectModel
+      .findOne({ _id: effectiveProjectId, company_id: companyId })
+      .lean();
+    if (!project) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Project not found',
+      });
+    }
+
+    const latestWoLean = await this.companyWorkOrderModel
+      .findOne({ company_id: companyId, project_id: effectiveProjectId })
+      .sort({ createdAt: -1 })
+      .lean();
+    const woAny = latestWoLean as any;
+    const woStatus = woAny != null ? (woAny.wo_status ?? null) : null;
+    const woRejected = isWorkOrderRejected(woStatus);
+
+    const proposalRaw = String((project as any).proposal_document || '').trim();
+    const reupload_allowed = Boolean(proposalRaw) && woRejected;
+
+    const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(
+      /\/+$/,
+      '',
+    );
+
+    if (!proposalRaw) {
+      return {
+        status: 'success' as const,
+        message: 'Proposal document not uploaded yet',
+        data: {
+          has_document: false,
+          is_proposal_pdf_on_server: false,
+          document_url: null,
+          document_cache_bust: null,
+          document_filename: null,
+          proposal_file_updated_at: null,
+          reupload_allowed,
+        },
+      };
+    }
+
+    const filename = proposalRaw.split('/').pop() || 'proposal.pdf';
+    const { document_url, document_cache_bust } = buildProposalDocumentViewUrl(
+      baseUrl,
+      effectiveProjectId,
+      proposalRaw,
+      (project as any).updatedAt,
+    );
+    const fileMtimeMs = proposalDocumentFileMtimeMs(proposalRaw);
+    const proposal_file_updated_at = fileMtimeMs
+      ? new Date(fileMtimeMs).toISOString()
+      : (project as any).updatedAt
+        ? new Date((project as any).updatedAt).toISOString()
+        : null;
+
+    return {
+      status: 'success' as const,
+      message: 'Proposal document file retrieved successfully',
+      data: {
+        has_document: true,
+        is_proposal_pdf_on_server: true,
+        document_url,
+        document_cache_bust,
+        document_filename: filename,
+        proposal_file_updated_at,
+        reupload_allowed,
+      },
+    };
   }
 
   async streamProposalDocumentByProjectId(projectOrCompanyId: string, res: Response): Promise<void> {
@@ -3548,6 +3730,15 @@ export class CompanyProjectsService {
 
     const filename = normalized.split('/').pop() || 'proposal.pdf';
     const contentType = contentTypeForRegistrationFilename(filename, 'application/pdf');
+    try {
+      const st = fs.statSync(fullPath);
+      res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate, max-age=0');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+      res.setHeader('ETag', `W/"${st.size}-${Math.round(st.mtimeMs)}"`);
+    } catch {
+      res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate, max-age=0');
+    }
     await this.streamRegistrationFileToResponse(res, {
       kind: 'disk',
       fullPath,
@@ -3776,7 +3967,10 @@ export class CompanyProjectsService {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
 
-    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com';
+    const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(
+      /\/+$/,
+      '',
+    );
     const response: any = { proposal_document: null, work_order: null };
     const projectAny = project as any;
     const workOrderAny = workOrder as any;
@@ -3785,17 +3979,48 @@ export class CompanyProjectsService {
     const hasProposalDoc = proposalDocValue && 
                           typeof proposalDocValue === 'string' && 
                           proposalDocValue.trim().length > 0;
-    
+
+    const woRejected =
+      workOrderAny != null && isWorkOrderRejected(workOrderAny.wo_status);
+    const proposalReuploadEligible = Boolean(hasProposalDoc) && woRejected;
+    const proposal_badge_label = proposalReuploadEligible ? 'Rejected by company' : null;
+    const proposalReuploadPath = `/api/company/projects/${projectId}/proposal-document/reupload`;
+    const proposalUploadHints = {
+      proposal_badge_label,
+      /** When set, use POST|PUT|PATCH on this path with multipart PDF (single proposal reupload API). */
+      proposal_reupload_path: proposalReuploadEligible ? proposalReuploadPath : null,
+    };
+
     if (hasProposalDoc) {
+      const proposalRaw = String(proposalDocValue).trim();
+      const storageFilename = proposalRaw.split('/').pop() || 'proposal.pdf';
+      const { document_url, document_cache_bust } = buildProposalDocumentViewUrl(
+        baseUrl,
+        projectId,
+        proposalRaw,
+        projectAny.updatedAt,
+      );
       response.proposal_document = {
         has_document: true,
-        document_url: proposalDocValue.startsWith('http') ? proposalDocValue : `${baseUrl}/${proposalDocValue}`,
-        document_filename: proposalDocValue.split('/').pop() || 'proposal.pdf',
-        path: proposalDocValue,
+        is_proposal_pdf_on_server: true,
+        /** Same viewer URL as GET …/proposal-document (`/proposal-document/file?v=…`), not raw `/uploads/…`. */
+        document_url,
+        document_cache_bust,
+        /** Always use this for UI labels — do not derive a name from `document_url` (last path segment is `file`). */
+        document_filename: storageFilename,
+        path: proposalRaw,
         uploaded_at: projectAny.updatedAt?.toISOString?.() ?? projectAny.createdAt?.toISOString?.() ?? new Date().toISOString(),
+        ...proposalUploadHints,
       };
     } else {
-      response.proposal_document = { has_document: false, document_url: null, document_filename: null };
+      response.proposal_document = {
+        has_document: false,
+        is_proposal_pdf_on_server: false,
+        document_url: null,
+        document_filename: null,
+        proposal_badge_label: null,
+        proposal_reupload_path: null,
+      };
     }
 
     if (workOrderAny?.wo_doc) {
@@ -4213,7 +4438,7 @@ export class CompanyProjectsService {
     const latest = await this.companyWorkOrderModel
       .findOne({ company_id: companyId, project_id: projectId })
       .sort({ createdAt: -1 });
-    if (!latest || latest.wo_status !== 2) {
+    if (!latest || !isWorkOrderRejected(latest.wo_status)) {
       throw new BadRequestException({
         status: 'error',
         message:
@@ -5236,7 +5461,7 @@ export class CompanyProjectsService {
 
     // Create or update work order document
     let workOrder;
-    const isReUpload = existingWorkOrder && existingWorkOrder.wo_status === 2;
+    const isReUpload = existingWorkOrder && isWorkOrderRejected(existingWorkOrder.wo_status);
 
     if (existingWorkOrder && isReUpload) {
       // Update existing work order (re-upload after rejection)

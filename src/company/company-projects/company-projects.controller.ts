@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Header,
   Param,
   Patch,
   Post,
@@ -538,12 +539,14 @@ export class CompanyProjectsController {
   }
 
   /**
-   * Replace proposal PDF after the company’s work order was rejected (latest wo_status = 2).
-   * POST|PUT|PATCH /api/company/projects/:projectId/proposal-document/reupload
+   * Single proposal PDF reupload (CII). Allowed when GET …/proposal-workorder-documents has proposal_badge_label "Rejected by company".
+   * Response merges GET …/proposal-document fields at `data` root plus `data.proposal_document` / `proposal_workorder_documents` (same as combined GET).
+   * POST|PUT|PATCH …/proposal-document/reupload
    */
   @Post(':projectId/proposal-document/reupload')
   @Put(':projectId/proposal-document/reupload')
   @Patch(':projectId/proposal-document/reupload')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
   @UseInterceptors(
     FileFieldsInterceptor(
       [
@@ -607,12 +610,14 @@ export class CompanyProjectsController {
   }
 
   /**
-   * Upload Proposal Document (Admin function - can be called directly or via MongoDB)
+   * Upload Proposal Document (Admin function - can be called directly or via MongoDB).
+   * Response includes merged GET …/proposal-document fields and `data.proposal_document` (same shape as proposal-workorder-documents).
    * POST /api/company/projects/:projectId/proposal-document
    */
   @Post(':projectId/proposal-document')
   @Put(':projectId/proposal-document')
   @Patch(':projectId/proposal-document')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
   @UseInterceptors(
     FileFieldsInterceptor(
       [
@@ -686,10 +691,30 @@ export class CompanyProjectsController {
   }
 
   /**
-   * Get proposal metadata (view URL, status, work order summary, can_replace_proposal after WO reject).
+   * Same payload as GET proposal-document; JSON response is marked no-store for clients refreshing after reupload.
+   * GET /api/company/projects/:projectId/proposal-document/reload
+   */
+  @Get(':projectId/proposal-document/reload')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+  async reloadProposalDocumentState(@Param('projectId') projectId: string): Promise<any> {
+    return this.companyProjectsService.getProposalDocumentByProjectId(projectId);
+  }
+
+  /**
+   * Proposal PDF metadata only (no `work_order` object). Use this when you only care about the document after upload/reupload.
+   * GET /api/company/projects/:projectId/proposal-document/document
+   */
+  @Get(':projectId/proposal-document/document')
+  async getProposalDocumentFileInfo(@Param('projectId') projectId: string): Promise<any> {
+    return this.companyProjectsService.getProposalDocumentFileInfoByProjectId(projectId);
+  }
+
+  /**
+   * Get proposal metadata (view URL, status, work order summary; can_replace_proposal when latest WO is rejected).
    * GET /api/company/projects/:projectId/proposal-document
    */
   @Get(':projectId/proposal-document')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
   async getProposalDocument(
     @Param('projectId') projectId: string,
   ): Promise<any> {
@@ -838,10 +863,12 @@ export class CompanyProjectsController {
   }
 
   /**
-   * Get Proposal/Work Order Documents (combined endpoint)
+   * Get Proposal/Work Order Documents (combined endpoint).
+   * When `proposal_badge_label` is `"Rejected by company"`, `proposal_reupload_path` is set — use POST|PUT|PATCH there for the single proposal reupload API.
    * GET /api/company/projects/:projectId/proposal-workorder-documents
    */
   @Get(':projectId/proposal-workorder-documents')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
   async getProposalWorkOrderDocuments(
     @Param('projectId') projectId: string,
   ): Promise<any> {
