@@ -121,6 +121,17 @@ export class CompanyProjectsService {
     if (status === 2) return 'rejected_by_company';
     return 'pending';
   }
+
+  /** Normalize DB `proposal_status` to 0 | 1 | 2 for API responses and UI (avoids string/Long mismatches). */
+  private parseProposalStatusRaw(projectAny: { proposal_status?: unknown } | null | undefined): 0 | 1 | 2 {
+    const v = projectAny?.proposal_status;
+    if (v === null || v === undefined) return 0;
+    const n = Number(v);
+    if (!Number.isFinite(n)) return 0;
+    if (n === 2) return 2;
+    if (n === 1) return 1;
+    return 0;
+  }
   constructor(
     @InjectModel(CompanyProject.name)
     private readonly projectModel: Model<CompanyProjectDocument>,
@@ -1849,7 +1860,7 @@ export class CompanyProjectsService {
     let nextStepDisplayResponsibility = isAtCloseOutNoRecertify
       ? 'CII'
       : nextActivityInfo.responsibility;
-    const proposalStatus = Number((project as any).proposal_status ?? 0);
+    const proposalStatus = this.parseProposalStatusRaw(project as any);
     /** WO uploaded ⇒ company moved past proposal gate even if `proposal_status` was never set to 1. */
     const proposalAcceptedForWorkflow =
       proposalStatus === 1 || (proposalStatus === 0 && hasWorkOrderDocument);
@@ -2068,7 +2079,7 @@ export class CompanyProjectsService {
           ? project.proposal_document
           : `${baseUrl}/${project.proposal_document}`
         : null,
-      proposal_status: (project as any).proposal_status ?? 0,
+      proposal_status: proposalStatus,
       /** Use for Resources / headers: WO on file ⇒ treat as accepted even when DB `proposal_status` stayed 0. */
       proposal_ui_status:
         proposalStatus === 2 ? 2 : proposalStatus === 1 ? 1 : hasWorkOrderDocument ? 1 : 0,
@@ -2665,6 +2676,113 @@ export class CompanyProjectsService {
   }
 
   /**
+   * Proposal PDF metadata only — no `work_order` object (for UIs that only need file + viewer URL).
+   * `reupload_allowed` is true when the latest work order was rejected by CII (`wo_status === 2`).
+   */
+  async getProposalDocumentFileInfo(companyId: string, projectId: string) {
+    if (!Types.ObjectId.isValid(companyId) || !Types.ObjectId.isValid(projectId)) {
+      throw new BadRequestException({ status: 'error', message: 'Invalid company or project id' });
+    }
+    const projectOid = new Types.ObjectId(projectId);
+    const companyOid = new Types.ObjectId(companyId);
+    const project = await this.projectModel
+      .findOne({
+        _id: projectOid,
+        $or: [{ company_id: companyId }, { company_id: companyOid }],
+      })
+      .lean();
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const workOrder = await this.companyWorkOrderModel
+      .findOne({
+        project_id: projectOid,
+        $or: [{ company_id: companyId }, { company_id: companyOid }],
+      })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const woStatus = Number((workOrder as any)?.wo_status ?? 0);
+    const reupload_allowed = woStatus === 2;
+
+    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3019';
+    const proposalPathRaw = (project as any).proposal_document;
+    const hasDoc =
+      proposalPathRaw &&
+      typeof proposalPathRaw === 'string' &&
+      String(proposalPathRaw).trim().length > 0;
+
+    if (!hasDoc) {
+      return {
+        status: 'success',
+        message: 'Proposal document not uploaded yet',
+        data: {
+          has_document: false,
+          document_url: null,
+          document_cache_bust: null,
+          document_filename: null,
+          proposal_file_updated_at: null,
+          reupload_allowed,
+        },
+      };
+    }
+
+    const proposalPath = String(proposalPathRaw).trim();
+    const fileName = proposalPath.split('/').pop() || 'proposal.pdf';
+    const proposalTs = (project as any).proposal_status_updated_at
+      ? new Date((project as any).proposal_status_updated_at).getTime()
+      : (project as any).updatedAt
+        ? new Date((project as any).updatedAt).getTime()
+        : Date.now();
+    const document_cache_bust = String(proposalTs);
+    const document_url = `${baseUrl}/api/company/projects/${encodeURIComponent(String(projectId))}/proposal-document/file?v=${encodeURIComponent(document_cache_bust)}`;
+
+    return {
+      status: 'success',
+      message: 'Proposal document file retrieved successfully',
+      data: {
+        has_document: true,
+        document_url,
+        document_cache_bust,
+        document_filename: fileName,
+        proposal_file_updated_at: new Date(proposalTs).toISOString(),
+        reupload_allowed,
+      },
+    };
+  }
+
+  /**
+   * Absolute path to on-disk proposal file for company (GET …/proposal-document/file stream).
+   */
+  async getProposalDocumentLocalFilePathOrThrow(
+    companyId: string,
+    projectId: string,
+  ): Promise<{ fullPath: string; filename: string; ext: string }> {
+    const project = await this.projectModel.findOne({
+      _id: projectId,
+      company_id: companyId,
+    });
+    if (!project || !(project as any).proposal_document) {
+      throw new NotFoundException({ status: 'error', message: 'Proposal document not found' });
+    }
+    const pathRaw = String((project as any).proposal_document).trim();
+    const relativePath = pathRaw.startsWith('http')
+      ? pathRaw.replace(/^https?:\/\/[^/]+/, '').replace(/^\//, '')
+      : pathRaw.replace(/^\//, '');
+    const fullPath = join(process.cwd(), relativePath);
+    if (!fs.existsSync(fullPath)) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Proposal file not found on server',
+      });
+    }
+    const filename = pathRaw.split('/').pop() || 'proposal.pdf';
+    const ext = extname(filename).toLowerCase() || '.pdf';
+    return { fullPath, filename, ext };
+  }
+
+  /**
    * Upload resource center document
    */
   async uploadResourceDocument(
@@ -2912,26 +3030,38 @@ export class CompanyProjectsService {
       const fileName = pathRaw.split('/').pop() || 'proposal.pdf';
       const absUrl = pathRaw.startsWith('http') ? pathRaw : `${baseUrl}/${pathRaw.replace(/^\//, '')}`;
       const proposalRemarksVal = projectAny.proposal_remarks ?? null;
-      const rawPr = Number(projectAny.proposal_status ?? 0);
+      const rawPr = this.parseProposalStatusRaw(projectAny);
       const hasWoDoc = !!(workOrderAny?.wo_doc && String(workOrderAny.wo_doc).trim());
       const proposalUiStatus = rawPr === 2 ? 2 : rawPr === 1 ? 1 : hasWoDoc ? 1 : 0;
+      /** Use for proposal card badge — do not infer from `work_order.wo_status` (that is work-order approval, not proposal). */
+      const proposal_badge: 'rejected' | 'accepted' | 'pending' =
+        rawPr === 2 ? 'rejected' : rawPr === 1 ? 'accepted' : hasWoDoc ? 'accepted' : 'pending';
+      const proposal_badge_label =
+        proposal_badge === 'rejected'
+          ? 'Rejected by company'
+          : proposal_badge === 'accepted' && rawPr === 1
+            ? 'Accepted by company'
+            : proposal_badge === 'accepted'
+              ? 'Work order on file'
+              : 'Pending company decision';
       response.proposal_document = {
         has_document: true,
         document_url: absUrl,
         document_filename: fileName,
         filename: fileName,
         path: pathRaw,
-        proposal_status: projectAny.proposal_status ?? 0,
+        proposal_status: rawPr,
         proposal_ui_status: proposalUiStatus,
         proposal_ui_status_label: this.mapProposalStatusLabel(proposalUiStatus),
+        proposal_badge,
+        proposal_badge_label,
         proposal_remarks: proposalRemarksVal,
         remarks: proposalRemarksVal,
         proposal_status_updated_at: projectAny.proposal_status_updated_at
           ? new Date(projectAny.proposal_status_updated_at).toISOString()
           : null,
-        can_reupload: Number(projectAny.proposal_status ?? 0) === 2,
-        reupload_responsibility:
-          Number(projectAny.proposal_status ?? 0) === 2 ? 'CII' : null,
+        can_reupload: rawPr === 2,
+        reupload_responsibility: rawPr === 2 ? 'CII' : null,
         uploaded_at:
           projectAny.updatedAt?.toISOString?.() ??
           projectAny.createdAt?.toISOString?.() ??
@@ -3754,7 +3884,7 @@ export class CompanyProjectsService {
       }
     }
 
-    const rawPr = Number(projectAny.proposal_status ?? 0);
+    const rawPr = this.parseProposalStatusRaw(projectAny);
     const hasWoForUi = !!(workOrder as any)?.wo_doc && String((workOrder as any).wo_doc).trim();
     const proposalUiStatus = rawPr === 2 ? 2 : rawPr === 1 ? 1 : hasWoForUi ? 1 : 0;
 
@@ -4240,7 +4370,7 @@ export class CompanyProjectsService {
       });
     }
 
-    const proposalStatus = Number((project as any).proposal_status ?? 0);
+    const proposalStatus = this.parseProposalStatusRaw(project as any);
     const hasProposalDoc = !!(project as any).proposal_document;
     const isLegacyAccepted =
       hasProposalDoc &&

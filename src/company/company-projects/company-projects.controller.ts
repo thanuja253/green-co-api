@@ -5,6 +5,7 @@ import {
   Header,
   Param,
   Patch,
+  Query,
   Post,
   Request,
   Res,
@@ -1165,6 +1166,47 @@ export class CompanyProjectsController {
         proposal_remarks: dto.remarks,
       },
     );
+  }
+
+  /**
+   * Proposal PDF metadata only (no `work_order` object). For iframe/PDF viewer + cache bust.
+   * GET /api/company/projects/:projectId/proposal-document/document
+   * `reupload_allowed`: true when latest work order was rejected by CII (`wo_status === 2`).
+   */
+  @Get(':projectId/proposal-document/document')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
+  async getProposalDocumentFileInfo(
+    @Request() req,
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.getProposalDocumentFileInfo(req.user.userId, projectId);
+  }
+
+  /**
+   * Stream proposal PDF (company). Use `document_url` from GET …/proposal-document/document (`?v=` cache bust).
+   * GET /api/company/projects/:projectId/proposal-document/file
+   */
+  @Get(':projectId/proposal-document/file')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
+  async getProposalDocumentFile(
+    @Request() req,
+    @Param('projectId') projectId: string,
+    @Query('v') _cacheBust: string | undefined,
+    @Res() res: Response,
+  ): Promise<void> {
+    const { fullPath, filename, ext } =
+      await this.companyProjectsService.getProposalDocumentLocalFilePathOrThrow(
+        req.user.userId,
+        projectId,
+      );
+    const contentTypes: Record<string, string> = {
+      '.pdf': 'application/pdf',
+      '.doc': 'application/msword',
+      '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    };
+    res.setHeader('Content-Type', contentTypes[ext] || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+    res.sendFile(fullPath);
   }
 
   /**
