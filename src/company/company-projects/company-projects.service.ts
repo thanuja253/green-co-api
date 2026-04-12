@@ -1590,15 +1590,15 @@ export class CompanyProjectsService {
       ) {
         return 1;
       }
-      // Launch & Training rows are stored with milestone_flow 63; map to step 7 so quickview
-      // next/latest math stays between coordinator assignment and PI (step 8), and never jumps to late milestones.
+      // Launch & Training rows use milestone_flow 63 — not a main-flow step (7 is Assign Coordinator).
+      // Return null so pipeline "latest completed" stays on real steps and activity rows are not mislabeled as step 7.
       const launchTrainingUpload =
         Number(rawFlow) === 63 ||
         (description.includes('launch') &&
           description.includes('training') &&
           (description.includes('uploaded') || description.includes('document')));
       if (launchTrainingUpload) {
-        return 7;
+        return null;
       }
 
       return Number.isFinite(rawFlow as number) ? rawFlow : null;
@@ -2036,7 +2036,8 @@ export class CompanyProjectsService {
     const ltSessionUploadSignal =
       launchTrainingDoneFromLaunchTrainingGet ||
       this.projectLaunchTrainingSessionsIndicateUpload(project as any);
-    // Pre–PI / payment (next_activities_id < 9). Do not require specific raw 6/7/8 — staging DBs use other values while L&T is still the gate.
+    // Pre–PI / payment: use merged next (same as milestone strip / profile), not raw DB next_activities_id.
+    // Raw id can be ≥9 while activities still cap displayed next at 8 — then the L&T headline must still apply.
     const atPostCoordinatorPrePi =
       hasCoordinatorAssigned &&
       (projectCodeAssigned || ltSessionUploadSignal) &&
@@ -2045,7 +2046,8 @@ export class CompanyProjectsService {
       !isProposalRejectedByCompany &&
       !isRecertifiedAndAtCloseOut &&
       !isAtCloseOutNoRecertify &&
-      nextActIdNumRaw < 9;
+      nextMilestoneNumber < 9 &&
+      latestCompletedMilestoneNumber < 8;
     if (atPostCoordinatorPrePi) {
       quickviewLaunchTrainingHeadline = true;
       latestStepDisplayName = 'Launch & Training (Site Visit Report) completed (Admin)';
@@ -2176,9 +2178,20 @@ export class CompanyProjectsService {
           created_at: (lastActivity as any).createdAt
             ? (lastActivity as any).createdAt.toISOString()
             : new Date().toISOString(),
-          milestone_flow:
-            normalizeMilestoneFlow(lastActivity) ||
-            ((project.next_activities_id || 1) - 1),
+          milestone_flow: (() => {
+            const n = normalizeMilestoneFlow(lastActivity);
+            if (n != null) return n;
+            if (Number((lastActivity as any)?.milestone_flow) === 63) return 63;
+            const ld = String((lastActivity as any)?.description || '').toLowerCase();
+            if (
+              ld.includes('launch') &&
+              ld.includes('training') &&
+              (ld.includes('uploaded') || ld.includes('document'))
+            ) {
+              return 63;
+            }
+            return (project.next_activities_id || 1) - 1;
+          })(),
           milestone_completed: lastActivity.milestone_completed || false,
         }
       : {
