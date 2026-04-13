@@ -16,6 +16,7 @@ import { SectorManagementModule } from './company/sector-management/sector-manag
 import { ParameterManagementModule } from './company/parameter-management/parameter-management.module';
 import { CreditManagementModule } from './company/credit-management/credit-management.module';
 import { AppController } from './app.controller';
+import { ScheduleModule } from '@nestjs/schedule';
 
 @Module({
   imports: [
@@ -34,6 +35,7 @@ import { AppController } from './app.controller';
       inject: [ConfigService],
     }),
     CompanyAuthModule,
+    ScheduleModule.forRoot(),
     CompanyProjectsModule,
     NotificationsModule,
     FacilitatorsModule,

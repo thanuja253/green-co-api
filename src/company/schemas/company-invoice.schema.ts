@@ -64,6 +64,59 @@ export class CompanyInvoice {
 
   @Prop()
   approved_at?: Date;
+
+  /** v2 finance form fields (new APIs) */
+  @Prop()
+  invoice_type?: 'proforma' | 'tax';
+
+  @Prop()
+  invoice_title?: string;
+
+  @Prop({ default: 0 })
+  sgst?: number;
+
+  @Prop({ default: 0 })
+  cgst?: number;
+
+  @Prop({ default: 0 })
+  igst?: number;
+
+  /** 0/1 toggle for every-15-days reminders */
+  @Prop({ default: 0 })
+  send_reminder?: number;
+
+  /** Optional recipient email override for reminders */
+  @Prop()
+  send_invoice_to?: string;
+
+  /** Next reminder due date for cron/manual reminder processing */
+  @Prop()
+  reminder_date?: Date;
+
+  @Prop()
+  last_reminder_sent_at?: Date;
+
+  /** Running paid amount against total_amount (v2) */
+  @Prop({ default: 0 })
+  paid_amount?: number;
+
+  /** Derived due amount = max(total_amount - paid_amount, 0) (v2) */
+  @Prop({ default: 0 })
+  due_amount?: number;
+
+  /** Unpaid | Partial | Paid */
+  @Prop({ default: 'Unpaid' })
+  outstanding_status?: string;
+
+  /** Reminder end policy (v2) */
+  @Prop({ default: 0 })
+  reminders_sent_count?: number;
+
+  @Prop()
+  max_reminders?: number;
+
+  @Prop()
+  reminder_end_date?: Date;
 }
 
 export const CompanyInvoiceSchema = SchemaFactory.createForClass(CompanyInvoice);

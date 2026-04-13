@@ -30,6 +30,10 @@ import {
 import { RegistrationInfoDto } from './dto/registration-info.dto';
 import { SubmitPaymentDto } from './dto/submit-payment.dto';
 import { UpdateInvoiceApprovalDto } from './dto/update-invoice-approval.dto';
+import { CreateProformaInvoiceV2Dto } from './dto/create-proforma-invoice-v2.dto';
+import { UpdateFinanceV2ReminderDto } from './dto/update-finance-v2-reminder.dto';
+import { SubmitFinanceV2PaymentDto } from './dto/submit-finance-v2-payment.dto';
+import { UpdateFinanceV2ApprovalDto } from './dto/update-finance-v2-approval.dto';
 import { CreateAssessorProfileDto } from './dto/create-assessor-profile.dto';
 import { ListAssessorsQueryDto } from './dto/list-assessors-query.dto';
 import { ReportsQueryDto } from './dto/reports-query.dto';
@@ -43,6 +47,7 @@ import type { Response } from 'express';
 import { getCertificationType } from '../../helpers/certification.helper';
 import { NotificationsService } from '../notifications/notifications.service';
 import { MailService } from '../../mail/mail.service';
+import { Cron, CronExpression } from '@nestjs/schedule';
 
 /** View Certificate score band: 9 rows × 20 numbers (points bands 1–10 … 191–200). Normalize so frontend always gets number[][]. */
 function normalizeScoreBandRows(rows: any[]): number[][] {
@@ -222,6 +227,7 @@ export type RegistrationFileDownload =
 /** Approval status labels and colours for invoice UI (COMPANY_APPROVAL_STATUS / APPROVAL_STATUS_COLORS) */
 export const INVOICE_APPROVAL_STATUS = ['Pending', 'Approved', 'Rejected', 'Under Review'];
 export const INVOICE_APPROVAL_STATUS_COLORS = ['warning', 'success', 'danger', 'info'];
+const FINANCE_V2_REMINDER_INTERVAL_DAYS = 15;
 
 @Injectable()
 export class CompanyProjectsService {
@@ -260,6 +266,35 @@ export class CompanyProjectsService {
     private readonly notificationsService: NotificationsService,
     private readonly mailService: MailService,
   ) {}
+
+  private isTransientMongoConnectivityError(error: unknown): boolean {
+    const msg = String((error as any)?.message || '');
+    return (
+      msg.includes('MongoServerSelectionError') ||
+      msg.includes('ECONNREFUSED') ||
+      msg.includes('EAI_AGAIN') ||
+      msg.includes('timed out') ||
+      msg.includes('Server selection timed out')
+    );
+  }
+
+  private async withFinanceV2MongoRetry<T>(operation: () => Promise<T>): Promise<T> {
+    const maxAttempts = 3; // first try + 2 retries
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return await operation();
+      } catch (error) {
+        lastError = error;
+        if (!this.isTransientMongoConnectivityError(error) || attempt === maxAttempts) {
+          throw error;
+        }
+        const delayMs = attempt * 700;
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+    throw lastError as any;
+  }
 
   private getRegistrationGridfsBucket(): GridFSBucket {
     const db = this.mongoConnection.db;
@@ -3359,13 +3394,18 @@ export class CompanyProjectsService {
       .sort({ createdAt: -1 });
 
     const woRejected = latestWo != null && isWorkOrderRejected(latestWo.wo_status);
+    /** No WO row yet, or WO row exists but status not set (e.g. proposal rejected before WO flow) — still allow CII to replace the PDF. */
+    const noWorkOrderRow = latestWo == null;
+    const woStatusUnset =
+      latestWo != null &&
+      (latestWo.wo_status === null || latestWo.wo_status === undefined);
 
-    if (!woRejected) {
+    if (!woRejected && !noWorkOrderRow && !woStatusUnset) {
       throw new BadRequestException({
         status: 'error',
         code: 'PROPOSAL_REUPLOAD_NOT_ALLOWED',
         message:
-          'Proposal reupload is only allowed when the latest work order is rejected (wo_status = 2) — the same state as proposal_badge_label "Rejected by company" on GET …/proposal-workorder-documents. First upload: POST …/proposal-document.',
+          'Proposal reupload is allowed when there is no work order yet, work order status is unset, or the latest work order is rejected (wo_status = 2). If a work order is pending review, use POST …/proposal-document instead.',
         data: {
           latest_wo_status: latestWo?.wo_status ?? null,
           documents_path: `GET /api/company/projects/${projectId}/proposal-workorder-documents`,
@@ -3498,6 +3538,12 @@ export class CompanyProjectsService {
     const woStatus = woAny != null ? (woAny.wo_status ?? null) : null;
     const woRemarks = woAny?.wo_remarks ?? null;
     const woRejected = isWorkOrderRejected(woStatus);
+    const noWorkOrderRow = latestWoLean == null;
+    const woStatusUnset =
+      latestWoLean != null &&
+      (woAny?.wo_status === null || woAny?.wo_status === undefined);
+    const canReplaceProposalPdf =
+      woRejected || noWorkOrderRow || woStatusUnset;
 
     if (!project.proposal_document) {
       return {
@@ -3610,8 +3656,8 @@ export class CompanyProjectsService {
                 null,
             }
           : null,
-        /** True when CII may call POST/PUT/PATCH …/proposal-document/reupload (latest WO rejected). */
-        can_replace_proposal: woRejected,
+        /** True when CII may call POST/PUT/PATCH …/proposal-document/reupload (no WO / unset WO status / WO rejected). */
+        can_replace_proposal: canReplaceProposalPdf,
       },
     };
   }
@@ -3660,9 +3706,14 @@ export class CompanyProjectsService {
     const woAny = latestWoLean as any;
     const woStatus = woAny != null ? (woAny.wo_status ?? null) : null;
     const woRejected = isWorkOrderRejected(woStatus);
+    const noWorkOrderRow = latestWoLean == null;
+    const woStatusUnset =
+      latestWoLean != null &&
+      (woAny?.wo_status === null || woAny?.wo_status === undefined);
 
     const proposalRaw = String((project as any).proposal_document || '').trim();
-    const reupload_allowed = Boolean(proposalRaw) && woRejected;
+    const reupload_allowed =
+      Boolean(proposalRaw) && (woRejected || noWorkOrderRow || woStatusUnset);
 
     if (!proposalRaw) {
       return {
@@ -3980,8 +4031,14 @@ export class CompanyProjectsService {
 
     const woRejected =
       workOrderAny != null && isWorkOrderRejected(workOrderAny.wo_status);
-    const proposalReuploadEligible = Boolean(hasProposalDoc) && woRejected;
-    const proposal_badge_label = proposalReuploadEligible ? 'Rejected by company' : null;
+    const noWorkOrderRow = workOrderAny == null;
+    const woStatusUnset =
+      workOrderAny != null &&
+      (workOrderAny.wo_status === null || workOrderAny.wo_status === undefined);
+    const proposalReuploadEligible =
+      Boolean(hasProposalDoc) && (woRejected || noWorkOrderRow || woStatusUnset);
+    const proposal_badge_label =
+      hasProposalDoc && woRejected ? 'Rejected by company' : null;
     const proposalReuploadPath = `/api/company/projects/${projectId}/proposal-document/reupload`;
     const proposalUploadHints = {
       proposal_badge_label,
@@ -5061,6 +5118,532 @@ export class CompanyProjectsService {
     }
 
     return { status: 'success', message: 'Assignment details retrieved successfully', data: response };
+  }
+
+  /**
+   * Finance v2 (new API family): list Proforma/Tax invoices created by `/finance-v2/proforma-invoices`.
+   */
+  async getFinanceV2InvoicesByProjectId(projectId: string) {
+    return this.withFinanceV2MongoRetry(async () => {
+      const resolved = await this.resolveProjectForAdmin(projectId);
+      if (!resolved?.company_id) {
+        throw new NotFoundException({ status: 'error', message: 'Project not found' });
+      }
+      return this.getFinanceV2Invoices(String(resolved.company_id), String(resolved._id));
+    });
+  }
+
+  async getFinanceV2Invoices(companyId: string, projectId: string) {
+    const project = await this.projectModel.findOne({ _id: projectId, company_id: companyId }).lean();
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const invoices = await this.companyInvoiceModel
+      .find({
+        company_id: companyId,
+        project_id: projectId,
+        invoice_type: { $in: ['proforma', 'tax'] },
+      })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(/\/+$/, '');
+    const toUrl = (path: string | undefined) => {
+      if (!path) return null;
+      return path.startsWith('http') ? path : `${baseUrl}/${path.replace(/^\/+/, '')}`;
+    };
+
+    return {
+      status: 'success',
+      message: 'Finance v2 invoices retrieved',
+      data: {
+        invoices: invoices.map((inv: any) => ({
+          id: String(inv._id),
+          invoice_type: inv.invoice_type ?? (inv.payment_for === PAYMENT_FOR_TAX ? 'tax' : 'proforma'),
+          invoice_title: inv.invoice_title ?? null,
+          invoice_document: toUrl(inv.invoice_document),
+          invoice_document_filename: inv.invoice_document_filename ?? null,
+          payable_amount: Number(inv.payable_amount ?? 0),
+          sgst: Number(inv.sgst ?? 0),
+          cgst: Number(inv.cgst ?? 0),
+          igst: Number(inv.igst ?? 0),
+          tax_amount: Number(inv.tax_amount ?? 0),
+          total_amount: Number(inv.total_amount ?? 0),
+          send_reminder: Number(inv.send_reminder ?? 0),
+          send_invoice_to: inv.send_invoice_to ?? null,
+          reminder_date: inv.reminder_date?.toISOString?.() ?? null,
+          last_reminder_sent_at: inv.last_reminder_sent_at?.toISOString?.() ?? null,
+          payment_status: Number(inv.payment_status ?? 0),
+          paid_amount: Number(inv.paid_amount ?? 0),
+          due_amount: Number(
+            inv.due_amount ??
+              Math.max(0, Number(inv.total_amount ?? 0) - Number(inv.paid_amount ?? 0)),
+          ),
+          outstanding_status: inv.outstanding_status ?? 'Unpaid',
+          approval_status: Number(inv.approval_status ?? 0),
+          approval_status_label: INVOICE_APPROVAL_STATUS[inv.approval_status ?? 0] ?? 'Pending',
+          reminders_sent_count: Number(inv.reminders_sent_count ?? 0),
+          max_reminders: inv.max_reminders ?? null,
+          reminder_end_date: inv.reminder_end_date?.toISOString?.() ?? null,
+          created_at: inv.createdAt,
+          updated_at: inv.updatedAt,
+        })),
+      },
+    };
+  }
+
+  /**
+   * Finance v2 (new API family): create Proforma/Tax invoice with tax split + reminder settings.
+   */
+  async createFinanceV2InvoiceByProjectId(
+    projectId: string,
+    dto: CreateProformaInvoiceV2Dto,
+    file: Express.Multer.File,
+  ) {
+    return this.withFinanceV2MongoRetry(async () => {
+      const resolved = await this.resolveProjectForAdmin(projectId);
+      if (!resolved?.company_id) {
+        throw new NotFoundException({ status: 'error', message: 'Project not found' });
+      }
+      return this.createFinanceV2Invoice(String(resolved.company_id), String(resolved._id), dto, file);
+    });
+  }
+
+  async createFinanceV2Invoice(
+    companyId: string,
+    projectId: string,
+    dto: CreateProformaInvoiceV2Dto,
+    file: Express.Multer.File,
+  ) {
+    const project = await this.projectModel.findOne({ _id: projectId, company_id: companyId });
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const paymentFor = dto.invoice_type === 'tax' ? PAYMENT_FOR_TAX : PAYMENT_FOR_PROFORMA;
+    const payable = Number(dto.payable_amount);
+    const sgst = Number(dto.sgst);
+    const cgst = Number(dto.cgst);
+    const igst = Number(dto.igst);
+    const taxAmount = sgst + cgst + igst;
+    const totalAmount = payable + taxAmount;
+
+    // Guard duplicate active Proforma rows (new API business rule).
+    if (paymentFor === PAYMENT_FOR_PROFORMA) {
+      const duplicate = await this.companyInvoiceModel.findOne({
+        company_id: companyId,
+        project_id: projectId,
+        invoice_type: 'proforma',
+        approval_status: { $in: [0, 3] }, // Pending/Under Review
+      });
+      if (duplicate) {
+        throw new BadRequestException({
+          status: 'error',
+          message: 'An active Proforma invoice already exists for this project.',
+        });
+      }
+    }
+
+    const relativePath = `uploads/company/${companyId}/finance-v2/${file.filename}`;
+    const reminderDate =
+      Number(dto.send_reminder) === 1
+        ? new Date(Date.now() + FINANCE_V2_REMINDER_INTERVAL_DAYS * 24 * 60 * 60 * 1000)
+        : null;
+
+    const invoice = await this.companyInvoiceModel.create({
+      company_id: companyId,
+      project_id: projectId,
+      payment_for: paymentFor,
+      invoice_type: dto.invoice_type,
+      invoice_title: dto.invoice_title,
+      invoice_document: relativePath,
+      invoice_document_filename: file.originalname,
+      payable_amount: payable,
+      sgst,
+      cgst,
+      igst,
+      tax_amount: taxAmount,
+      total_amount: totalAmount,
+      send_reminder: Number(dto.send_reminder),
+      send_invoice_to: dto.send_invoice_to ?? undefined,
+      reminder_date: reminderDate,
+      payment_status: 0,
+      approval_status: 0,
+      paid_amount: 0,
+      due_amount: totalAmount,
+      outstanding_status: 'Unpaid',
+      reminders_sent_count: 0,
+    });
+
+    // Optional initial reminder email right after create when toggle is ON.
+    if (Number(dto.send_reminder) === 1) {
+      await this.dispatchFinanceV2Reminder(invoice as any).catch((e) =>
+        console.error('[Finance v2] Initial reminder send failed:', e?.message || e),
+      );
+    }
+
+    const list = await this.getFinanceV2Invoices(companyId, projectId);
+    return {
+      status: 'success',
+      message: 'Finance v2 invoice created successfully',
+      data: {
+        invoice_id: String((invoice as any)._id),
+        reminder_date: reminderDate?.toISOString?.() ?? null,
+        invoices: list.data.invoices,
+      },
+    };
+  }
+
+  /**
+   * Finance v2 reminders: process all due reminders for one project.
+   * Intended for manual trigger or external cron hit (daily).
+   */
+  async processFinanceV2RemindersForProject(companyId: string, projectId: string) {
+    const project = await this.projectModel.findOne({ _id: projectId, company_id: companyId }).lean();
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const now = new Date();
+    const dueInvoices = await this.companyInvoiceModel.find({
+      company_id: companyId,
+      project_id: projectId,
+      invoice_type: { $in: ['proforma', 'tax'] },
+      send_reminder: 1,
+      payment_status: { $ne: 1 }, // unpaid
+      due_amount: { $gt: 0 },
+      reminder_date: { $lte: now },
+      $or: [{ reminder_end_date: null }, { reminder_end_date: { $exists: false } }, { reminder_end_date: { $gte: now } }],
+    });
+
+    let processed = 0;
+    for (const inv of dueInvoices as any[]) {
+      const maxReminders = Number(inv.max_reminders ?? 0);
+      const sentCount = Number(inv.reminders_sent_count ?? 0);
+      if (maxReminders > 0 && sentCount >= maxReminders) {
+        continue;
+      }
+      await this.dispatchFinanceV2Reminder(inv);
+      inv.last_reminder_sent_at = now;
+      inv.reminder_date = new Date(
+        now.getTime() + FINANCE_V2_REMINDER_INTERVAL_DAYS * 24 * 60 * 60 * 1000,
+      );
+      inv.reminders_sent_count = sentCount + 1;
+      await inv.save();
+      processed += 1;
+    }
+
+    return {
+      status: 'success',
+      message: 'Finance v2 reminders processed',
+      data: { project_id: projectId, processed, next_cycle_days: FINANCE_V2_REMINDER_INTERVAL_DAYS },
+    };
+  }
+
+  async processFinanceV2RemindersForProjectByProjectId(projectId: string) {
+    return this.withFinanceV2MongoRetry(async () => {
+      const resolved = await this.resolveProjectForAdmin(projectId);
+      if (!resolved?.company_id) {
+        throw new NotFoundException({ status: 'error', message: 'Project not found' });
+      }
+      return this.processFinanceV2RemindersForProject(
+        String(resolved.company_id),
+        String(resolved._id),
+      );
+    });
+  }
+
+  /**
+   * Finance v2 reminders: send one reminder immediately for one invoice (new API).
+   */
+  async sendFinanceV2ReminderNow(companyId: string, projectId: string, invoiceId: string) {
+    const invoice = await this.companyInvoiceModel.findOne({
+      _id: invoiceId,
+      company_id: companyId,
+      project_id: projectId,
+      invoice_type: { $in: ['proforma', 'tax'] },
+    });
+    if (!invoice) {
+      throw new NotFoundException({ status: 'error', message: 'Invoice not found' });
+    }
+    await this.dispatchFinanceV2Reminder(invoice as any);
+    const now = new Date();
+    const sentCount = Number((invoice as any).reminders_sent_count ?? 0);
+    (invoice as any).last_reminder_sent_at = now;
+    (invoice as any).reminder_date = new Date(
+      now.getTime() + FINANCE_V2_REMINDER_INTERVAL_DAYS * 24 * 60 * 60 * 1000,
+    );
+    (invoice as any).reminders_sent_count = sentCount + 1;
+    await invoice.save();
+    return {
+      status: 'success',
+      message: 'Reminder sent successfully',
+      data: {
+        invoice_id: String((invoice as any)._id),
+        reminder_date: (invoice as any).reminder_date?.toISOString?.() ?? null,
+        last_reminder_sent_at: (invoice as any).last_reminder_sent_at?.toISOString?.() ?? null,
+        reminders_sent_count: Number((invoice as any).reminders_sent_count ?? 0),
+      },
+    };
+  }
+
+  async sendFinanceV2ReminderNowByProjectId(projectId: string, invoiceId: string) {
+    return this.withFinanceV2MongoRetry(async () => {
+      const resolved = await this.resolveProjectForAdmin(projectId);
+      if (!resolved?.company_id) {
+        throw new NotFoundException({ status: 'error', message: 'Project not found' });
+      }
+      return this.sendFinanceV2ReminderNow(
+        String(resolved.company_id),
+        String(resolved._id),
+        invoiceId,
+      );
+    });
+  }
+
+  async updateFinanceV2ReminderSettings(
+    companyId: string,
+    projectId: string,
+    invoiceId: string,
+    dto: UpdateFinanceV2ReminderDto,
+  ) {
+    const invoice = await this.companyInvoiceModel.findOne({
+      _id: invoiceId,
+      company_id: companyId,
+      project_id: projectId,
+      invoice_type: { $in: ['proforma', 'tax'] },
+    });
+    if (!invoice) {
+      throw new NotFoundException({ status: 'error', message: 'Invoice not found' });
+    }
+    const now = new Date();
+    (invoice as any).send_reminder = Number(dto.send_reminder);
+    (invoice as any).send_invoice_to = dto.send_invoice_to ?? (invoice as any).send_invoice_to;
+    (invoice as any).max_reminders =
+      dto.max_reminders != null ? Number(dto.max_reminders) : (invoice as any).max_reminders;
+    (invoice as any).reminder_end_date =
+      dto.reminder_end_date != null
+        ? new Date(dto.reminder_end_date)
+        : (invoice as any).reminder_end_date;
+    if (Number(dto.send_reminder) === 1 && !(invoice as any).reminder_date) {
+      (invoice as any).reminder_date = new Date(
+        now.getTime() + FINANCE_V2_REMINDER_INTERVAL_DAYS * 24 * 60 * 60 * 1000,
+      );
+    }
+    if (Number(dto.send_reminder) === 0) {
+      (invoice as any).reminder_date = null;
+    }
+    await invoice.save();
+    return {
+      status: 'success',
+      message: 'Reminder settings updated',
+      data: {
+        invoice_id: String((invoice as any)._id),
+        send_reminder: Number((invoice as any).send_reminder ?? 0),
+        reminder_date: (invoice as any).reminder_date?.toISOString?.() ?? null,
+        max_reminders: (invoice as any).max_reminders ?? null,
+        reminder_end_date: (invoice as any).reminder_end_date?.toISOString?.() ?? null,
+      },
+    };
+  }
+
+  async updateFinanceV2ReminderSettingsByProjectId(
+    projectId: string,
+    invoiceId: string,
+    dto: UpdateFinanceV2ReminderDto,
+  ) {
+    return this.withFinanceV2MongoRetry(async () => {
+      const resolved = await this.resolveProjectForAdmin(projectId);
+      if (!resolved?.company_id) {
+        throw new NotFoundException({ status: 'error', message: 'Project not found' });
+      }
+      return this.updateFinanceV2ReminderSettings(
+        String(resolved.company_id),
+        String(resolved._id),
+        invoiceId,
+        dto,
+      );
+    });
+  }
+
+  async submitFinanceV2Payment(
+    companyId: string,
+    projectId: string,
+    invoiceId: string,
+    dto: SubmitFinanceV2PaymentDto,
+    file?: Express.Multer.File,
+  ) {
+    const invoice = await this.companyInvoiceModel.findOne({
+      _id: invoiceId,
+      company_id: companyId,
+      project_id: projectId,
+      invoice_type: { $in: ['proforma', 'tax'] },
+    });
+    if (!invoice) {
+      throw new NotFoundException({ status: 'error', message: 'Invoice not found' });
+    }
+    if (dto.payment_type === 'Offline') {
+      if (!dto.trans_id?.trim()) {
+        throw new BadRequestException({
+          status: 'error',
+          message: 'Transaction ID is required when payment mode is Offline',
+        });
+      }
+      if (!file) {
+        throw new BadRequestException({
+          status: 'error',
+          message: 'Supporting document is required when payment mode is Offline',
+        });
+      }
+    }
+    const total = Number((invoice as any).total_amount ?? 0);
+    const alreadyPaid = Number((invoice as any).paid_amount ?? 0);
+    const addPaid = Number(dto.paid_amount ?? 0);
+    const nextPaid = alreadyPaid + addPaid;
+    if (nextPaid - total > 1e-6) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Paid amount cannot exceed total amount.',
+      });
+    }
+
+    const relativePath = file ? `uploads/company/${companyId}/finance-v2-payments/${file.filename}` : undefined;
+    (invoice as any).payment_type = dto.payment_type;
+    (invoice as any).trans_id = dto.payment_type === 'Offline' ? dto.trans_id?.trim() : undefined;
+    if (relativePath) {
+      (invoice as any).offline_tran_doc = relativePath;
+      (invoice as any).offline_tran_doc_filename = file!.originalname;
+    }
+    (invoice as any).paid_amount = nextPaid;
+    const due = Math.max(0, Number((invoice as any).total_amount ?? 0) - nextPaid);
+    (invoice as any).due_amount = due;
+    (invoice as any).outstanding_status = due <= 0 ? 'Paid' : nextPaid > 0 ? 'Partial' : 'Unpaid';
+    (invoice as any).payment_status = due <= 0 ? 1 : 0;
+    (invoice as any).approval_status = 0;
+    if (dto.remarks) (invoice as any).remarks = dto.remarks;
+    await invoice.save();
+
+    return {
+      status: 'success',
+      message: 'Finance v2 payment submitted successfully',
+      data: {
+        invoice_id: String((invoice as any)._id),
+        payment_status: Number((invoice as any).payment_status ?? 0),
+        approval_status: Number((invoice as any).approval_status ?? 0),
+        paid_amount: Number((invoice as any).paid_amount ?? 0),
+        due_amount: Number((invoice as any).due_amount ?? 0),
+        outstanding_status: (invoice as any).outstanding_status ?? 'Unpaid',
+      },
+    };
+  }
+
+  async submitFinanceV2PaymentByProjectId(
+    projectId: string,
+    invoiceId: string,
+    dto: SubmitFinanceV2PaymentDto,
+    file?: Express.Multer.File,
+  ) {
+    return this.withFinanceV2MongoRetry(async () => {
+      const resolved = await this.resolveProjectForAdmin(projectId);
+      if (!resolved?.company_id) {
+        throw new NotFoundException({ status: 'error', message: 'Project not found' });
+      }
+      return this.submitFinanceV2Payment(
+        String(resolved.company_id),
+        String(resolved._id),
+        invoiceId,
+        dto,
+        file,
+      );
+    });
+  }
+
+  async updateFinanceV2Approval(
+    companyId: string,
+    projectId: string,
+    invoiceId: string,
+    dto: UpdateFinanceV2ApprovalDto,
+  ) {
+    const invoice = await this.companyInvoiceModel.findOne({
+      _id: invoiceId,
+      company_id: companyId,
+      project_id: projectId,
+      invoice_type: { $in: ['proforma', 'tax'] },
+    });
+    if (!invoice) {
+      throw new NotFoundException({ status: 'error', message: 'Invoice not found' });
+    }
+    (invoice as any).approval_status = Number(dto.approval_status);
+    (invoice as any).remarks = dto.remarks;
+    (invoice as any).approved_at = new Date();
+    await invoice.save();
+    return {
+      status: 'success',
+      message: 'Finance v2 approval updated',
+      data: {
+        invoice_id: String((invoice as any)._id),
+        approval_status: Number((invoice as any).approval_status ?? 0),
+        approval_status_label:
+          INVOICE_APPROVAL_STATUS[Number((invoice as any).approval_status ?? 0)] ?? 'Pending',
+        remarks: (invoice as any).remarks ?? null,
+      },
+    };
+  }
+
+  async updateFinanceV2ApprovalByProjectId(
+    projectId: string,
+    invoiceId: string,
+    dto: UpdateFinanceV2ApprovalDto,
+  ) {
+    return this.withFinanceV2MongoRetry(async () => {
+      const resolved = await this.resolveProjectForAdmin(projectId);
+      if (!resolved?.company_id) {
+        throw new NotFoundException({ status: 'error', message: 'Project not found' });
+      }
+      return this.updateFinanceV2Approval(
+        String(resolved.company_id),
+        String(resolved._id),
+        invoiceId,
+        dto,
+      );
+    });
+  }
+
+  @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
+  async processFinanceV2ReminderCronDaily() {
+    const now = new Date();
+    const dueInvoices = await this.companyInvoiceModel.find({
+      invoice_type: { $in: ['proforma', 'tax'] },
+      send_reminder: 1,
+      payment_status: { $ne: 1 },
+      due_amount: { $gt: 0 },
+      reminder_date: { $lte: now },
+      $or: [{ reminder_end_date: null }, { reminder_end_date: { $exists: false } }, { reminder_end_date: { $gte: now } }],
+    });
+    for (const inv of dueInvoices as any[]) {
+      const maxReminders = Number(inv.max_reminders ?? 0);
+      const sentCount = Number(inv.reminders_sent_count ?? 0);
+      if (maxReminders > 0 && sentCount >= maxReminders) continue;
+      await this.dispatchFinanceV2Reminder(inv).catch((e) =>
+        console.error('[Finance v2 cron] Reminder send failed:', e?.message || e),
+      );
+      inv.last_reminder_sent_at = now;
+      inv.reminders_sent_count = sentCount + 1;
+      inv.reminder_date = new Date(
+        now.getTime() + FINANCE_V2_REMINDER_INTERVAL_DAYS * 24 * 60 * 60 * 1000,
+      );
+      await inv.save();
+    }
+  }
+
+  private async dispatchFinanceV2Reminder(invoice: any): Promise<void> {
+    const company = await this.companyModel.findById(invoice.company_id).lean();
+    const recipientEmail = invoice.send_invoice_to || company?.email;
+    if (!recipientEmail) return;
+    const recipientName = company?.name || 'Company';
+    const invoiceType =
+      invoice.invoice_type === 'tax' ? 'Tax Invoice' : 'Proforma Invoice';
+    await this.mailService.sendPaymentReminderEmail(recipientEmail, recipientName, invoiceType);
   }
 
   /**

@@ -38,6 +38,10 @@ import { AssignAssessorDto } from './dto/assign-assessor.dto';
 import { AssignFacilitatorDto } from './dto/assign-facilitator.dto';
 import { SubmitPaymentDto } from './dto/submit-payment.dto';
 import { UpdateInvoiceApprovalDto } from './dto/update-invoice-approval.dto';
+import { CreateProformaInvoiceV2Dto } from './dto/create-proforma-invoice-v2.dto';
+import { UpdateFinanceV2ReminderDto } from './dto/update-finance-v2-reminder.dto';
+import { SubmitFinanceV2PaymentDto } from './dto/submit-finance-v2-payment.dto';
+import { UpdateFinanceV2ApprovalDto } from './dto/update-finance-v2-approval.dto';
 import { UploadLaunchAndTrainingDto } from './dto/upload-launch-and-training.dto';
 import { PrimaryDataStoreDto } from './dto/primary-data-store.dto';
 import { PrimaryDataFormApprovalDto } from './dto/primary-data-approval.dto';
@@ -539,7 +543,7 @@ export class CompanyProjectsController {
   }
 
   /**
-   * **Proposal reupload (CII)** — use for the “Reupload” button when work order is rejected (same gate as badge `"Rejected by company"`).
+   * **Proposal reupload (CII)** — allowed when there is **no** work-order row, WO **status is unset**, or latest WO is **rejected** (`wo_status = 2`). Same flags as `proposal_reupload_path` / `can_replace_proposal` on GET combined/proposal-document.
    *
    * **Client flow**
    * 1. `POST|PUT|PATCH` this URL with `multipart/form-data` and field `proposal_document` | `proposalDocument` | `file` (PDF).
@@ -1276,6 +1280,155 @@ export class CompanyProjectsController {
       section,
       file,
     );
+  }
+
+  /**
+   * Finance v2 (new API): create/list Proforma/Tax invoice rows with SGST/CGST/IGST + reminder settings.
+   * These endpoints are separate from legacy `/invoices/*` APIs.
+   */
+  @Get(':projectId/finance-v2/proforma-invoices')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+  async getFinanceV2Invoices(
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.getFinanceV2InvoicesByProjectId(projectId);
+  }
+
+  @Post(':projectId/finance-v2/proforma-invoices')
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  @UseInterceptors(
+    FileInterceptor('invoice_document', {
+      storage: diskStorage({
+        destination: (req, file, cb) => {
+          const projectId = (req as any).params?.projectId || 'unknown';
+          const uploadPath = join(process.cwd(), 'uploads', 'company', projectId, 'finance-v2');
+          if (!fs.existsSync(uploadPath)) {
+            fs.mkdirSync(uploadPath, { recursive: true });
+          }
+          cb(null, uploadPath);
+        },
+        filename: (req, file, cb) => {
+          const ext = extname(file.originalname);
+          cb(null, `finance-v2-${Date.now()}${ext}`);
+        },
+      }),
+      limits: { fileSize: 10 * 1024 * 1024 },
+      fileFilter: (req, file, cb) => {
+        const allowed = [
+          'application/pdf',
+          'image/jpeg',
+          'image/jpg',
+          'image/png',
+        ];
+        if (allowed.includes(file.mimetype)) {
+          cb(null, true);
+        } else {
+          cb(new Error('Invoice document must be PDF, JPG, JPEG or PNG.'), false);
+        }
+      },
+    }),
+  )
+  async createFinanceV2Invoice(
+    @Param('projectId') projectId: string,
+    @Body() dto: CreateProformaInvoiceV2Dto,
+    @UploadedFile() file: Express.Multer.File,
+  ): Promise<any> {
+    if (!file) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'No file uploaded. Use field name "invoice_document".',
+      });
+    }
+    return this.companyProjectsService.createFinanceV2InvoiceByProjectId(projectId, dto, file);
+  }
+
+  @Patch(':projectId/finance-v2/proforma-invoices/:invoiceId/reminder-settings')
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  async updateFinanceV2ReminderSettings(
+    @Param('projectId') projectId: string,
+    @Param('invoiceId') invoiceId: string,
+    @Body() dto: UpdateFinanceV2ReminderDto,
+  ): Promise<any> {
+    return this.companyProjectsService.updateFinanceV2ReminderSettingsByProjectId(
+      projectId,
+      invoiceId,
+      dto,
+    );
+  }
+
+  @Post(':projectId/finance-v2/proforma-invoices/:invoiceId/submit-payment')
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  @UseInterceptors(
+    FileInterceptor('supportingdocument', {
+      storage: diskStorage({
+        destination: (req, file, cb) => {
+          const projectId = (req as any).params?.projectId || 'unknown';
+          const uploadPath = join(process.cwd(), 'uploads', 'company', projectId, 'finance-v2-payments');
+          if (!fs.existsSync(uploadPath)) {
+            fs.mkdirSync(uploadPath, { recursive: true });
+          }
+          cb(null, uploadPath);
+        },
+        filename: (req, file, cb) => {
+          const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+          const ext = extname(file.originalname);
+          cb(null, `finance-v2-payment-${uniqueSuffix}${ext}`);
+        },
+      }),
+      limits: { fileSize: 10 * 1024 * 1024 },
+      fileFilter: (req, file, cb) => {
+        const allowed = ['application/pdf', 'image/jpeg', 'image/jpg', 'image/png'];
+        if (allowed.includes(file.mimetype)) cb(null, true);
+        else cb(new Error('Supporting document must be PDF, JPG, JPEG or PNG.'), false);
+      },
+    }),
+  )
+  async submitFinanceV2Payment(
+    @Param('projectId') projectId: string,
+    @Param('invoiceId') invoiceId: string,
+    @Body() dto: SubmitFinanceV2PaymentDto,
+    @UploadedFile() file?: Express.Multer.File,
+  ): Promise<any> {
+    return this.companyProjectsService.submitFinanceV2PaymentByProjectId(
+      projectId,
+      invoiceId,
+      dto,
+      file,
+    );
+  }
+
+  @Patch(':projectId/finance-v2/proforma-invoices/:invoiceId/approval')
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  async updateFinanceV2Approval(
+    @Param('projectId') projectId: string,
+    @Param('invoiceId') invoiceId: string,
+    @Body() dto: UpdateFinanceV2ApprovalDto,
+  ): Promise<any> {
+    return this.companyProjectsService.updateFinanceV2ApprovalByProjectId(
+      projectId,
+      invoiceId,
+      dto,
+    );
+  }
+
+  /**
+   * Finance v2 reminders (new API):
+   * - send pending reminders due as of now (+15 day rollover)
+   * - trigger one invoice reminder immediately
+   */
+  @Post(':projectId/finance-v2/proforma-invoices/reminders/process')
+  async processFinanceV2Reminders(
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.processFinanceV2RemindersForProjectByProjectId(projectId);
+  }
+
+  @Post(':projectId/finance-v2/proforma-invoices/:invoiceId/reminder/send-now')
+  async sendFinanceV2ReminderNow(
+    @Param('projectId') projectId: string,
+    @Param('invoiceId') invoiceId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.sendFinanceV2ReminderNowByProjectId(projectId, invoiceId);
   }
 
   /**
