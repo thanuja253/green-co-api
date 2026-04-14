@@ -13,9 +13,10 @@ export class SubmitFinanceV2PaymentDto {
   trans_id?: string;
 
   @Type(() => Number)
+  @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0.01)
-  paid_amount: number;
+  paid_amount?: number;
 
   @IsOptional()
   @IsString()

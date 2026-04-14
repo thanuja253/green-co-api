@@ -123,6 +123,42 @@ export class CompanyProject {
   /** When this project was used as source for recertification, the new project id (so quickview can show "open new project" instead of step 24). */
   @Prop({ type: MongooseSchema.Types.ObjectId, required: false })
   recertification_project_id?: MongooseSchema.Types.ObjectId;
+
+  /** Plaque dispatch details captured from Add Plaque form. */
+  @Prop({
+    type: {
+      contact_person: { type: String, default: '' },
+      designation: { type: String, default: '' },
+      mobile: { type: String, default: '' },
+      company_name: { type: String, default: '' },
+      address: { type: String, default: '' },
+    },
+    default: null,
+  })
+  plaque_details?: {
+    contact_person: string;
+    designation: string;
+    mobile: string;
+    company_name: string;
+    address: string;
+  } | null;
+
+  /** Outstanding details captured from Finance > Outstanding form. */
+  @Prop({
+    type: {
+      outstanding_amount: { type: Number, default: 0 },
+      date: { type: Date, default: null },
+      remarks: { type: String, default: '' },
+      status: { type: String, default: 'Unpaid' },
+    },
+    default: null,
+  })
+  outstanding_details?: {
+    outstanding_amount: number;
+    date: Date | null;
+    remarks: string;
+    status: 'Unpaid' | 'Partial' | 'Paid';
+  } | null;
 }
 
 export const CompanyProjectSchema = SchemaFactory.createForClass(CompanyProject);

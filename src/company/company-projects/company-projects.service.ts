@@ -34,6 +34,8 @@ import { CreateProformaInvoiceV2Dto } from './dto/create-proforma-invoice-v2.dto
 import { UpdateFinanceV2ReminderDto } from './dto/update-finance-v2-reminder.dto';
 import { SubmitFinanceV2PaymentDto } from './dto/submit-finance-v2-payment.dto';
 import { UpdateFinanceV2ApprovalDto } from './dto/update-finance-v2-approval.dto';
+import { UpsertPlaqueDetailsDto } from './dto/upsert-plaque-details.dto';
+import { UpsertOutstandingDetailsDto } from './dto/upsert-outstanding-details.dto';
 import { CreateAssessorProfileDto } from './dto/create-assessor-profile.dto';
 import { ListAssessorsQueryDto } from './dto/list-assessors-query.dto';
 import { ReportsQueryDto } from './dto/reports-query.dto';
@@ -5504,7 +5506,21 @@ export class CompanyProjectsService {
     }
     const total = Number((invoice as any).total_amount ?? 0);
     const alreadyPaid = Number((invoice as any).paid_amount ?? 0);
-    const addPaid = Number(dto.paid_amount ?? 0);
+    const dueBefore = Math.max(0, total - alreadyPaid);
+    const rawPaid = dto.paid_amount;
+    const paidAmountProvided = rawPaid != null && !Number.isNaN(Number(rawPaid));
+    // Backward compatibility: old clients submit only mode/trans_id/file.
+    // When paid_amount is missing, treat it as full due payment.
+    const addPaid =
+      !paidAmountProvided
+        ? dueBefore
+        : Number(rawPaid);
+    if (addPaid <= 0 && (paidAmountProvided || dueBefore > 0)) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Paid amount must be greater than 0.',
+      });
+    }
     const nextPaid = alreadyPaid + addPaid;
     if (nextPaid - total > 1e-6) {
       throw new BadRequestException({
@@ -5666,6 +5682,53 @@ export class CompanyProjectsService {
     return this.getInvoices(String(resolved.company_id), String(resolved._id), paymentFor);
   }
 
+  async getInvoicesByProjectIdAndPaymentFor(
+    projectId: string,
+    paymentFor: string,
+  ) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const invoices = await this.companyInvoiceModel
+      .find({
+        company_id: String(resolved.company_id),
+        project_id: String(resolved._id),
+        payment_for: paymentFor,
+      })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com';
+    const toUrl = (path: string | undefined) =>
+      !path ? null : path.startsWith('http') ? path : `${baseUrl}/${path.replace(/^\//, '')}`;
+
+    return {
+      status: 'success',
+      data: {
+        invoices: invoices.map((inv: any) => ({
+          id: String(inv._id),
+          payment_for: inv.payment_for,
+          invoice_title: inv.invoice_title ?? null,
+          invoice_document: toUrl(inv.invoice_document),
+          invoice_document_filename: inv.invoice_document_filename ?? null,
+          payable_amount: Number(inv.payable_amount ?? 0),
+          sgst: Number(inv.sgst ?? 0),
+          cgst: Number(inv.cgst ?? 0),
+          igst: Number(inv.igst ?? 0),
+          tax_amount: Number(inv.tax_amount ?? 0),
+          total_amount: Number(inv.total_amount ?? 0),
+          payment_date: inv.payment_date ?? null,
+          payment_status: Number(inv.payment_status ?? 0),
+          approval_status: Number(inv.approval_status ?? 0),
+          created_at: inv.createdAt,
+          updated_at: inv.updatedAt,
+        })),
+      },
+    };
+  }
+
   /**
    * Get invoices for project by type (Payments/Proforma = per_inv, Tax Invoices = inv).
    */
@@ -5721,6 +5784,220 @@ export class CompanyProjectsService {
         invoices: list,
         approval_status_labels: INVOICE_APPROVAL_STATUS,
         approval_status_colors: INVOICE_APPROVAL_STATUS_COLORS,
+      },
+    };
+  }
+
+  async createCiiExpenseInvoiceByProjectId(
+    projectId: string,
+    payload: {
+      invoicetitle: string;
+      invoiceamount: number;
+      sgst: number;
+      cgst: number;
+      igst: number;
+      payment_date: string;
+      payment_for: string;
+    },
+    file: Express.Multer.File,
+  ) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const invoiceamount = Number(payload.invoiceamount);
+    const sgst = Number(payload.sgst);
+    const cgst = Number(payload.cgst);
+    const igst = Number(payload.igst);
+    const cgstAmount = (invoiceamount * cgst) / 100;
+    const sgstAmount = (invoiceamount * sgst) / 100;
+    const igstAmount = (invoiceamount * igst) / 100;
+    const total_amount = invoiceamount + cgstAmount + sgstAmount + igstAmount;
+    const relativePath = `uploads/company/${String(resolved.company_id)}/expenses/${file.filename}`;
+
+    await this.companyInvoiceModel.create({
+      company_id: String(resolved.company_id),
+      project_id: String(resolved._id),
+      payment_for: payload.payment_for,
+      invoice_title: payload.invoicetitle,
+      invoice_document: relativePath,
+      invoice_document_filename: file.originalname,
+      payable_amount: invoiceamount,
+      sgst,
+      cgst,
+      igst,
+      tax_amount: cgstAmount + sgstAmount + igstAmount,
+      total_amount,
+      payment_date: new Date(payload.payment_date),
+      payment_status: 1,
+      approval_status: 1,
+    });
+
+    return { status: 'success', message: 'Invoice Uploaded Successfully!' };
+  }
+
+  async updateCiiExpenseInvoiceByProjectId(
+    projectId: string,
+    invoiceId: string,
+    payload: {
+      invoicetitle: string;
+      invoiceamount: number;
+      sgst: number;
+      cgst: number;
+      igst: number;
+      payment_date: string;
+      payment_for: string;
+    },
+    file?: Express.Multer.File,
+  ) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const invoice = await this.companyInvoiceModel.findOne({
+      _id: invoiceId,
+      company_id: String(resolved.company_id),
+      project_id: String(resolved._id),
+      payment_for: 'expA',
+    });
+    if (!invoice) {
+      throw new NotFoundException({ status: 'error', message: 'Invoice not found' });
+    }
+
+    const invoiceamount = Number(payload.invoiceamount);
+    const sgst = Number(payload.sgst);
+    const cgst = Number(payload.cgst);
+    const igst = Number(payload.igst);
+    const cgstAmount = (invoiceamount * cgst) / 100;
+    const sgstAmount = (invoiceamount * sgst) / 100;
+    const igstAmount = (invoiceamount * igst) / 100;
+    const total_amount = invoiceamount + cgstAmount + sgstAmount + igstAmount;
+
+    invoice.payment_for = payload.payment_for;
+    invoice.invoice_title = payload.invoicetitle;
+    invoice.payable_amount = invoiceamount;
+    invoice.sgst = sgst;
+    invoice.cgst = cgst;
+    invoice.igst = igst;
+    invoice.tax_amount = cgstAmount + sgstAmount + igstAmount;
+    invoice.total_amount = total_amount;
+    invoice.payment_date = new Date(payload.payment_date);
+    if (file) {
+      invoice.invoice_document = `uploads/company/${String(resolved.company_id)}/expenses/${file.filename}`;
+      invoice.invoice_document_filename = file.originalname;
+    }
+
+    await invoice.save();
+    return { status: 'success', message: 'Invoice Updated Successfully!' };
+  }
+
+  async getPlaqueDetailsByProjectId(projectId: string) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?._id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const project = await this.projectModel.findById(resolved._id).lean();
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const details = (project as any).plaque_details || {};
+    return {
+      status: 'success',
+      message: 'Plaque details fetched successfully',
+      data: {
+        contact_person: details.contact_person || '',
+        designation: details.designation || '',
+        mobile: details.mobile || '',
+        company_name: details.company_name || '',
+        address: details.address || '',
+      },
+    };
+  }
+
+  async upsertPlaqueDetailsByProjectId(projectId: string, dto: UpsertPlaqueDetailsDto) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?._id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const project = await this.projectModel.findById(resolved._id);
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const payload = {
+      contact_person: dto.contact_person.trim(),
+      designation: dto.designation.trim(),
+      mobile: dto.mobile.trim(),
+      company_name: dto.company_name.trim(),
+      address: dto.address.trim(),
+    };
+
+    (project as any).plaque_details = payload;
+    await project.save();
+
+    return {
+      status: 'success',
+      message: 'Plaque details saved successfully',
+      data: payload,
+    };
+  }
+
+  async getOutstandingDetailsByProjectId(projectId: string) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?._id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const project = await this.projectModel.findById(resolved._id).lean();
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const details = (project as any).outstanding_details || {};
+    return {
+      status: 'success',
+      message: 'Outstanding details fetched successfully',
+      data: {
+        outstanding_amount: Number(details.outstanding_amount ?? 0),
+        date: details.date ?? null,
+        remarks: details.remarks || '',
+        status: details.status || 'Unpaid',
+      },
+    };
+  }
+
+  async upsertOutstandingDetailsByProjectId(projectId: string, dto: UpsertOutstandingDetailsDto) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?._id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const project = await this.projectModel.findById(resolved._id);
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const payload = {
+      outstanding_amount: Number(dto.outstanding_amount),
+      date: new Date(dto.date),
+      remarks: dto.remarks.trim(),
+      status: dto.status,
+    };
+
+    (project as any).outstanding_details = payload;
+    await project.save();
+
+    return {
+      status: 'success',
+      message: 'Outstanding details saved successfully',
+      data: {
+        ...payload,
+        date: payload.date.toISOString(),
       },
     };
   }
@@ -5931,6 +6208,25 @@ export class CompanyProjectsService {
     };
   }
 
+  async submitPaymentByProjectId(
+    projectId: string,
+    invoiceId: string,
+    dto: SubmitPaymentDto,
+    file?: Express.Multer.File,
+  ) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.submitPayment(
+      String(resolved.company_id),
+      String(resolved._id),
+      invoiceId,
+      dto,
+      file,
+    );
+  }
+
   /**
    * Update invoice approval status (0=Pending, 1=Approved, 2=Rejected, 3=Under Review).
    */
@@ -6024,6 +6320,23 @@ export class CompanyProjectsService {
         approval_status_label: statusLabel,
       },
     };
+  }
+
+  async updateInvoiceApprovalStatusByProjectId(
+    projectId: string,
+    invoiceId: string,
+    approvalStatus: number,
+  ) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.updateInvoiceApprovalStatus(
+      String(resolved.company_id),
+      String(resolved._id),
+      invoiceId,
+      approvalStatus,
+    );
   }
 
   /**
@@ -7665,6 +7978,415 @@ export class CompanyProjectsService {
         sections,
       },
     };
+  }
+
+  async getPrimaryDataGiLegacyByProjectId(projectId: string) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const cId = new Types.ObjectId(String(resolved.company_id));
+    const pId = new Types.ObjectId(String(resolved._id));
+    const [masterGiRows, savedGiRows] = await Promise.all([
+      this.masterPrimaryDataChecklistModel
+        .find({ info_type: 'gi', is_active: 1 })
+        .sort({ checklist_order: 1 })
+        .lean(),
+      this.primaryDataFormModel
+        .find({ company_id: cId, project_id: pId, info_type: 'gi' })
+        .sort({ createdAt: 1 })
+        .lean(),
+    ]);
+
+    const giRows = [...(savedGiRows as any[])];
+    const existingDataIds = new Set(
+      (savedGiRows as any[]).map((r: any) => String(r?.data_id ?? '')),
+    );
+    for (const m of masterGiRows as any[]) {
+      const mid = String(m?._id ?? '');
+      if (!mid || existingDataIds.has(mid)) continue;
+      giRows.push({
+        data_id: m._id,
+        info_type: 'gi',
+        parameter: m.parameter,
+        reference_unit: m.reference_unit ?? '',
+        details: '',
+        fy1: 0,
+        fy2: 0,
+        fy3: 0,
+        fy4: 0,
+        fy5: null,
+        extrapolated: null,
+      });
+    }
+
+    const topLevelEquivalent =
+      (giRows as any[]).find((r: any) => String(r?.reference_unit ?? '').trim() !== '')?.reference_unit ?? '';
+
+    const legacyGi: Record<string, any> = {};
+    const pushField = (obj: Record<string, any>, field: string, value: any) => {
+      if (obj[field] === undefined) {
+        obj[field] = value;
+        return;
+      }
+      if (Array.isArray(obj[field])) {
+        obj[field].push(value);
+        return;
+      }
+      obj[field] = [obj[field], value];
+    };
+
+    for (const row of giRows as any[]) {
+      const key = row?.data_id?.toString?.() || String(row?.data_id || '');
+      if (!key) continue;
+      if (!legacyGi[key]) legacyGi[key] = {};
+      pushField(legacyGi[key], 'details', row?.details ?? '');
+      pushField(legacyGi[key], 'fy1', row?.fy1 ?? 0);
+      pushField(legacyGi[key], 'fy2', row?.fy2 ?? 0);
+      pushField(legacyGi[key], 'fy3', row?.fy3 ?? 0);
+      pushField(legacyGi[key], 'fy4', row?.fy4 ?? 0);
+      pushField(legacyGi[key], 'exp', row?.fy5 ?? row?.extrapolated ?? null);
+      const refUnit = row?.reference_unit ?? '';
+      pushField(legacyGi[key], 'reference_unit', refUnit);
+      pushField(legacyGi[key], 'equivalent_product', refUnit);
+    }
+
+    return {
+      status: 'success',
+      message: 'GI data loaded',
+      data: {
+        form_type: 'gi',
+        equivalent_product: topLevelEquivalent,
+        gi_rows: giRows,
+        gi: legacyGi,
+      },
+    };
+  }
+
+  async savePrimaryDataGiLegacyByProjectId(
+    projectId: string,
+    body: { form_type?: string; formType?: string; gi?: Record<string, any> | any[]; [key: string]: any },
+  ) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const formType = String(body?.form_type ?? body?.formType ?? 'gi').trim().toLowerCase();
+    if (formType !== 'gi') {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'form_type must be "gi"',
+      });
+    }
+
+    const parseGiFromFlatBody = (input: Record<string, any>): Record<string, any> => {
+      const parsed: Record<string, any> = {};
+      const keyRegex =
+        /^gi\[([^\]]+)\]\[(data_id|parameter|reference_unit|equivalent_product|details|fy1|fy2|fy3|fy4|exp)\](?:\[(\d*)\])?$/;
+      for (const [rawKey, rawVal] of Object.entries(input || {})) {
+        const m = rawKey.match(keyRegex);
+        if (!m) continue;
+        const dataId = m[1];
+        const field = m[2] === 'equivalent_product' ? 'reference_unit' : m[2];
+        const indexToken = m[3];
+        const hasIndex = indexToken !== undefined;
+        if (!parsed[dataId]) parsed[dataId] = {};
+        if (hasIndex) {
+          const next = Array.isArray(parsed[dataId][field]) ? parsed[dataId][field] : [];
+          if (indexToken === '') next.push(rawVal);
+          else next[Number(indexToken)] = rawVal;
+          parsed[dataId][field] = next;
+        } else if (Array.isArray(rawVal)) {
+          parsed[dataId][field] = Array.isArray(rawVal) ? rawVal : [rawVal];
+        } else {
+          parsed[dataId][field] = rawVal;
+        }
+      }
+      return parsed;
+    };
+
+    let gi: Record<string, any> | null = null;
+    if (body?.gi && typeof body.gi === 'object' && !Array.isArray(body.gi)) {
+      gi = body.gi as Record<string, any>;
+    } else if (Array.isArray(body?.gi)) {
+      gi = {};
+      const pick = (obj: Record<string, any>, keys: string[]) => {
+        for (const k of keys) {
+          if (obj[k] !== undefined) return obj[k];
+        }
+        return undefined;
+      };
+      const pushToBucket = (bucket: Record<string, any>, field: string, value: any) => {
+        if (value === undefined) return;
+        if (bucket[field] === undefined) {
+          bucket[field] = [value];
+          return;
+        }
+        if (!Array.isArray(bucket[field])) {
+          bucket[field] = [bucket[field]];
+        }
+        bucket[field].push(value);
+      };
+      for (const [idx, row] of (body.gi as any[]).entries()) {
+        const dataId = String(row?.data_id ?? row?.dataId ?? idx);
+        if (!gi[dataId]) gi[dataId] = {};
+        const bucket = gi[dataId];
+
+        // Keep scalar selectors/reference on bucket.
+        const refUnit = pick(row, ['reference_unit', 'equivalent_product', 'equivalentProduct', 'unit']);
+        if (refUnit !== undefined) bucket.reference_unit = refUnit;
+        if (row?.equivalent_product !== undefined || row?.equivalentProduct !== undefined) {
+          bucket.equivalent_product = pick(row, ['equivalent_product', 'equivalentProduct']);
+        }
+        if (row?.parameter !== undefined) bucket.parameter = row.parameter;
+        if (row?.data_id !== undefined) bucket.data_id = row.data_id;
+
+        // Collect product-like rows as arrays so same data_id can hold multiple lines.
+        const details = pick(row, ['details', 'product_name', 'productName', 'name', 'product']);
+        const fy1 = pick(row, ['fy1', 'fy_1', 'fy23_24', 'fy_23_24']);
+        const fy2 = pick(row, ['fy2', 'fy_2', 'fy24_25', 'fy_24_25']);
+        const fy3 = pick(row, ['fy3', 'fy_3', 'fy25_26', 'fy_25_26']);
+        const fy4 = pick(row, ['fy4', 'fy_4', 'fy26_27', 'fy_26_27']);
+        const exp = pick(row, ['exp', 'extrapolated', 'fy5']);
+        if (details !== undefined) pushToBucket(bucket, 'details', details);
+        if (fy1 !== undefined) pushToBucket(bucket, 'fy1', fy1);
+        if (fy2 !== undefined) pushToBucket(bucket, 'fy2', fy2);
+        if (fy3 !== undefined) pushToBucket(bucket, 'fy3', fy3);
+        if (fy4 !== undefined) pushToBucket(bucket, 'fy4', fy4);
+        if (exp !== undefined) pushToBucket(bucket, 'exp', exp);
+      }
+    } else {
+      gi = parseGiFromFlatBody(body as Record<string, any>);
+    }
+
+    if (!gi || typeof gi !== 'object' || Array.isArray(gi)) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'gi payload is required',
+      });
+    }
+
+    let globalEquivalentProduct = String(
+      body?.equivalent_product ?? body?.equivalentProduct ?? body?.reference_unit ?? '',
+    ).trim();
+
+    if (!globalEquivalentProduct) {
+      for (const row of Object.values(gi)) {
+        const nestedEq = String(
+          (row as any)?.equivalent_product ??
+            (row as any)?.equivalentProduct ??
+            (row as any)?.reference_unit ??
+            '',
+        ).trim();
+        if (nestedEq) {
+          globalEquivalentProduct = nestedEq;
+          break;
+        }
+      }
+    }
+
+    const toPositive = (value: unknown): number | null => {
+      const n = Number(value);
+      if (!Number.isFinite(n) || n <= 0) return null;
+      return n;
+    };
+    const toOptionalNumber = (value: unknown): number | undefined => {
+      if (value === undefined || value === null || value === '') return undefined;
+      const n = Number(value);
+      if (!Number.isFinite(n)) return undefined;
+      return n;
+    };
+    const calculateExtrapolated = (
+      fy1: number,
+      fy2: number,
+      fy3: number,
+      fy4: number,
+      exp?: number,
+    ): number => {
+      if (typeof exp === 'number' && Number.isFinite(exp)) return exp;
+      const growth1 = fy1 !== 0 ? (fy2 - fy1) / fy1 : 0;
+      const growth2 = fy2 !== 0 ? (fy3 - fy2) / fy2 : 0;
+      const growth3 = fy3 !== 0 ? (fy4 - fy3) / fy3 : 0;
+      const avgGrowth = (growth1 + growth2 + growth3) / 3;
+      return Number((fy4 * (1 + avgGrowth)).toFixed(4));
+    };
+
+    const resolveMasterRow = (candidateKey: string, row: Record<string, any>) => {
+      const byDataId = String(row?.data_id ?? '').trim();
+      if (byDataId && masterById.has(byDataId)) return masterById.get(byDataId);
+      if (byDataId && /^\d+$/.test(byDataId)) {
+        const idx = Number(byDataId) - 1;
+        if (idx >= 0 && idx < masterGiRows.length) return (masterGiRows as any[])[idx];
+      }
+      const byKey = String(candidateKey || '').trim();
+      if (byKey && masterById.has(byKey)) return masterById.get(byKey);
+      if (byKey && /^\d+$/.test(byKey)) {
+        const idx = Number(byKey) - 1;
+        if (idx >= 0 && idx < masterGiRows.length) return (masterGiRows as any[])[idx];
+      }
+      for (const m of masterGiRows as any[]) {
+        const p = String(m?.parameter ?? '').trim().toLowerCase();
+        const c = String(m?.checklist_name ?? '').trim().toLowerCase();
+        const k = byKey.toLowerCase();
+        if (k && (k === p || k === c)) return m;
+      }
+      // Legacy JSON arrays sometimes send data_id as row index (1,2,3...)
+      // while GI has only one matching master row; in that case treat all as same GI row.
+      const looksIndexed = /^\d+$/.test(byDataId || byKey);
+      if (looksIndexed && (masterGiRows as any[]).length > 0) {
+        return (masterGiRows as any[])[0];
+      }
+      return null;
+    };
+
+    const doc: any[] = [];
+    const touchedDataIds: string[] = [];
+    const masterGiRows = await this.masterPrimaryDataChecklistModel
+      .find({ info_type: 'gi', is_active: 1 })
+      .lean();
+    const masterById = new Map<string, any>();
+    for (const m of masterGiRows as any[]) {
+      masterById.set(String(m._id), m);
+    }
+
+    for (const [dataId, row] of Object.entries(gi)) {
+      const master = resolveMasterRow(String(dataId), row as Record<string, any>);
+      if (!master) continue;
+      touchedDataIds.push(String(master._id));
+      const detailsVal = row?.details ?? row?.product_name ?? row?.productName ?? row?.name ?? row?.product;
+      const fy1Val = row?.fy1 ?? row?.fy_1 ?? row?.fy23_24 ?? row?.fy_23_24;
+      const fy2Val = row?.fy2 ?? row?.fy_2 ?? row?.fy24_25 ?? row?.fy_24_25;
+      const fy3Val = row?.fy3 ?? row?.fy_3 ?? row?.fy25_26 ?? row?.fy_25_26;
+      const fy4Val = row?.fy4 ?? row?.fy_4 ?? row?.fy26_27 ?? row?.fy_26_27;
+      const expVal = row?.exp ?? row?.extrapolated ?? row?.fy5;
+
+      const detailsArray = Array.isArray(detailsVal) ? detailsVal : [detailsVal];
+      const fy1Array = Array.isArray(fy1Val) ? fy1Val : [fy1Val];
+      const fy2Array = Array.isArray(fy2Val) ? fy2Val : [fy2Val];
+      const fy3Array = Array.isArray(fy3Val) ? fy3Val : [fy3Val];
+      const fy4Array = Array.isArray(fy4Val) ? fy4Val : [fy4Val];
+      const expArray = Array.isArray(expVal) ? expVal : [expVal];
+
+      const rowCount = Math.max(
+        detailsArray.length,
+        fy1Array.length,
+        fy2Array.length,
+        fy3Array.length,
+        fy4Array.length,
+      );
+
+      const rowReferenceUnit =
+        row?.reference_unit ??
+        row?.equivalent_product ??
+        globalEquivalentProduct ??
+        master.reference_unit ??
+        '';
+
+      for (let i = 0; i < rowCount; i++) {
+        const details = String((detailsArray[i] ?? '')).trim();
+        const fy1 = toPositive(fy1Array[i]);
+        const fy2 = toPositive(fy2Array[i]);
+        const fy3 = toPositive(fy3Array[i]);
+        const fy4 = toPositive(fy4Array[i]);
+        const exp = toOptionalNumber(expArray[i]);
+
+        const hasOnlyEquivalent =
+          !!rowReferenceUnit &&
+          !details &&
+          fy1 == null &&
+          fy2 == null &&
+          fy3 == null &&
+          fy4 == null &&
+          (expArray[i] === undefined || expArray[i] === null || expArray[i] === '');
+        if (hasOnlyEquivalent) {
+          continue;
+        }
+
+        if (!details) {
+          throw new BadRequestException({
+            status: 'error',
+            message: `details is required for GI row ${dataId}`,
+          });
+        }
+        if (fy1 == null || fy2 == null || fy3 == null || fy4 == null) {
+          throw new BadRequestException({
+            status: 'error',
+            message: `fy1..fy4 must be numeric and > 0 for GI row ${dataId}`,
+          });
+        }
+        if (expArray[i] !== undefined && expArray[i] !== null && expArray[i] !== '' && exp === undefined) {
+          throw new BadRequestException({
+            status: 'error',
+            message: `exp must be numeric for GI row ${dataId}`,
+          });
+        }
+
+        // GI calculation compatibility: derive extrapolated when exp not provided.
+        const extrapolated = calculateExtrapolated(fy1, fy2, fy3, fy4, exp);
+
+        doc.push({
+          data_id: String(master._id),
+          info_type: 'gi',
+          parameter: master.parameter,
+          reference_unit: rowReferenceUnit,
+          details,
+          fy1,
+          fy2,
+          fy3,
+          fy4,
+          extrapolated,
+          ...(typeof exp === 'number' ? { fy5: exp } : {}),
+        });
+      }
+    }
+
+    const companyObjectId = new Types.ObjectId(String(resolved.company_id));
+    const projectObjectId = new Types.ObjectId(String(resolved._id));
+    if (touchedDataIds.length) {
+      await this.primaryDataFormModel.deleteMany({
+        company_id: companyObjectId,
+        project_id: projectObjectId,
+        info_type: 'gi',
+        data_id: { $in: touchedDataIds.map((id) => new Types.ObjectId(id)) },
+      });
+    }
+    if (doc.length) {
+      await this.primaryDataFormModel.insertMany(
+        doc.map((item) => ({
+          company_id: companyObjectId,
+          project_id: projectObjectId,
+          data_id: new Types.ObjectId(String(item.data_id)),
+          info_type: 'gi',
+          parameter: item.parameter,
+          reference_unit: item.reference_unit,
+          details: item.details,
+          fy1: item.fy1,
+          fy2: item.fy2,
+          fy3: item.fy3,
+          fy4: item.fy4,
+          fy5: item.fy5 ?? 0,
+          extrapolated: item.extrapolated,
+          document_status: PRIMARY_DATA_DOC_STATUS.PENDING,
+          final_submit: 0,
+        })),
+      );
+    }
+    return {
+      status: 'success',
+      message: 'GI data saved successfully',
+      data: {
+        form_type: 'gi',
+        saved_count: doc.length,
+      },
+    };
+  }
+
+  async updatePrimaryDataGiLegacyByProjectId(
+    projectId: string,
+    body: { form_type?: string; gi?: Record<string, any> },
+  ) {
+    return this.savePrimaryDataGiLegacyByProjectId(projectId, body);
   }
 
   /**

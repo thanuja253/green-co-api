@@ -1360,7 +1360,12 @@ export class CompanyProjectsController {
   @Post(':projectId/finance-v2/proforma-invoices/:invoiceId/submit-payment')
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
   @UseInterceptors(
-    FileInterceptor('supportingdocument', {
+    FileFieldsInterceptor([
+      { name: 'supportingdocument', maxCount: 1 },
+      { name: 'supporting_document', maxCount: 1 },
+      { name: 'supportingDocument', maxCount: 1 },
+      { name: 'file', maxCount: 1 },
+    ], {
       storage: diskStorage({
         destination: (req, file, cb) => {
           const projectId = (req as any).params?.projectId || 'unknown';
@@ -1388,8 +1393,19 @@ export class CompanyProjectsController {
     @Param('projectId') projectId: string,
     @Param('invoiceId') invoiceId: string,
     @Body() dto: SubmitFinanceV2PaymentDto,
-    @UploadedFile() file?: Express.Multer.File,
+    @UploadedFiles()
+    files?: {
+      supportingdocument?: Express.Multer.File[];
+      supporting_document?: Express.Multer.File[];
+      supportingDocument?: Express.Multer.File[];
+      file?: Express.Multer.File[];
+    },
   ): Promise<any> {
+    const file =
+      files?.supportingdocument?.[0] ||
+      files?.supporting_document?.[0] ||
+      files?.supportingDocument?.[0] ||
+      files?.file?.[0];
     return this.companyProjectsService.submitFinanceV2PaymentByProjectId(
       projectId,
       invoiceId,
@@ -1529,14 +1545,18 @@ export class CompanyProjectsController {
    * POST /api/company/projects/:projectId/invoices/:invoiceId/submit-payment
    */
   @Post(':projectId/invoices/:invoiceId/submit-payment')
-  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
   @UseInterceptors(
-    FileInterceptor('supportingdocument', {
+    FileFieldsInterceptor([
+      { name: 'supportingdocument', maxCount: 1 },
+      { name: 'supporting_document', maxCount: 1 },
+      { name: 'supportingDocument', maxCount: 1 },
+      { name: 'file', maxCount: 1 },
+    ], {
       storage: diskStorage({
         destination: (req, file, cb) => {
-          const companyId = (req as any).user?.userId;
-          const uploadPath = join(process.cwd(), 'uploads', 'company', companyId || 'unknown');
+          const companyIdOrProjectId = (req as any).user?.userId || (req as any).params?.projectId || 'unknown';
+          const uploadPath = join(process.cwd(), 'uploads', 'company', companyIdOrProjectId);
           if (!fs.existsSync(uploadPath)) {
             fs.mkdirSync(uploadPath, { recursive: true });
           }
@@ -1565,14 +1585,23 @@ export class CompanyProjectsController {
     }),
   )
   async submitPayment(
-    @Request() req,
     @Param('projectId') projectId: string,
     @Param('invoiceId') invoiceId: string,
     @Body() dto: SubmitPaymentDto,
-    @UploadedFile() file?: Express.Multer.File,
+    @UploadedFiles()
+    files?: {
+      supportingdocument?: Express.Multer.File[];
+      supporting_document?: Express.Multer.File[];
+      supportingDocument?: Express.Multer.File[];
+      file?: Express.Multer.File[];
+    },
   ): Promise<any> {
-    return this.companyProjectsService.submitPayment(
-      req.user.userId,
+    const file =
+      files?.supportingdocument?.[0] ||
+      files?.supporting_document?.[0] ||
+      files?.supportingDocument?.[0] ||
+      files?.file?.[0];
+    return this.companyProjectsService.submitPaymentByProjectId(
       projectId,
       invoiceId,
       dto,
@@ -1586,16 +1615,13 @@ export class CompanyProjectsController {
    * Body: { "approval_status": 0 | 1 | 2 | 3 } — 0=Pending, 1=Approved, 2=Rejected, 3=Under Review
    */
   @Patch(':projectId/invoices/:invoiceId/approval')
-  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
   async updateInvoiceApproval(
-    @Request() req,
     @Param('projectId') projectId: string,
     @Param('invoiceId') invoiceId: string,
     @Body() dto: UpdateInvoiceApprovalDto,
   ): Promise<any> {
-    return this.companyProjectsService.updateInvoiceApprovalStatus(
-      req.user.userId,
+    return this.companyProjectsService.updateInvoiceApprovalStatusByProjectId(
       projectId,
       invoiceId,
       dto.approval_status,

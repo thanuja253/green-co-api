@@ -65,6 +65,9 @@ export class CompanyInvoice {
   @Prop()
   approved_at?: Date;
 
+  @Prop()
+  payment_date?: Date;
+
   /** v2 finance form fields (new APIs) */
   @Prop()
   invoice_type?: 'proforma' | 'tax';

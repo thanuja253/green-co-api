@@ -35,6 +35,8 @@ import { ReportsQueryDto } from './dto/reports-query.dto';
 import { AssignFacilitatorDto } from './dto/assign-facilitator.dto';
 import { CreateCoordinatorDto } from './dto/create-coordinator.dto';
 import { UpdateCoordinatorDto } from './dto/update-coordinator.dto';
+import { UpsertPlaqueDetailsDto } from './dto/upsert-plaque-details.dto';
+import { UpsertOutstandingDetailsDto } from './dto/upsert-outstanding-details.dto';
 import {
   REGISTRATION_INFO_FILE_FIELDS,
   createRegistrationInfoValidationPipe,
@@ -634,11 +636,317 @@ export class AdminCompanyFlowController {
     );
   }
 
+  /** Finance v2 admin compatibility: list invoices for project. */
+  @Get('api/admin/projects/:projectId/finance-v2/proforma-invoices')
+  @Get('admin/projects/:projectId/finance-v2/proforma-invoices')
+  async getFinanceV2InvoicesForAdmin(
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.getFinanceV2InvoicesByProjectId(projectId);
+  }
+
+  /** Finance v2 admin compatibility: update approval status/remarks. */
+  @Post('api/admin/projects/:projectId/finance-v2/proforma-invoices/:invoiceId/approval-status')
+  @Post('admin/projects/:projectId/finance-v2/proforma-invoices/:invoiceId/approval-status')
+  @Patch('api/admin/projects/:projectId/finance-v2/proforma-invoices/:invoiceId/approval-status')
+  @Patch('admin/projects/:projectId/finance-v2/proforma-invoices/:invoiceId/approval-status')
+  async updateFinanceV2ApprovalForAdmin(
+    @Param('projectId') projectId: string,
+    @Param('invoiceId') invoiceId: string,
+    @Body() body: Record<string, any>,
+  ): Promise<any> {
+    const approval_status =
+      body?.approval_status ??
+      body?.status ??
+      body?.approvalStatus;
+    const remarks =
+      body?.remarks ??
+      body?.approval_remarks ??
+      body?.approvalRemarks;
+
+    return this.companyProjectsService.updateFinanceV2ApprovalByProjectId(
+      projectId,
+      invoiceId,
+      {
+        approval_status,
+        remarks,
+      } as any,
+    );
+  }
+
   @Get('api/admin/reports')
   @Get('admin/reports')
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
   async getReports(@Query() query: ReportsQueryDto): Promise<any> {
     return this.companyProjectsService.getReportsAdminFlow(query);
+  }
+
+  @Get('api/admin/financeDocument/:companyProject')
+  @Get('admin/financeDocument/:companyProject')
+  async getFinanceDocument(
+    @Param('companyProject') companyProject: string,
+    @Query('payment_for') paymentFor: string,
+  ): Promise<any> {
+    return this.companyProjectsService.getInvoicesByProjectIdAndPaymentFor(
+      companyProject,
+      paymentFor || 'expA',
+    );
+  }
+
+  @Get('api/admin/projects/:projectId/plaque')
+  @Get('admin/projects/:projectId/plaque')
+  async getPlaqueDetails(
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.getPlaqueDetailsByProjectId(projectId);
+  }
+
+  @Post('api/admin/projects/:projectId/plaque')
+  @Post('admin/projects/:projectId/plaque')
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  async upsertPlaqueDetails(
+    @Param('projectId') projectId: string,
+    @Body() dto: UpsertPlaqueDetailsDto,
+  ): Promise<any> {
+    return this.companyProjectsService.upsertPlaqueDetailsByProjectId(projectId, dto);
+  }
+
+  @Patch('api/admin/projects/:projectId/plaque')
+  @Patch('admin/projects/:projectId/plaque')
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  async updatePlaqueDetails(
+    @Param('projectId') projectId: string,
+    @Body() dto: UpsertPlaqueDetailsDto,
+  ): Promise<any> {
+    return this.companyProjectsService.upsertPlaqueDetailsByProjectId(projectId, dto);
+  }
+
+  @Get('api/admin/projects/:projectId/outstanding')
+  @Get('admin/projects/:projectId/outstanding')
+  async getOutstandingDetails(
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.getOutstandingDetailsByProjectId(projectId);
+  }
+
+  @Post('api/admin/projects/:projectId/outstanding')
+  @Post('admin/projects/:projectId/outstanding')
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  async upsertOutstandingDetails(
+    @Param('projectId') projectId: string,
+    @Body() dto: UpsertOutstandingDetailsDto,
+  ): Promise<any> {
+    return this.companyProjectsService.upsertOutstandingDetailsByProjectId(projectId, dto);
+  }
+
+  @Patch('api/admin/projects/:projectId/outstanding')
+  @Patch('admin/projects/:projectId/outstanding')
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  async updateOutstandingDetails(
+    @Param('projectId') projectId: string,
+    @Body() dto: UpsertOutstandingDetailsDto,
+  ): Promise<any> {
+    return this.companyProjectsService.upsertOutstandingDetailsByProjectId(projectId, dto);
+  }
+
+  @Get('company/primary_data/:companyProject')
+  async getPrimaryDataGiLegacy(
+    @Param('companyProject') companyProject: string,
+  ): Promise<any> {
+    return this.companyProjectsService.getPrimaryDataGiLegacyByProjectId(companyProject);
+  }
+
+  @Post('company/primary_data/:companyProject')
+  async savePrimaryDataGiLegacy(
+    @Param('companyProject') companyProject: string,
+    @Body() body: { form_type?: string; formType?: string; gi?: Record<string, any> | any[] },
+  ): Promise<any> {
+    return this.companyProjectsService.savePrimaryDataGiLegacyByProjectId(
+      companyProject,
+      body,
+    );
+  }
+
+  @Patch('company/primary_data/:companyProject')
+  async updatePrimaryDataGiLegacy(
+    @Param('companyProject') companyProject: string,
+    @Body() body: { form_type?: string; formType?: string; gi?: Record<string, any> | any[] },
+  ): Promise<any> {
+    return this.companyProjectsService.updatePrimaryDataGiLegacyByProjectId(
+      companyProject,
+      body,
+    );
+  }
+
+  @Post('api/admin/upload_inv/:companyProject')
+  @Post('admin/upload_inv/:companyProject')
+  @UseInterceptors(
+    FileInterceptor('regFeeInvoice', {
+      storage: diskStorage({
+        destination: (req, file, cb) => {
+          const projectId = req.params.companyProject;
+          const uploadPath = join(process.cwd(), 'uploads', 'company', projectId, 'expenses');
+          if (!fs.existsSync(uploadPath)) {
+            fs.mkdirSync(uploadPath, { recursive: true });
+          }
+          cb(null, uploadPath);
+        },
+        filename: (req, file, cb) => {
+          const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+          cb(null, `expense-${uniqueSuffix}${extname(file.originalname)}`);
+        },
+      }),
+      limits: { fileSize: 10 * 1024 * 1024 },
+      fileFilter: (req, file, cb) => {
+        const isPdf = file.mimetype === 'application/pdf' && extname(file.originalname).toLowerCase() === '.pdf';
+        if (!isPdf) {
+          cb(new BadRequestException('Only PDF is allowed.'), false);
+          return;
+        }
+        cb(null, true);
+      },
+    }),
+  )
+  async uploadExpenseInvoice(
+    @Param('companyProject') companyProject: string,
+    @Body() body: any,
+    @UploadedFile() regFeeInvoice?: Express.Multer.File,
+  ): Promise<any> {
+    try {
+      const invoicetitle = String(body?.invoicetitle ?? '').trim();
+      const invoiceamount = Number(body?.invoiceamount);
+      const sgst = Number(body?.sgst);
+      const cgst = Number(body?.cgst);
+      const igst = Number(body?.igst);
+      const payment_date = String(body?.payment_date ?? '').trim();
+      const payment_for = String(body?.payment_for ?? '').trim();
+
+      const titleRegex = /^[A-Za-z0-9_\- ]+$/;
+      const validDate = /^\d{4}-\d{2}-\d{2}$/.test(payment_date);
+      const max2 = (n: number) => Number.isFinite(n) && Math.round(n * 100) === n * 100;
+
+      if (
+        payment_for !== 'expA' ||
+        !regFeeInvoice ||
+        invoicetitle.length < 3 ||
+        invoicetitle.length > 50 ||
+        !titleRegex.test(invoicetitle) ||
+        !Number.isFinite(invoiceamount) ||
+        invoiceamount <= 0 ||
+        !max2(invoiceamount) ||
+        !Number.isFinite(sgst) ||
+        !Number.isFinite(cgst) ||
+        !Number.isFinite(igst) ||
+        sgst < 0 || sgst > 100 || !max2(sgst) ||
+        cgst < 0 || cgst > 100 || !max2(cgst) ||
+        igst < 0 || igst > 100 || !max2(igst) ||
+        !validDate
+      ) {
+        return { status: 'error', message: 'Some Error Occurred...' };
+      }
+
+      return this.companyProjectsService.createCiiExpenseInvoiceByProjectId(
+        companyProject,
+        {
+          invoicetitle,
+          invoiceamount,
+          sgst,
+          cgst,
+          igst,
+          payment_date,
+          payment_for,
+        },
+        regFeeInvoice,
+      );
+    } catch (error) {
+      return { status: 'error', message: 'Some Error Occurred...' };
+    }
+  }
+
+  @Patch('api/admin/upload_inv/:companyProject/:invoiceId')
+  @Patch('admin/upload_inv/:companyProject/:invoiceId')
+  @UseInterceptors(
+    FileInterceptor('regFeeInvoice', {
+      storage: diskStorage({
+        destination: (req, file, cb) => {
+          const projectId = req.params.companyProject;
+          const uploadPath = join(process.cwd(), 'uploads', 'company', projectId, 'expenses');
+          if (!fs.existsSync(uploadPath)) {
+            fs.mkdirSync(uploadPath, { recursive: true });
+          }
+          cb(null, uploadPath);
+        },
+        filename: (req, file, cb) => {
+          const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+          cb(null, `expense-${uniqueSuffix}${extname(file.originalname)}`);
+        },
+      }),
+      limits: { fileSize: 10 * 1024 * 1024 },
+      fileFilter: (req, file, cb) => {
+        const isPdf = file.mimetype === 'application/pdf' && extname(file.originalname).toLowerCase() === '.pdf';
+        if (!isPdf) {
+          cb(new BadRequestException('Only PDF is allowed.'), false);
+          return;
+        }
+        cb(null, true);
+      },
+    }),
+  )
+  async updateExpenseInvoice(
+    @Param('companyProject') companyProject: string,
+    @Param('invoiceId') invoiceId: string,
+    @Body() body: any,
+    @UploadedFile() regFeeInvoice?: Express.Multer.File,
+  ): Promise<any> {
+    try {
+      const invoicetitle = String(body?.invoicetitle ?? '').trim();
+      const invoiceamount = Number(body?.invoiceamount);
+      const sgst = Number(body?.sgst);
+      const cgst = Number(body?.cgst);
+      const igst = Number(body?.igst);
+      const payment_date = String(body?.payment_date ?? '').trim();
+      const payment_for = String(body?.payment_for ?? '').trim();
+
+      const titleRegex = /^[A-Za-z0-9_\- ]+$/;
+      const validDate = /^\d{4}-\d{2}-\d{2}$/.test(payment_date);
+      const max2 = (n: number) => Number.isFinite(n) && Math.round(n * 100) === n * 100;
+
+      if (
+        payment_for !== 'expA' ||
+        invoicetitle.length < 3 ||
+        invoicetitle.length > 50 ||
+        !titleRegex.test(invoicetitle) ||
+        !Number.isFinite(invoiceamount) ||
+        invoiceamount <= 0 ||
+        !max2(invoiceamount) ||
+        !Number.isFinite(sgst) ||
+        !Number.isFinite(cgst) ||
+        !Number.isFinite(igst) ||
+        sgst < 0 || sgst > 100 || !max2(sgst) ||
+        cgst < 0 || cgst > 100 || !max2(cgst) ||
+        igst < 0 || igst > 100 || !max2(igst) ||
+        !validDate
+      ) {
+        return { status: 'error', message: 'Some Error Occurred...' };
+      }
+
+      return this.companyProjectsService.updateCiiExpenseInvoiceByProjectId(
+        companyProject,
+        invoiceId,
+        {
+          invoicetitle,
+          invoiceamount,
+          sgst,
+          cgst,
+          igst,
+          payment_date,
+          payment_for,
+        },
+        regFeeInvoice,
+      );
+    } catch (error) {
+      return { status: 'error', message: 'Some Error Occurred...' };
+    }
   }
 }
 
