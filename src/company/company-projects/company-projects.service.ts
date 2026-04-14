@@ -6120,7 +6120,7 @@ export class CompanyProjectsService {
 
     const outstandingPaid = normalizedStatus === 'Paid' ? paidAmt : 0;
     const dueOutstanding = Math.max(0, outstandingAmount - outstandingPaid);
-    const finalStatus = dueOutstanding > 0 ? 'Unpaid' : 'Paid';
+    const finalStatus = normalizedStatus;
     const nextAction = dueOutstanding > 0 ? 'pay_due' : 'paid';
 
     const payload = {
