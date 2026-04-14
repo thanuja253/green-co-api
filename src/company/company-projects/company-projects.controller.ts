@@ -59,7 +59,7 @@ import {
   launchTrainingSessionUploadInterceptor,
 } from './launch-training-session-upload.config';
 
-@Controller('api/company/projects')
+@Controller(['api/company/projects', 'api/companyproject', 'api/companyprojects'])
 export class CompanyProjectsController {
   constructor(
     private readonly companyProjectsService: CompanyProjectsService,
@@ -1358,6 +1358,7 @@ export class CompanyProjectsController {
   }
 
   @Post(':projectId/finance-v2/proforma-invoices/:invoiceId/submit-payment')
+  @Post(':projectId/finance-v2/tax-invoices/:invoiceId/submit-payment')
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
   @UseInterceptors(
     FileFieldsInterceptor([
