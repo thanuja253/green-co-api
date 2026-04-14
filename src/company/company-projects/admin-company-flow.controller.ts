@@ -37,6 +37,7 @@ import { CreateCoordinatorDto } from './dto/create-coordinator.dto';
 import { UpdateCoordinatorDto } from './dto/update-coordinator.dto';
 import { UpsertPlaqueDetailsDto } from './dto/upsert-plaque-details.dto';
 import { UpsertOutstandingDetailsDto } from './dto/upsert-outstanding-details.dto';
+import { OutstandingDuePaymentDto } from './dto/outstanding-due-payment.dto';
 import {
   REGISTRATION_INFO_FILE_FIELDS,
   createRegistrationInfoValidationPipe,
@@ -747,6 +748,16 @@ export class AdminCompanyFlowController {
     @Body() dto: UpsertOutstandingDetailsDto,
   ): Promise<any> {
     return this.companyProjectsService.upsertOutstandingDetailsByProjectId(projectId, dto);
+  }
+
+  @Post('api/admin/projects/:projectId/outstanding/due-payment')
+  @Post('admin/projects/:projectId/outstanding/due-payment')
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  async payOutstandingDueAmount(
+    @Param('projectId') projectId: string,
+    @Body() dto: OutstandingDuePaymentDto,
+  ): Promise<any> {
+    return this.companyProjectsService.payOutstandingDueAmountByProjectId(projectId, dto);
   }
 
   @Get('company/primary_data/:companyProject')

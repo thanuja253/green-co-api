@@ -36,6 +36,7 @@ import { SubmitFinanceV2PaymentDto } from './dto/submit-finance-v2-payment.dto';
 import { UpdateFinanceV2ApprovalDto } from './dto/update-finance-v2-approval.dto';
 import { UpsertPlaqueDetailsDto } from './dto/upsert-plaque-details.dto';
 import { UpsertOutstandingDetailsDto } from './dto/upsert-outstanding-details.dto';
+import { OutstandingDuePaymentDto } from './dto/outstanding-due-payment.dto';
 import { CreateAssessorProfileDto } from './dto/create-assessor-profile.dto';
 import { ListAssessorsQueryDto } from './dto/list-assessors-query.dto';
 import { ReportsQueryDto } from './dto/reports-query.dto';
@@ -6158,6 +6159,64 @@ export class CompanyProjectsService {
         paid_remark: payload.paid_remark,
         next_action: nextAction,
         action_button_label: nextAction === 'pay_due' ? 'Pay Due' : 'Paid',
+      },
+    };
+  }
+
+  async payOutstandingDueAmountByProjectId(projectId: string, dto: OutstandingDuePaymentDto) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?._id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const project = await this.projectModel.findById(resolved._id);
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const details = ((project as any).outstanding_details || {}) as any;
+    const outstandingAmount = Number(details.outstanding_amount ?? 0);
+    const paidSoFar = Number(details.outstanding_amt_paid ?? details.paid_amt ?? 0);
+    const currentDue = Number(details.due_outstanding_amt ?? Math.max(0, outstandingAmount - paidSoFar));
+    const dueAmt = Number(dto.due_amt ?? dto.due_amount);
+
+    if (!Number.isFinite(dueAmt) || dueAmt < 0) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'due_amt is required and must be >= 0',
+      });
+    }
+    if (dueAmt > currentDue) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'due_amt cannot exceed current due_outstanding_amt',
+      });
+    }
+
+    const nextPaid = paidSoFar + dueAmt;
+    const nextDue = Math.max(0, currentDue - dueAmt);
+    details.outstanding_amt_paid = nextPaid;
+    details.paid_amt = nextPaid;
+    details.due_outstanding_amt = nextDue;
+    details.status = nextDue <= 0 ? 'Paid' : 'Unpaid';
+    details.paid_date = dto.paid_date ? new Date(dto.paid_date) : new Date();
+    if (dto.paid_remark) details.paid_remark = dto.paid_remark;
+
+    (project as any).outstanding_details = details;
+    await project.save();
+
+    return {
+      status: 'success',
+      message: 'Due payment applied successfully',
+      data: {
+        outstanding_amount: Number(details.outstanding_amount ?? 0),
+        outstanding_amt_paid: Number(details.outstanding_amt_paid ?? 0),
+        due_outstanding_amt: Number(details.due_outstanding_amt ?? 0),
+        remaining_amount: Number(details.due_outstanding_amt ?? 0),
+        remaining_balance: Number(details.due_outstanding_amt ?? 0),
+        status: details.status ?? 'Unpaid',
+        next_action: Number(details.due_outstanding_amt ?? 0) > 0 ? 'pay_due' : 'paid',
+        action_button_label: Number(details.due_outstanding_amt ?? 0) > 0 ? 'Pay Due' : 'Paid',
       },
     };
   }
