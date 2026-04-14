@@ -25,6 +25,14 @@ export class CompanyInvoice {
   @Prop()
   invoice_document_filename?: string;
 
+  /** Historical invoice documents (re-uploads), oldest -> newest */
+  @Prop({ type: [{ path: String, filename: String, uploaded_at: Date }], default: [] })
+  invoice_document_history?: Array<{
+    path: string;
+    filename?: string;
+    uploaded_at?: Date;
+  }>;
+
   @Prop({ default: 0 })
   payable_amount?: number;
 
@@ -51,6 +59,14 @@ export class CompanyInvoice {
 
   @Prop()
   offline_tran_doc_filename?: string;
+
+  /** Historical offline transaction proofs, oldest -> newest */
+  @Prop({ type: [{ path: String, filename: String, uploaded_at: Date }], default: [] })
+  offline_tran_doc_history?: Array<{
+    path: string;
+    filename?: string;
+    uploaded_at?: Date;
+  }>;
 
   /** Approval status for display (COMPANY_APPROVAL_STATUS / APPROVAL_STATUS_COLORS) */
   @Prop({ default: 0 })

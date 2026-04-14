@@ -5166,6 +5166,13 @@ export class CompanyProjectsService {
           invoice_title: inv.invoice_title ?? null,
           invoice_document: toUrl(inv.invoice_document),
           invoice_document_filename: inv.invoice_document_filename ?? null,
+          invoice_document_history: Array.isArray(inv.invoice_document_history)
+            ? inv.invoice_document_history.map((h: any) => ({
+                path: toUrl(h?.path) ?? null,
+                filename: h?.filename ?? null,
+                uploaded_at: h?.uploaded_at ?? null,
+              }))
+            : [],
           payable_amount: Number(inv.payable_amount ?? 0),
           sgst: Number(inv.sgst ?? 0),
           cgst: Number(inv.cgst ?? 0),
@@ -5176,6 +5183,13 @@ export class CompanyProjectsService {
           payment_type: inv.payment_type ?? null,
           offline_tran_doc: inv.offline_tran_doc ? toUrl(inv.offline_tran_doc) : null,
           offline_tran_doc_filename: inv.offline_tran_doc_filename ?? null,
+          offline_tran_doc_history: Array.isArray(inv.offline_tran_doc_history)
+            ? inv.offline_tran_doc_history.map((h: any) => ({
+                path: toUrl(h?.path) ?? null,
+                filename: h?.filename ?? null,
+                uploaded_at: h?.uploaded_at ?? null,
+              }))
+            : [],
           send_reminder: Number(inv.send_reminder ?? 0),
           send_invoice_to: inv.send_invoice_to ?? null,
           reminder_date: inv.reminder_date?.toISOString?.() ?? null,
@@ -5267,6 +5281,9 @@ export class CompanyProjectsService {
       invoice_title: dto.invoice_title,
       invoice_document: relativePath,
       invoice_document_filename: file.originalname,
+      invoice_document_history: [
+        { path: relativePath, filename: file.originalname, uploaded_at: new Date() },
+      ],
       payable_amount: payable,
       sgst,
       cgst,
@@ -5533,8 +5550,24 @@ export class CompanyProjectsService {
     (invoice as any).payment_type = dto.payment_type;
     (invoice as any).trans_id = dto.payment_type === 'Offline' ? dto.trans_id?.trim() : undefined;
     if (relativePath) {
+      const oldDoc = (invoice as any).offline_tran_doc;
+      const oldName = (invoice as any).offline_tran_doc_filename;
+      const appendIfNew = (arr: any[], entry: { path: string; filename?: string; uploaded_at: Date }) => {
+        const last = arr[arr.length - 1];
+        if (!last || String(last.path || '') !== String(entry.path || '')) {
+          arr.push(entry);
+        }
+      };
+      const prev = Array.isArray((invoice as any).offline_tran_doc_history)
+        ? (invoice as any).offline_tran_doc_history
+        : [];
+      if (oldDoc) {
+        appendIfNew(prev, { path: oldDoc, filename: oldName, uploaded_at: new Date() });
+      }
       (invoice as any).offline_tran_doc = relativePath;
       (invoice as any).offline_tran_doc_filename = file!.originalname;
+      appendIfNew(prev, { path: relativePath, filename: file!.originalname, uploaded_at: new Date() });
+      (invoice as any).offline_tran_doc_history = prev;
     }
     (invoice as any).paid_amount = nextPaid;
     const due = Math.max(0, Number((invoice as any).total_amount ?? 0) - nextPaid);
@@ -5707,12 +5740,19 @@ export class CompanyProjectsService {
     return {
       status: 'success',
       data: {
-        invoices: invoices.map((inv: any) => ({
+        invoices: invoices.map((inv: any, idx: number) => ({
           id: String(inv._id),
           payment_for: inv.payment_for,
           invoice_title: inv.invoice_title ?? null,
           invoice_document: toUrl(inv.invoice_document),
           invoice_document_filename: inv.invoice_document_filename ?? null,
+          invoice_document_history: Array.isArray(inv.invoice_document_history)
+            ? inv.invoice_document_history.map((h: any) => ({
+                path: toUrl(h?.path) ?? null,
+                filename: h?.filename ?? null,
+                uploaded_at: h?.uploaded_at ?? null,
+              }))
+            : [],
           payable_amount: Number(inv.payable_amount ?? 0),
           sgst: Number(inv.sgst ?? 0),
           cgst: Number(inv.cgst ?? 0),
@@ -5721,7 +5761,20 @@ export class CompanyProjectsService {
           total_amount: Number(inv.total_amount ?? 0),
           payment_date: inv.payment_date ?? null,
           payment_status: Number(inv.payment_status ?? 0),
+          payment_type: inv.payment_type ?? null,
+          trans_id: inv.trans_id ?? null,
+          offline_tran_doc: inv.offline_tran_doc ? toUrl(inv.offline_tran_doc) : null,
+          offline_tran_doc_filename: inv.offline_tran_doc_filename ?? null,
+          offline_tran_doc_history: Array.isArray(inv.offline_tran_doc_history)
+            ? inv.offline_tran_doc_history.map((h: any) => ({
+                path: toUrl(h?.path) ?? null,
+                filename: h?.filename ?? null,
+                uploaded_at: h?.uploaded_at ?? null,
+              }))
+            : [],
           approval_status: Number(inv.approval_status ?? 0),
+          upload_sequence: idx + 1, // newest first in current sort order
+          version_number: invoices.length - idx, // oldest=1, newest=max
           created_at: inv.createdAt,
           updated_at: inv.updatedAt,
         })),
@@ -5757,11 +5810,18 @@ export class CompanyProjectsService {
       return path.startsWith('http') ? path : `${baseUrl}/${path.replace(/^\//, '')}`;
     };
 
-    const list = invoices.map((inv: any) => ({
+    const list = invoices.map((inv: any, idx: number) => ({
       id: inv._id.toString(),
       payment_for: inv.payment_for,
       invoice_document: toUrl(inv.invoice_document),
       invoice_document_filename: inv.invoice_document_filename,
+      invoice_document_history: Array.isArray(inv.invoice_document_history)
+        ? inv.invoice_document_history.map((h: any) => ({
+            path: toUrl(h?.path) ?? null,
+            filename: h?.filename ?? null,
+            uploaded_at: h?.uploaded_at ?? null,
+          }))
+        : [],
       payable_amount: inv.payable_amount ?? 0,
       tax_amount: inv.tax_amount ?? 0,
       total_amount: inv.total_amount ?? 0,
@@ -5770,9 +5830,18 @@ export class CompanyProjectsService {
       trans_id: inv.trans_id ?? null,
       offline_tran_doc: inv.offline_tran_doc ? toUrl(inv.offline_tran_doc) : null,
       offline_tran_doc_filename: inv.offline_tran_doc_filename ?? null,
+      offline_tran_doc_history: Array.isArray(inv.offline_tran_doc_history)
+        ? inv.offline_tran_doc_history.map((h: any) => ({
+            path: toUrl(h?.path) ?? null,
+            filename: h?.filename ?? null,
+            uploaded_at: h?.uploaded_at ?? null,
+          }))
+        : [],
       approval_status: inv.approval_status ?? 0,
       approval_status_label: INVOICE_APPROVAL_STATUS[inv.approval_status ?? 0] ?? 'Pending',
       approval_status_color: INVOICE_APPROVAL_STATUS_COLORS[inv.approval_status ?? 0] ?? 'warning',
+      upload_sequence: idx + 1, // newest first in current sort order
+      version_number: invoices.length - idx, // oldest=1, newest=max
       created_at: inv.createdAt,
       updated_at: inv.updatedAt,
     }));
@@ -6004,7 +6073,7 @@ export class CompanyProjectsService {
 
   /**
    * CII uploads PI (Proforma Invoice) or Tax Invoice document — next step after Assign Project Co-Ordinator / Resource Center.
-   * Finds or creates an invoice for (project, payment_for) and sets invoice_document.
+   * Always creates a new invoice row so upload history is preserved.
    */
   async uploadInvoiceDocument(
     companyId: string,
@@ -6020,27 +6089,17 @@ export class CompanyProjectsService {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
 
-    let invoice = await this.companyInvoiceModel.findOne({
+    const relativePath = `uploads/company/${companyId}/invoices/${file.filename}`;
+    const invoice = await this.companyInvoiceModel.create({
       company_id: companyId,
       project_id: projectId,
       payment_for: paymentFor,
+      payable_amount: 0,
+      tax_amount: 0,
+      total_amount: 0,
+      invoice_document: relativePath,
+      invoice_document_filename: file.originalname,
     });
-
-    if (!invoice) {
-      invoice = await this.companyInvoiceModel.create({
-        company_id: companyId,
-        project_id: projectId,
-        payment_for: paymentFor,
-        payable_amount: 0,
-        tax_amount: 0,
-        total_amount: 0,
-      });
-    }
-
-    const relativePath = `uploads/company/${companyId}/invoices/${file.filename}`;
-    invoice.invoice_document = relativePath;
-    invoice.invoice_document_filename = file.originalname;
-    await invoice.save();
 
     // LOG ACTIVITY 8: CII uploaded the PI/Tax Invoice
     await this.companyActivityModel.create({

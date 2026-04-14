@@ -11,8 +11,26 @@ import {
 import { Transform, Type } from 'class-transformer';
 
 export class CreateProformaInvoiceV2Dto {
+  @Transform(({ value, obj }) => {
+    if (value === 'proforma' || value === 'tax') return value;
+    const paymentFor = String(obj?.payment_for ?? '').trim().toLowerCase();
+    if (paymentFor === 'inv') return 'tax';
+    if (paymentFor === 'per_inv') return 'proforma';
+    const paymentType = String(obj?.payment_type ?? '').trim().toLowerCase();
+    if (paymentType === 'tax') return 'tax';
+    if (paymentType === 'proforma') return 'proforma';
+    return value;
+  })
   @IsIn(['proforma', 'tax'])
   invoice_type: 'proforma' | 'tax';
+
+  @IsOptional()
+  @IsIn(['per_inv', 'inv'])
+  payment_for?: 'per_inv' | 'inv';
+
+  @IsOptional()
+  @IsIn(['proforma', 'tax'])
+  payment_type?: 'proforma' | 'tax';
 
   @IsString()
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
