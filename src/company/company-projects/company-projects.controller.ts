@@ -627,6 +627,7 @@ export class CompanyProjectsController {
   @Post(':projectId/proposal-document')
   @Put(':projectId/proposal-document')
   @Patch(':projectId/proposal-document')
+  @UseGuards()
   @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
   @UseInterceptors(
     FileFieldsInterceptor(

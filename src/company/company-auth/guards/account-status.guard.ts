@@ -16,6 +16,15 @@ export class AccountStatusGuard implements CanActivate {
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest();
+    const method = String(request?.method || '').toUpperCase();
+    const path = String(request?.path || request?.url || '');
+    const isProposalWrite =
+      ['POST', 'PUT', 'PATCH'].includes(method) &&
+      /\/api\/company\/projects\/[^/]+\/proposal-document(?:\/reupload)?$/.test(path);
+    if (isProposalWrite) {
+      return true;
+    }
+
     const user = request.user;
 
     if (!user || !user.userId) {
