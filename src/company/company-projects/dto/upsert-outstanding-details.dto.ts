@@ -1,4 +1,4 @@
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import { IsDateString, IsIn, IsNumber, IsOptional, IsString, MaxLength, Min } from 'class-validator';
 
 export class UpsertOutstandingDetailsDto {
@@ -15,10 +15,12 @@ export class UpsertOutstandingDetailsDto {
   outstanding_amt?: number;
 
   @IsOptional()
+  @Transform(({ value }) => (value === '' ? undefined : value))
   @IsDateString({}, { message: 'date must be in valid date format' })
   date?: string;
 
   @IsOptional()
+  @Transform(({ value }) => (value === '' ? undefined : value))
   @IsDateString({}, { message: 'outstanding_date must be in valid date format' })
   outstanding_date?: string;
 
@@ -50,6 +52,7 @@ export class UpsertOutstandingDetailsDto {
   paid_amount?: number;
 
   @IsOptional()
+  @Transform(({ value }) => (value === '' ? undefined : value))
   @IsDateString({}, { message: 'paid_date must be in valid date format' })
   paid_date?: string;
 
