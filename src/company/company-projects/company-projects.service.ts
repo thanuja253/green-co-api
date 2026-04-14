@@ -6028,14 +6028,33 @@ export class CompanyProjectsService {
     }
 
     const details = (project as any).outstanding_details || {};
+    const outstandingAmount = Number(details.outstanding_amount ?? 0);
+    const outstandingPaid = Number(details.outstanding_amt_paid ?? 0);
+    const dueAmount = Number(
+      details.due_outstanding_amt ??
+        Math.max(0, outstandingAmount - outstandingPaid),
+    );
+    const nextAction = dueAmount > 0 ? 'pay_due' : 'paid';
     return {
       status: 'success',
       message: 'Outstanding details fetched successfully',
       data: {
-        outstanding_amount: Number(details.outstanding_amount ?? 0),
+        outstanding_amount: outstandingAmount,
+        outstanding_amt: outstandingAmount,
         date: details.date ?? null,
+        outstanding_date: details.date ?? null,
         remarks: details.remarks || '',
+        outstanding_remark: details.remarks || '',
         status: details.status || 'Unpaid',
+        paid_amt: outstandingPaid,
+        outstanding_amt_paid: outstandingPaid,
+        due_outstanding_amt: dueAmount,
+        remaining_amount: dueAmount,
+        remaining_balance: dueAmount,
+        paid_date: details.paid_date ?? null,
+        paid_remark: details.paid_remark ?? '',
+        next_action: nextAction,
+        action_button_label: nextAction === 'pay_due' ? 'Pay Due' : 'Paid',
       },
     };
   }
@@ -6051,11 +6070,69 @@ export class CompanyProjectsService {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
 
+    const outstandingAmount = Number(dto.outstanding_amount ?? dto.outstanding_amt);
+    const dateRaw = dto.date ?? dto.outstanding_date;
+    const remarksRaw = String(dto.remarks ?? dto.outstanding_remark ?? '').trim();
+    const statusRaw = String(dto.status ?? 'Unpaid').trim().toLowerCase();
+    const normalizedStatus = statusRaw === 'paid' ? 'Paid' : 'Unpaid';
+
+    if (!Number.isFinite(outstandingAmount) || outstandingAmount < 0) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'outstanding_amt/outstanding_amount is required and must be >= 0',
+      });
+    }
+    if (!dateRaw) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'outstanding_date/date is required',
+      });
+    }
+    if (!remarksRaw) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'outstanding_remark/remarks is required',
+      });
+    }
+
+    const paidAmt = Number(dto.paid_amt ?? dto.paid_amount ?? 0);
+    if (normalizedStatus === 'Paid') {
+      if (!Number.isFinite(paidAmt) || paidAmt < 0) {
+        throw new BadRequestException({
+          status: 'error',
+          message: 'paid_amt is required and must be >= 0 when status is paid',
+        });
+      }
+      if (paidAmt > outstandingAmount) {
+        throw new BadRequestException({
+          status: 'error',
+          message: 'paid_amt cannot exceed outstanding_amt',
+        });
+      }
+      if (!dto.paid_date || !String(dto.paid_remark ?? '').trim()) {
+        throw new BadRequestException({
+          status: 'error',
+          message: 'paid_date and paid_remark are required when status is paid',
+        });
+      }
+    }
+
+    const outstandingPaid = normalizedStatus === 'Paid' ? paidAmt : 0;
+    const dueOutstanding = Math.max(0, outstandingAmount - outstandingPaid);
+    const finalStatus = dueOutstanding > 0 ? 'Unpaid' : 'Paid';
+    const nextAction = dueOutstanding > 0 ? 'pay_due' : 'paid';
+
     const payload = {
-      outstanding_amount: Number(dto.outstanding_amount),
-      date: new Date(dto.date),
-      remarks: dto.remarks.trim(),
-      status: dto.status,
+      outstanding_amount: outstandingAmount,
+      date: new Date(dateRaw),
+      remarks: remarksRaw,
+      status: finalStatus,
+      outstanding_amt_paid: outstandingPaid,
+      due_outstanding_amt: dueOutstanding,
+      paid_date:
+        normalizedStatus === 'Paid' && dto.paid_date ? new Date(dto.paid_date) : null,
+      paid_remark:
+        normalizedStatus === 'Paid' ? String(dto.paid_remark ?? '').trim() : '',
     };
 
     (project as any).outstanding_details = payload;
@@ -6065,8 +6142,22 @@ export class CompanyProjectsService {
       status: 'success',
       message: 'Outstanding details saved successfully',
       data: {
-        ...payload,
+        outstanding_amount: payload.outstanding_amount,
+        outstanding_amt: payload.outstanding_amount,
         date: payload.date.toISOString(),
+        outstanding_date: payload.date.toISOString(),
+        remarks: payload.remarks,
+        outstanding_remark: payload.remarks,
+        status: payload.status,
+        paid_amt: payload.outstanding_amt_paid,
+        outstanding_amt_paid: payload.outstanding_amt_paid,
+        due_outstanding_amt: payload.due_outstanding_amt,
+        remaining_amount: payload.due_outstanding_amt,
+        remaining_balance: payload.due_outstanding_amt,
+        paid_date: payload.paid_date ? payload.paid_date.toISOString() : null,
+        paid_remark: payload.paid_remark,
+        next_action: nextAction,
+        action_button_label: nextAction === 'pay_due' ? 'Pay Due' : 'Paid',
       },
     };
   }

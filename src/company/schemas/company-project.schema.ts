@@ -150,6 +150,10 @@ export class CompanyProject {
       date: { type: Date, default: null },
       remarks: { type: String, default: '' },
       status: { type: String, default: 'Unpaid' },
+      outstanding_amt_paid: { type: Number, default: 0 },
+      due_outstanding_amt: { type: Number, default: 0 },
+      paid_date: { type: Date, default: null },
+      paid_remark: { type: String, default: '' },
     },
     default: null,
   })
@@ -158,6 +162,10 @@ export class CompanyProject {
     date: Date | null;
     remarks: string;
     status: 'Unpaid' | 'Partial' | 'Paid';
+    outstanding_amt_paid?: number;
+    due_outstanding_amt?: number;
+    paid_date?: Date | null;
+    paid_remark?: string;
   } | null;
 }
 
