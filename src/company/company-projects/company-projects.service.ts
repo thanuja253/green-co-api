@@ -5170,6 +5170,10 @@ export class CompanyProjectsService {
           igst: Number(inv.igst ?? 0),
           tax_amount: Number(inv.tax_amount ?? 0),
           total_amount: Number(inv.total_amount ?? 0),
+          trans_id: inv.trans_id ?? null,
+          payment_type: inv.payment_type ?? null,
+          offline_tran_doc: inv.offline_tran_doc ? toUrl(inv.offline_tran_doc) : null,
+          offline_tran_doc_filename: inv.offline_tran_doc_filename ?? null,
           send_reminder: Number(inv.send_reminder ?? 0),
           send_invoice_to: inv.send_invoice_to ?? null,
           reminder_date: inv.reminder_date?.toISOString?.() ?? null,
@@ -5183,6 +5187,8 @@ export class CompanyProjectsService {
           outstanding_status: inv.outstanding_status ?? 'Unpaid',
           approval_status: Number(inv.approval_status ?? 0),
           approval_status_label: INVOICE_APPROVAL_STATUS[inv.approval_status ?? 0] ?? 'Pending',
+          approval_status_color: INVOICE_APPROVAL_STATUS_COLORS[inv.approval_status ?? 0] ?? 'warning',
+          remarks: inv.remarks ?? null,
           reminders_sent_count: Number(inv.reminders_sent_count ?? 0),
           max_reminders: inv.max_reminders ?? null,
           reminder_end_date: inv.reminder_end_date?.toISOString?.() ?? null,
@@ -5574,7 +5580,7 @@ export class CompanyProjectsService {
       throw new NotFoundException({ status: 'error', message: 'Invoice not found' });
     }
     (invoice as any).approval_status = Number(dto.approval_status);
-    (invoice as any).remarks = dto.remarks;
+    (invoice as any).remarks = dto.remarks ?? (dto as any).approval_remarks ?? null;
     (invoice as any).approved_at = new Date();
     await invoice.save();
     return {
@@ -5644,6 +5650,20 @@ export class CompanyProjectsService {
     const invoiceType =
       invoice.invoice_type === 'tax' ? 'Tax Invoice' : 'Proforma Invoice';
     await this.mailService.sendPaymentReminderEmail(recipientEmail, recipientName, invoiceType);
+  }
+
+  /**
+   * Get invoices for project by type (Payments/Proforma = per_inv, Tax Invoices = inv).
+   */
+  async getInvoicesByProjectId(
+    projectId: string,
+    paymentFor: 'per_inv' | 'inv',
+  ) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.getInvoices(String(resolved.company_id), String(resolved._id), paymentFor);
   }
 
   /**

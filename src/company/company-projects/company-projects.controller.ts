@@ -1434,35 +1434,30 @@ export class CompanyProjectsController {
   /**
    * Finance: Payments/Proforma invoices (payment_for = per_inv).
    * GET /api/company/projects/:projectId/proforma-invoices
+   *
+   * Response: `{ status, message, data: { invoices, ... } }` where `data.invoices[]` matches
+   * frontend `CompanyInvoiceItem` keys including: `trans_id`, `payment_type` ('Online' | 'Offline'),
+   * `offline_tran_doc` (absolute URL), `offline_tran_doc_filename`.
    */
   @Get(':projectId/proforma-invoices')
-  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   async getProformaInvoices(
-    @Request() req,
     @Param('projectId') projectId: string,
   ): Promise<any> {
-    return this.companyProjectsService.getInvoices(
-      req.user.userId,
-      projectId,
-      'per_inv',
-    );
+    return this.companyProjectsService.getInvoicesByProjectId(projectId, 'per_inv');
   }
 
   /**
    * Finance: Tax Invoices (payment_for = inv).
    * GET /api/company/projects/:projectId/tax-invoices
+   *
+   * Same response shape as proforma-invoices: `data.invoices[]` with `trans_id`, `payment_type`,
+   * `offline_tran_doc`, `offline_tran_doc_filename` (and other invoice fields from `getInvoices`).
    */
   @Get(':projectId/tax-invoices')
-  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   async getTaxInvoices(
-    @Request() req,
     @Param('projectId') projectId: string,
   ): Promise<any> {
-    return this.companyProjectsService.getInvoices(
-      req.user.userId,
-      projectId,
-      'inv',
-    );
+    return this.companyProjectsService.getInvoicesByProjectId(projectId, 'inv');
   }
 
   /**
