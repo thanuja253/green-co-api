@@ -6017,6 +6017,73 @@ export class CompanyProjectsService {
     };
   }
 
+  private normalizeOutstandingStatus(value: unknown): 'Unpaid' | 'Partial' | 'Paid' {
+    const raw = String(value ?? '').trim().toLowerCase();
+    if (raw === 'paid') return 'Paid';
+    if (raw === 'partial') return 'Partial';
+    return 'Unpaid';
+  }
+
+  private getOutstandingPaymentHistory(details: any): any[] {
+    const normalized = Array.isArray(details?.payment_history)
+      ? details.payment_history
+          .map((entry: any) => ({
+            payment_amount: Number(entry?.payment_amount ?? 0),
+            paid_date: entry?.paid_date ? new Date(entry.paid_date) : null,
+            paid_remark: String(entry?.paid_remark ?? ''),
+            paid_total_after: Number(entry?.paid_total_after ?? 0),
+            due_amount_after: Number(entry?.due_amount_after ?? 0),
+            status_after: this.normalizeOutstandingStatus(entry?.status_after),
+            source: String(entry?.source ?? 'due_payment'),
+            created_at: entry?.created_at ? new Date(entry.created_at) : new Date(),
+          }))
+          .filter((entry: any) => Number.isFinite(entry.payment_amount) && entry.payment_amount >= 0)
+      : [];
+
+    // Backward compatibility for old records that only have aggregated paid fields.
+    if (!normalized.length) {
+      const legacyPaid = Number(details?.outstanding_amt_paid ?? details?.paid_amt ?? 0);
+      if (Number.isFinite(legacyPaid) && legacyPaid > 0) {
+        const outstandingAmount = Number(details?.outstanding_amount ?? 0);
+        const dueAmount = Number(
+          details?.due_outstanding_amt ?? Math.max(0, outstandingAmount - legacyPaid),
+        );
+        normalized.push({
+          payment_amount: legacyPaid,
+          paid_date: details?.paid_date ? new Date(details.paid_date) : null,
+          paid_remark: String(details?.paid_remark ?? ''),
+          paid_total_after: legacyPaid,
+          due_amount_after: Number.isFinite(dueAmount) ? dueAmount : 0,
+          status_after: this.normalizeOutstandingStatus(details?.status),
+          source: 'legacy_backfill',
+          created_at: details?.paid_date ? new Date(details.paid_date) : new Date(),
+        });
+      }
+    }
+
+    normalized.sort((a: any, b: any) => {
+      const at = new Date(a?.created_at ?? a?.paid_date ?? 0).getTime();
+      const bt = new Date(b?.created_at ?? b?.paid_date ?? 0).getTime();
+      return at - bt;
+    });
+    return normalized;
+  }
+
+  private appendOutstandingHistoryEntry(details: any, entry: any): any[] {
+    const history = this.getOutstandingPaymentHistory(details);
+    const last = history.length ? history[history.length - 1] : null;
+    const sameAsLast =
+      !!last &&
+      Number(last.payment_amount ?? 0) === Number(entry.payment_amount ?? 0) &&
+      String(last.paid_remark ?? '') === String(entry.paid_remark ?? '') &&
+      new Date(last.paid_date ?? 0).getTime() === new Date(entry.paid_date ?? 0).getTime() &&
+      Number(last.paid_total_after ?? 0) === Number(entry.paid_total_after ?? 0) &&
+      Number(last.due_amount_after ?? 0) === Number(entry.due_amount_after ?? 0) &&
+      String(last.source ?? '') === String(entry.source ?? '');
+    if (sameAsLast) return history;
+    return [...history, entry];
+  }
+
   async getOutstandingDetailsByProjectId(projectId: string) {
     const resolved = await this.resolveProjectForAdmin(projectId);
     if (!resolved?._id) {
@@ -6035,6 +6102,7 @@ export class CompanyProjectsService {
       details.due_outstanding_amt ??
         Math.max(0, outstandingAmount - outstandingPaid),
     );
+    const paymentHistory = this.getOutstandingPaymentHistory(details);
     const nextAction = dueAmount > 0 ? 'pay_due' : 'paid';
     return {
       status: 'success',
@@ -6054,6 +6122,17 @@ export class CompanyProjectsService {
         remaining_balance: dueAmount,
         paid_date: details.paid_date ?? null,
         paid_remark: details.paid_remark ?? '',
+        payment_history: paymentHistory.map((entry: any) => ({
+          payment_amount: Number(entry.payment_amount ?? 0),
+          paid_date: entry.paid_date ? new Date(entry.paid_date).toISOString() : null,
+          paid_remark: String(entry.paid_remark ?? ''),
+          paid_total_after: Number(entry.paid_total_after ?? 0),
+          due_amount_after: Number(entry.due_amount_after ?? 0),
+          status_after: this.normalizeOutstandingStatus(entry.status_after),
+          source: String(entry.source ?? 'due_payment'),
+          created_at: entry.created_at ? new Date(entry.created_at).toISOString() : null,
+        })),
+        payment_history_count: paymentHistory.length,
         next_action: nextAction,
         action_button_label: nextAction === 'pay_due' ? 'Pay Due' : 'Paid',
       },
@@ -6074,8 +6153,7 @@ export class CompanyProjectsService {
     const outstandingAmount = Number(dto.outstanding_amount ?? dto.outstanding_amt);
     const dateRaw = dto.date ?? dto.outstanding_date;
     const remarksRaw = String(dto.remarks ?? dto.outstanding_remark ?? '').trim();
-    const statusRaw = String(dto.status ?? 'Unpaid').trim().toLowerCase();
-    const normalizedStatus = statusRaw === 'paid' ? 'Paid' : 'Unpaid';
+    const normalizedStatus = this.normalizeOutstandingStatus(dto.status ?? 'Unpaid');
 
     if (!Number.isFinite(outstandingAmount) || outstandingAmount < 0) {
       throw new BadRequestException({
@@ -6097,11 +6175,11 @@ export class CompanyProjectsService {
     }
 
     const paidAmt = Number(dto.paid_amt ?? dto.paid_amount ?? 0);
-    if (normalizedStatus === 'Paid') {
+    if (normalizedStatus === 'Paid' || normalizedStatus === 'Partial') {
       if (!Number.isFinite(paidAmt) || paidAmt < 0) {
         throw new BadRequestException({
           status: 'error',
-          message: 'paid_amt is required and must be >= 0 when status is paid',
+          message: 'paid_amt is required and must be >= 0 when status is paid/partial',
         });
       }
       if (paidAmt > outstandingAmount) {
@@ -6113,15 +6191,29 @@ export class CompanyProjectsService {
       if (!dto.paid_date || !String(dto.paid_remark ?? '').trim()) {
         throw new BadRequestException({
           status: 'error',
-          message: 'paid_date and paid_remark are required when status is paid',
+          message: 'paid_date and paid_remark are required when status is paid/partial',
         });
       }
     }
 
-    const outstandingPaid = normalizedStatus === 'Paid' ? paidAmt : 0;
+    const outstandingPaid = normalizedStatus === 'Paid' || normalizedStatus === 'Partial' ? paidAmt : 0;
     const dueOutstanding = Math.max(0, outstandingAmount - outstandingPaid);
-    const finalStatus = normalizedStatus;
+    const finalStatus = dueOutstanding <= 0 ? 'Paid' : outstandingPaid > 0 ? 'Partial' : 'Unpaid';
     const nextAction = dueOutstanding > 0 ? 'pay_due' : 'paid';
+    const existingDetails = ((project as any).outstanding_details || {}) as any;
+    let paymentHistory = this.getOutstandingPaymentHistory(existingDetails);
+    if (outstandingPaid > 0) {
+      paymentHistory = this.appendOutstandingHistoryEntry(existingDetails, {
+        payment_amount: outstandingPaid,
+        paid_date: dto.paid_date ? new Date(dto.paid_date) : null,
+        paid_remark: String(dto.paid_remark ?? '').trim(),
+        paid_total_after: outstandingPaid,
+        due_amount_after: dueOutstanding,
+        status_after: finalStatus,
+        source: 'manual_update',
+        created_at: new Date(),
+      });
+    }
 
     const payload = {
       outstanding_amount: outstandingAmount,
@@ -6131,9 +6223,14 @@ export class CompanyProjectsService {
       outstanding_amt_paid: outstandingPaid,
       due_outstanding_amt: dueOutstanding,
       paid_date:
-        normalizedStatus === 'Paid' && dto.paid_date ? new Date(dto.paid_date) : null,
+        (normalizedStatus === 'Paid' || normalizedStatus === 'Partial') && dto.paid_date
+          ? new Date(dto.paid_date)
+          : null,
       paid_remark:
-        normalizedStatus === 'Paid' ? String(dto.paid_remark ?? '').trim() : '',
+        normalizedStatus === 'Paid' || normalizedStatus === 'Partial'
+          ? String(dto.paid_remark ?? '').trim()
+          : '',
+      payment_history: paymentHistory,
     };
 
     (project as any).outstanding_details = payload;
@@ -6157,6 +6254,17 @@ export class CompanyProjectsService {
         remaining_balance: payload.due_outstanding_amt,
         paid_date: payload.paid_date ? payload.paid_date.toISOString() : null,
         paid_remark: payload.paid_remark,
+        payment_history: paymentHistory.map((entry: any) => ({
+          payment_amount: Number(entry.payment_amount ?? 0),
+          paid_date: entry.paid_date ? new Date(entry.paid_date).toISOString() : null,
+          paid_remark: String(entry.paid_remark ?? ''),
+          paid_total_after: Number(entry.paid_total_after ?? 0),
+          due_amount_after: Number(entry.due_amount_after ?? 0),
+          status_after: this.normalizeOutstandingStatus(entry.status_after),
+          source: String(entry.source ?? 'due_payment'),
+          created_at: entry.created_at ? new Date(entry.created_at).toISOString() : null,
+        })),
+        payment_history_count: paymentHistory.length,
         next_action: nextAction,
         action_button_label: nextAction === 'pay_due' ? 'Pay Due' : 'Paid',
       },
@@ -6195,12 +6303,26 @@ export class CompanyProjectsService {
 
     const nextPaid = paidSoFar + dueAmt;
     const nextDue = Math.max(0, currentDue - dueAmt);
+    const nextStatus = nextDue <= 0 ? 'Paid' : nextPaid > 0 ? 'Partial' : 'Unpaid';
+    const paidAt = dto.paid_date ? new Date(dto.paid_date) : new Date();
+    const paidRemark = String(dto.paid_remark ?? details.paid_remark ?? '').trim();
+    const paymentHistory = this.appendOutstandingHistoryEntry(details, {
+      payment_amount: dueAmt,
+      paid_date: paidAt,
+      paid_remark: paidRemark,
+      paid_total_after: nextPaid,
+      due_amount_after: nextDue,
+      status_after: nextStatus,
+      source: 'due_payment',
+      created_at: new Date(),
+    });
     details.outstanding_amt_paid = nextPaid;
     details.paid_amt = nextPaid;
     details.due_outstanding_amt = nextDue;
-    details.status = nextDue <= 0 ? 'Paid' : 'Unpaid';
-    details.paid_date = dto.paid_date ? new Date(dto.paid_date) : new Date();
-    if (dto.paid_remark) details.paid_remark = dto.paid_remark;
+    details.status = nextStatus;
+    details.paid_date = paidAt;
+    details.paid_remark = paidRemark;
+    details.payment_history = paymentHistory;
 
     (project as any).outstanding_details = details;
     await project.save();
@@ -6215,6 +6337,17 @@ export class CompanyProjectsService {
         remaining_amount: Number(details.due_outstanding_amt ?? 0),
         remaining_balance: Number(details.due_outstanding_amt ?? 0),
         status: details.status ?? 'Unpaid',
+        payment_history: paymentHistory.map((entry: any) => ({
+          payment_amount: Number(entry.payment_amount ?? 0),
+          paid_date: entry.paid_date ? new Date(entry.paid_date).toISOString() : null,
+          paid_remark: String(entry.paid_remark ?? ''),
+          paid_total_after: Number(entry.paid_total_after ?? 0),
+          due_amount_after: Number(entry.due_amount_after ?? 0),
+          status_after: this.normalizeOutstandingStatus(entry.status_after),
+          source: String(entry.source ?? 'due_payment'),
+          created_at: entry.created_at ? new Date(entry.created_at).toISOString() : null,
+        })),
+        payment_history_count: paymentHistory.length,
         next_action: Number(details.due_outstanding_amt ?? 0) > 0 ? 'pay_due' : 'paid',
         action_button_label: Number(details.due_outstanding_amt ?? 0) > 0 ? 'Pay Due' : 'Paid',
       },
