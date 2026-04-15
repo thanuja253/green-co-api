@@ -5163,8 +5163,9 @@ export class CompanyProjectsService {
       data: {
         invoices: invoices.map((inv: any) => ({
           id: String(inv._id),
+          payment_for_label: this.getInvoiceDisplayLabel(inv.payment_for, inv.invoice_type),
           invoice_type: inv.invoice_type ?? (inv.payment_for === PAYMENT_FOR_TAX ? 'tax' : 'proforma'),
-          invoice_title: inv.invoice_title ?? null,
+          invoice_title: this.normalizeInvoiceTitle(inv.invoice_title, inv.payment_for, inv.invoice_type),
           invoice_document: toUrl(inv.invoice_document),
           invoice_document_filename: inv.invoice_document_filename ?? null,
           invoice_document_history: Array.isArray(inv.invoice_document_history)
@@ -5702,6 +5703,33 @@ export class CompanyProjectsService {
     await this.mailService.sendPaymentReminderEmail(recipientEmail, recipientName, invoiceType);
   }
 
+  private getInvoiceDisplayLabel(
+    paymentFor?: string | null,
+    invoiceType?: string | null,
+  ): string {
+    const type = String(invoiceType ?? '').trim().toLowerCase();
+    const payment = String(paymentFor ?? '').trim().toLowerCase();
+    if (type === 'proforma' || payment === PAYMENT_FOR_PROFORMA) return 'Proforma Invoice';
+    if (type === 'tax' || payment === PAYMENT_FOR_TAX) return 'Tax Invoice';
+    if (payment === 'expa') return 'Expense Invoice';
+    return 'Invoice';
+  }
+
+  private normalizeInvoiceTitle(
+    title: unknown,
+    paymentFor?: string | null,
+    invoiceType?: string | null,
+  ): string {
+    const fallback = this.getInvoiceDisplayLabel(paymentFor, invoiceType);
+    const raw = String(title ?? '').trim();
+    if (!raw) return fallback;
+    const compact = raw.toLowerCase().replace(/\s+/g, '');
+    if (compact === 'proforma' || compact === 'proformainvoice') return 'Proforma Invoice';
+    if (compact === 'tax' || compact === 'taxinvoice') return 'Tax Invoice';
+    if (compact === 'expense' || compact === 'expenseinvoice') return 'Expense Invoice';
+    return raw;
+  }
+
   /**
    * Get invoices for project by type (Payments/Proforma = per_inv, Tax Invoices = inv).
    */
@@ -5744,7 +5772,8 @@ export class CompanyProjectsService {
         invoices: invoices.map((inv: any, idx: number) => ({
           id: String(inv._id),
           payment_for: inv.payment_for,
-          invoice_title: inv.invoice_title ?? null,
+          payment_for_label: this.getInvoiceDisplayLabel(inv.payment_for, inv.invoice_type),
+          invoice_title: this.normalizeInvoiceTitle(inv.invoice_title, inv.payment_for, inv.invoice_type),
           invoice_document: toUrl(inv.invoice_document),
           invoice_document_filename: inv.invoice_document_filename ?? null,
           invoice_document_history: Array.isArray(inv.invoice_document_history)
@@ -5814,6 +5843,8 @@ export class CompanyProjectsService {
     const list = invoices.map((inv: any, idx: number) => ({
       id: inv._id.toString(),
       payment_for: inv.payment_for,
+      payment_for_label: this.getInvoiceDisplayLabel(inv.payment_for, inv.invoice_type),
+      invoice_title: this.normalizeInvoiceTitle(inv.invoice_title, inv.payment_for, inv.invoice_type),
       invoice_document: toUrl(inv.invoice_document),
       invoice_document_filename: inv.invoice_document_filename,
       invoice_document_history: Array.isArray(inv.invoice_document_history)
