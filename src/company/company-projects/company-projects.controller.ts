@@ -1097,6 +1097,19 @@ export class CompanyProjectsController {
   }
 
   /**
+   * Primary Data EE only: load Energy Efficiency section data.
+   * GET /api/company/projects/:projectId/primary-data/ee
+   */
+  @Get(':projectId/primary-data/ee')
+  async getPrimaryDataEe(
+    @Request() req,
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    const companyId = req?.user?.userId;
+    return this.companyProjectsService.getPrimaryDataEe(companyId, projectId);
+  }
+
+  /**
    * Primary Data: list sections (info_type, tab_id, label).
    * GET /api/company/projects/:projectId/primary-data/sections
    */
@@ -1126,6 +1139,25 @@ export class CompanyProjectsController {
       formType,
       payload,
       body?.final_submit,
+    );
+  }
+
+  /**
+   * Primary Data EE only: save with legacy EE payload shape.
+   * POST /api/company/projects/:projectId/primary-data/ee
+   * Body supports: form_type=ee, ee[6], ee[7], ... (same as legacy /company/primary_data/:projectId).
+   */
+  @Post(':projectId/primary-data/ee')
+  async savePrimaryDataEe(
+    @Request() req,
+    @Param('projectId') projectId: string,
+    @Body() body: { form_type?: string; formType?: string; ee?: Record<string, any> | any[]; [key: string]: any },
+  ): Promise<any> {
+    const companyId = req?.user?.userId;
+    return this.companyProjectsService.savePrimaryDataEeByCompanyProjectId(
+      companyId,
+      projectId,
+      body,
     );
   }
 

@@ -770,7 +770,7 @@ export class AdminCompanyFlowController {
   @Post('company/primary_data/:companyProject')
   async savePrimaryDataGiLegacy(
     @Param('companyProject') companyProject: string,
-    @Body() body: { form_type?: string; formType?: string; gi?: Record<string, any> | any[] },
+    @Body() body: Record<string, any>,
   ): Promise<any> {
     return this.companyProjectsService.savePrimaryDataGiLegacyByProjectId(
       companyProject,
@@ -781,12 +781,79 @@ export class AdminCompanyFlowController {
   @Patch('company/primary_data/:companyProject')
   async updatePrimaryDataGiLegacy(
     @Param('companyProject') companyProject: string,
-    @Body() body: { form_type?: string; formType?: string; gi?: Record<string, any> | any[] },
+    @Body() body: Record<string, any>,
   ): Promise<any> {
     return this.companyProjectsService.updatePrimaryDataGiLegacyByProjectId(
       companyProject,
       body,
     );
+  }
+
+  @Get('company/import/ee/:projectid')
+  async viewEnergyImport(@Param('projectid') projectid: string): Promise<any> {
+    return {
+      status: 'success',
+      message: 'EE import endpoint available',
+      data: {
+        project_id: projectid,
+        upload_field: 'energy_efficiency',
+        accepted_extensions: ['.xls', '.xlsx', '.csv'],
+      },
+    };
+  }
+
+  @Post('company/import/ee/:projectid')
+  @UseInterceptors(
+    FileInterceptor('energy_efficiency', {
+      limits: { fileSize: 15 * 1024 * 1024 },
+      fileFilter: (_req, file, cb) => {
+        const ext = extname(file.originalname || '').toLowerCase();
+        if (!['.xls', '.xlsx', '.csv'].includes(ext)) {
+          cb(
+            new BadRequestException(
+              'Only excel(.xls or .xlsx) file types allowed',
+            ),
+            false,
+          );
+          return;
+        }
+        cb(null, true);
+      },
+    }),
+  )
+  async importEnergyData(
+    @Param('projectid') projectid: string,
+    @UploadedFile() energy_efficiency?: Express.Multer.File,
+  ): Promise<any> {
+    if (!energy_efficiency) {
+      throw new BadRequestException('Please upload a file to import data.');
+    }
+    return {
+      status: 'error',
+      message:
+        'EE spreadsheet import is not implemented in this API. Use POST /company/primary_data/:projectId with form_type=ee payload.',
+      data: { project_id: projectid },
+    };
+  }
+
+  @Get('company/energy_export')
+  async exportEnergy(
+    @Query('company_id') companyId: string,
+    @Res() res: Response,
+  ): Promise<void> {
+    if (!companyId?.trim()) {
+      throw new BadRequestException('company_id query parameter is required');
+    }
+    const { buffer, filename } =
+      await this.companyProjectsService.exportEnergyEfficiencyForCompany(
+        companyId.trim(),
+      );
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(buffer);
   }
 
   @Post('api/admin/upload_inv/:companyProject')

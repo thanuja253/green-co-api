@@ -1,0 +1,180 @@
+{
+  "projectId": "69dc96871560febcee823c35",
+  "backupAt": "2026-04-15T05:32:08.627Z",
+  "invoices": [
+    {
+      "_id": "69de7e55b7dafbc5e0f6eb37",
+      "company_id": "69dc96861560febcee823c33",
+      "project_id": "69dc96871560febcee823c35",
+      "payment_for": "per_inv",
+      "invoice_document": "uploads/company/69dc96861560febcee823c33/finance-v2/finance-v2-1776189013478.pdf",
+      "invoice_document_filename": "Text-to-PDF-Xi4.pdf",
+      "invoice_document_history": [
+        {
+          "path": "uploads/company/69dc96861560febcee823c33/finance-v2/finance-v2-1776189013478.pdf",
+          "filename": "Text-to-PDF-Xi4.pdf",
+          "uploaded_at": "2026-04-14T17:50:13.588Z",
+          "_id": "69de7e55b7dafbc5e0f6eb38"
+        }
+      ],
+      "payable_amount": 9000,
+      "tax_amount": 22,
+      "total_amount": 9022,
+      "payment_status": 1,
+      "approval_status": 1,
+      "invoice_type": "proforma",
+      "invoice_title": "first payment",
+      "sgst": 8,
+      "cgst": 9,
+      "igst": 5,
+      "send_reminder": 0,
+      "reminder_date": null,
+      "paid_amount": 9022,
+      "due_amount": 0,
+      "outstanding_status": "Paid",
+      "reminders_sent_count": 0,
+      "offline_tran_doc_history": [
+        {
+          "path": "uploads/company/69dc96861560febcee823c33/finance-v2-payments/finance-v2-payment-1776189196734-468343008.jpeg",
+          "filename": "education.jpeg",
+          "uploaded_at": "2026-04-14T17:53:16.802Z",
+          "_id": "69de7f0cb7dafbc5e0f6eb6d"
+        },
+        {
+          "path": "uploads/company/69dc96861560febcee823c33/finance-v2-payments/finance-v2-payment-1776189234054-147252964.jpg",
+          "filename": "Profile.jpg",
+          "uploaded_at": "2026-04-14T17:53:54.120Z",
+          "_id": "69de7f32b7dafbc5e0f6eba3"
+        }
+      ],
+      "createdAt": "2026-04-14T17:50:13.593Z",
+      "updatedAt": "2026-04-14T17:57:56.378Z",
+      "__v": 2,
+      "offline_tran_doc": "uploads/company/69dc96861560febcee823c33/finance-v2-payments/finance-v2-payment-1776189234054-147252964.jpg",
+      "offline_tran_doc_filename": "Profile.jpg",
+      "payment_type": "Offline",
+      "trans_id": "89000000",
+      "approved_at": "2026-04-14T17:57:56.369Z",
+      "remarks": "okkk"
+    },
+    {
+      "_id": "69de847a1433f2ad72b5a4cc",
+      "company_id": "69dc96861560febcee823c33",
+      "project_id": "69dc96871560febcee823c35",
+      "payment_for": "inv",
+      "invoice_document": "uploads/company/69dc96861560febcee823c33/finance-v2/finance-v2-1776190586582.png",
+      "invoice_document_filename": "cxlogo.png",
+      "invoice_document_history": [
+        {
+          "path": "uploads/company/69dc96861560febcee823c33/finance-v2/finance-v2-1776190586582.png",
+          "filename": "cxlogo.png",
+          "uploaded_at": "2026-04-14T18:16:26.697Z",
+          "_id": "69de847a1433f2ad72b5a4cd"
+        }
+      ],
+      "payable_amount": 87000,
+      "tax_amount": 17,
+      "total_amount": 87017,
+      "payment_status": 1,
+      "approval_status": 1,
+      "invoice_type": "tax",
+      "invoice_title": "tax proforma",
+      "sgst": 4,
+      "cgst": 7,
+      "igst": 6,
+      "send_reminder": 0,
+      "reminder_date": null,
+      "paid_amount": 87017,
+      "due_amount": 0,
+      "outstanding_status": "Paid",
+      "reminders_sent_count": 0,
+      "offline_tran_doc_history": [
+        {
+          "path": "uploads/company/69dc96861560febcee823c33/finance-v2-payments/finance-v2-payment-1776191944005-854562846.png",
+          "filename": "Frame 1948754591.png",
+          "uploaded_at": "2026-04-14T18:39:04.074Z",
+          "_id": "69de89c81433f2ad72b5a61a"
+        },
+        {
+          "path": "uploads/company/69dc96861560febcee823c33/finance-v2-payments/finance-v2-payment-1776192005122-414569201.jpg",
+          "filename": "Photo.jpg",
+          "uploaded_at": "2026-04-14T18:40:05.188Z",
+          "_id": "69de8a051433f2ad72b5a656"
+        }
+      ],
+      "createdAt": "2026-04-14T18:16:26.717Z",
+      "updatedAt": "2026-04-14T18:47:21.780Z",
+      "__v": 2,
+      "offline_tran_doc": "uploads/company/69dc96861560febcee823c33/finance-v2-payments/finance-v2-payment-1776192005122-414569201.jpg",
+      "offline_tran_doc_filename": "Photo.jpg",
+      "payment_type": "Offline",
+      "trans_id": "jklllllll",
+      "approved_at": "2026-04-14T18:47:21.775Z",
+      "remarks": "hoooo"
+    },
+    {
+      "_id": "69dea4c67c073a6e5b173a78",
+      "company_id": "69dc96861560febcee823c33",
+      "project_id": "69dc96871560febcee823c35",
+      "payment_for": "inv",
+      "invoice_document": "uploads/company/69dc96861560febcee823c33/finance-v2/finance-v2-1776198853911.png",
+      "invoice_document_filename": "Understand how AI-generated content impacts SEO ranking and how human-led strategies improve results. Learn E-E-A-T, trust signals, and ways to ensure content accuracy..png",
+      "invoice_document_history": [
+        {
+          "path": "uploads/company/69dc96861560febcee823c33/finance-v2/finance-v2-1776198853911.png",
+          "filename": "Understand how AI-generated content impacts SEO ranking and how human-led strategies improve results. Learn E-E-A-T, trust signals, and ways to ensure content accuracy..png",
+          "uploaded_at": "2026-04-14T20:34:14.011Z",
+          "_id": "69dea4c67c073a6e5b173a79"
+        }
+      ],
+      "payable_amount": 80000,
+      "tax_amount": 18,
+      "total_amount": 80018,
+      "payment_status": 1,
+      "approval_status": 1,
+      "invoice_type": "tax",
+      "invoice_title": "tax inoice",
+      "sgst": 9,
+      "cgst": 9,
+      "igst": 0,
+      "send_reminder": 0,
+      "reminder_date": null,
+      "paid_amount": 80018,
+      "due_amount": 0,
+      "outstanding_status": "Paid",
+      "reminders_sent_count": 0,
+      "offline_tran_doc_history": [
+        {
+          "path": "uploads/company/69dc96861560febcee823c33/finance-v2-payments/finance-v2-payment-1776200192821-845970037.png",
+          "filename": "screencapture-localhost-3000-productdetail-ion-sound-sleep-VM74wz-2026-03-26-19_12_19.png",
+          "uploaded_at": "2026-04-14T20:56:32.951Z",
+          "_id": "69deaa009082b8d6dc73c988"
+        }
+      ],
+      "createdAt": "2026-04-14T20:34:14.041Z",
+      "updatedAt": "2026-04-14T20:59:29.701Z",
+      "__v": 1,
+      "approved_at": "2026-04-14T20:59:29.700Z",
+      "remarks": "gooodone",
+      "offline_tran_doc": "uploads/company/69dc96861560febcee823c33/finance-v2-payments/finance-v2-payment-1776200192821-845970037.png",
+      "offline_tran_doc_filename": "screencapture-localhost-3000-productdetail-ion-sound-sleep-VM74wz-2026-03-26-19_12_19.png",
+      "payment_type": "Offline",
+      "trans_id": "9701072455"
+    }
+  ],
+  "project": {
+    "_id": "69dc96871560febcee823c35",
+    "company_id": "69dc96861560febcee823c33",
+    "outstanding_details": {
+      "outstanding_amount": 9000,
+      "date": "2026-04-15T00:00:00.000Z",
+      "remarks": "klll",
+      "status": "Paid",
+      "outstanding_amt_paid": 9000,
+      "due_outstanding_amt": 0,
+      "paid_date": "2026-04-07T00:00:00.000Z",
+      "paid_remark": "kk",
+      "_id": "69deb85b6f5690a14f6923f3"
+    }
+  }
+}

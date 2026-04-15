@@ -8272,6 +8272,79 @@ export class CompanyProjectsService {
     };
   }
 
+  async getPrimaryDataEe(companyId: string | undefined, projectId: string) {
+    const projectQuery: Record<string, any> = { _id: projectId };
+    if (companyId) {
+      projectQuery.company_id = companyId;
+    }
+    const project = await this.projectModel.findOne(projectQuery).lean();
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const resolvedCompanyId = String((project as any).company_id);
+    const cId = new Types.ObjectId(resolvedCompanyId);
+    const pId = new Types.ObjectId(String(projectId));
+    const [masterEeRows, savedEeRows] = await Promise.all([
+      this.masterPrimaryDataChecklistModel
+        .find({ info_type: 'ee', is_active: 1 })
+        .sort({ checklist_order: 1 })
+        .lean(),
+      this.primaryDataFormModel
+        .find({ company_id: cId, project_id: pId, info_type: 'ee' })
+        .lean(),
+    ]);
+
+    const savedByDataId = new Map<string, any>();
+    for (const row of savedEeRows as any[]) {
+      savedByDataId.set(String(row?.data_id ?? ''), row);
+    }
+
+    const eeRows = (masterEeRows as any[]).map((master) => {
+      const saved = savedByDataId.get(String(master?._id ?? ''));
+      return {
+        data_id: master?._id,
+        info_type: 'ee',
+        parameter: master?.parameter,
+        checklist_name: master?.checklist_name,
+        checklist_order: master?.checklist_order,
+        is_calculate: master?.is_calculate,
+        reference_unit: saved?.reference_unit ?? master?.reference_unit ?? '',
+        details: saved?.details ?? '',
+        fy1: saved?.fy1 ?? 0,
+        fy2: saved?.fy2 ?? 0,
+        fy3: saved?.fy3 ?? 0,
+        fy4: saved?.fy4 ?? 0,
+        exp: saved?.extrapolated ?? saved?.fy5 ?? 0,
+        extrapolated: saved?.extrapolated ?? 0,
+      };
+    });
+
+    const ee: Record<string, any> = {};
+    for (const row of eeRows) {
+      const key = String(row.data_id ?? '');
+      if (!key) continue;
+      ee[key] = {
+        details: row.details ?? row.reference_unit ?? '',
+        fy1: row.fy1 ?? 0,
+        fy2: row.fy2 ?? 0,
+        fy3: row.fy3 ?? 0,
+        fy4: row.fy4 ?? 0,
+        exp: row.exp ?? 0,
+      };
+    }
+
+    return {
+      status: 'success',
+      message: 'EE data loaded',
+      data: {
+        form_type: 'ee',
+        ee_rows: eeRows,
+        ee,
+      },
+    };
+  }
+
   async savePrimaryDataGiLegacyByProjectId(
     projectId: string,
     body: { form_type?: string; formType?: string; gi?: Record<string, any> | any[]; [key: string]: any },
@@ -8282,10 +8355,13 @@ export class CompanyProjectsService {
     }
 
     const formType = String(body?.form_type ?? body?.formType ?? 'gi').trim().toLowerCase();
+    if (formType === 'ee') {
+      return this.savePrimaryDataEeLegacyByProjectId(projectId, body);
+    }
     if (formType !== 'gi') {
       throw new BadRequestException({
         status: 'error',
-        message: 'form_type must be "gi"',
+        message: 'form_type must be "gi" or "ee"',
       });
     }
 
@@ -8596,6 +8672,345 @@ export class CompanyProjectsService {
     body: { form_type?: string; gi?: Record<string, any> },
   ) {
     return this.savePrimaryDataGiLegacyByProjectId(projectId, body);
+  }
+
+  async savePrimaryDataEeByCompanyProjectId(
+    companyId: string | undefined,
+    projectId: string,
+    body: { form_type?: string; formType?: string; ee?: Record<string, any> | any[]; [key: string]: any },
+  ) {
+    const projectQuery: Record<string, any> = { _id: projectId };
+    if (companyId) {
+      projectQuery.company_id = companyId;
+    }
+    const project = await this.projectModel.findOne(projectQuery).lean();
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const payload = {
+      ...body,
+      form_type: 'ee',
+    };
+    return this.savePrimaryDataEeLegacyByProjectId(projectId, payload);
+  }
+
+  private unitConvertToKwh(type: string, quantity: number): number {
+    switch (String(type || '').trim()) {
+      case 'GJ':
+        return 277.778 * quantity;
+      case 'Kcal':
+        return 0.00116222 * quantity;
+      case 'MTOE':
+        return 11630 * quantity;
+      case 'kWh':
+        return quantity;
+      default:
+        return 0;
+    }
+  }
+
+  private toFiniteNumberOrZero(value: unknown): number {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  private pickEeLegacyKeyForMasterRow(masterRow: any, index: number): number {
+    const text = `${masterRow?.parameter ?? ''} ${masterRow?.checklist_name ?? ''}`.toLowerCase();
+    if (text.includes('electrical energy consumption')) return 6;
+    if (text.includes('thermal energy consumption')) return 7;
+    if (text.includes('total electrical energy consumption')) return 8;
+    if (text.includes('total energy consumption')) return 9;
+    if (text.includes('electrical energy in total energy')) return 10;
+    if (text.includes('thermal energy in total energy')) return 11;
+    if (text.includes('specific electrical energy consumption')) return 12;
+    if (text.includes('specific thermal energy consumption')) return 13;
+    if (
+      text.includes('total specific energy consumption') &&
+      !text.includes('gj')
+    ) {
+      return 14;
+    }
+    if (
+      text.includes('total specific energy consumption') &&
+      text.includes('gj')
+    ) {
+      return 15;
+    }
+    if (
+      text.includes('reduction in specific energy consumption wrt baseline') ||
+      text.includes('reduction wrt baseline')
+    ) {
+      return 142;
+    }
+    if (text.includes('reduction in specific energy consumption')) return 16;
+
+    // Fallback by checklist order.
+    const fallbackOrder: number[] = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 142];
+    return fallbackOrder[index] ?? fallbackOrder[fallbackOrder.length - 1];
+  }
+
+  private normalizeEePayload(body: Record<string, any>): Record<string, any> {
+    if (body?.ee && typeof body.ee === 'object' && !Array.isArray(body.ee)) {
+      return body.ee as Record<string, any>;
+    }
+
+    if (Array.isArray(body?.ee)) {
+      const payload: Record<string, any> = {};
+      for (const row of body.ee as any[]) {
+        const key = String(row?.data_id ?? row?.dataId ?? '').trim();
+        if (!key) continue;
+        payload[key] = {
+          details: row?.details ?? row?.unit ?? row?.reference_unit ?? '',
+          fy1: row?.fy1,
+          fy2: row?.fy2,
+          fy3: row?.fy3,
+          fy4: row?.fy4,
+          exp: row?.exp ?? row?.extrapolated ?? row?.fy5,
+        };
+      }
+      return payload;
+    }
+
+    const payload: Record<string, any> = {};
+    const keyRegex = /^ee\[([^\]]+)\]\[(details|unit|reference_unit|fy1|fy2|fy3|fy4|exp|extrapolated|fy5)\]$/;
+    for (const [rawKey, rawValue] of Object.entries(body || {})) {
+      const match = rawKey.match(keyRegex);
+      if (!match) continue;
+      const dataId = String(match[1]).trim();
+      const field = match[2];
+      if (!payload[dataId]) payload[dataId] = {};
+      if (field === 'unit' || field === 'reference_unit') {
+        payload[dataId].details = rawValue;
+      } else if (field === 'extrapolated' || field === 'fy5') {
+        payload[dataId].exp = rawValue;
+      } else {
+        payload[dataId][field] = rawValue;
+      }
+    }
+    return payload;
+  }
+
+  private async savePrimaryDataEeLegacyByProjectId(
+    projectId: string,
+    body: { ee?: Record<string, any> | any[]; [key: string]: any },
+  ) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const companyObjectId = new Types.ObjectId(String(resolved.company_id));
+    const projectObjectId = new Types.ObjectId(String(resolved._id));
+    const eePayload = this.normalizeEePayload(body as Record<string, any>);
+
+    const [masterEeRows, giRows] = await Promise.all([
+      this.masterPrimaryDataChecklistModel
+        .find({ info_type: 'ee', is_active: 1 })
+        .sort({ checklist_order: 1 })
+        .lean(),
+      this.primaryDataFormModel
+        .find({ company_id: companyObjectId, project_id: projectObjectId, info_type: 'gi' })
+        .lean(),
+    ]);
+
+    if (!masterEeRows.length) {
+      throw new BadRequestException({ status: 'error', message: 'EE master checklist not found' });
+    }
+
+    const getInputRow = (legacyKey: string, fallbackIndex: number): Record<string, any> => {
+      const fallbackMaster = masterEeRows[fallbackIndex];
+      const fallbackKey = fallbackMaster?._id ? String(fallbackMaster._id) : '';
+      const row =
+        eePayload[legacyKey] ??
+        (fallbackKey ? eePayload[fallbackKey] : undefined) ??
+        {};
+      const details = String(
+        row?.details ??
+          row?.unit ??
+          row?.reference_unit ??
+          fallbackMaster?.reference_unit ??
+          '',
+      ).trim();
+      return {
+        unit: details,
+        fy1: this.toFiniteNumberOrZero(row?.fy1),
+        fy2: this.toFiniteNumberOrZero(row?.fy2),
+        fy3: this.toFiniteNumberOrZero(row?.fy3),
+        fy4: this.toFiniteNumberOrZero(row?.fy4),
+        exp: this.toFiniteNumberOrZero(row?.exp ?? row?.extrapolated ?? row?.fy5),
+      };
+    };
+
+    const eec = getInputRow('6', 0);
+    const tec = getInputRow('7', 1);
+
+    const output: Record<number, any> = {
+      6: { ...eec },
+      7: { ...tec },
+    };
+
+    output[8] = {
+      unit: 'kWh',
+      fy1: this.unitConvertToKwh(tec.unit, tec.fy1),
+      fy2: this.unitConvertToKwh(tec.unit, tec.fy2),
+      fy3: this.unitConvertToKwh(tec.unit, tec.fy3),
+      fy4: this.unitConvertToKwh(tec.unit, tec.fy4),
+      exp: this.unitConvertToKwh(tec.unit, tec.exp),
+    };
+
+    output[9] = {
+      unit: 'kWh',
+      fy1: eec.fy1 + output[8].fy1,
+      fy2: eec.fy2 + output[8].fy2,
+      fy3: eec.fy3 + output[8].fy3,
+      fy4: eec.fy4 + output[8].fy4,
+      exp: eec.exp + output[8].exp,
+    };
+
+    output[10] = {
+      unit: '%',
+      fy1: output[9].fy1 ? Number((((output[9].fy1 - output[8].fy1) * 100) / output[9].fy1).toFixed(4)) : 0,
+      fy2: output[9].fy2 ? Number((((output[9].fy2 - output[8].fy2) * 100) / output[9].fy2).toFixed(4)) : 0,
+      fy3: output[9].fy3 ? Number((((output[9].fy3 - output[8].fy3) * 100) / output[9].fy3).toFixed(4)) : 0,
+      fy4: output[9].fy4 ? Number((((output[9].fy4 - output[8].fy4) * 100) / output[9].fy4).toFixed(4)) : 0,
+      exp: output[9].exp ? Number((((output[9].exp - output[8].exp) * 100) / output[9].exp).toFixed(4)) : 0,
+    };
+
+    output[11] = {
+      unit: '%',
+      fy1: output[9].fy1 ? Number((((output[9].fy1 - output[6].fy1) * 100) / output[9].fy1).toFixed(4)) : 0,
+      fy2: output[9].fy2 ? Number((((output[9].fy2 - output[6].fy2) * 100) / output[9].fy2).toFixed(4)) : 0,
+      fy3: output[9].fy3 ? Number((((output[9].fy3 - output[6].fy3) * 100) / output[9].fy3).toFixed(4)) : 0,
+      fy4: output[9].fy4 ? Number((((output[9].fy4 - output[6].fy4) * 100) / output[9].fy4).toFixed(4)) : 0,
+      exp: output[9].exp ? Number((((output[9].exp - output[6].exp) * 100) / output[9].exp).toFixed(4)) : 0,
+    };
+
+    const giEquivalent = (giRows as any[]).find((r) =>
+      String(r?.parameter ?? '').toLowerCase().includes('equivalent'),
+    ) ?? (giRows as any[]).find((r) => String(r?.data_id ?? '') === '4') ?? (giRows as any[])[0];
+
+    const giFy1 = this.toFiniteNumberOrZero(giEquivalent?.fy1);
+    const giFy2 = this.toFiniteNumberOrZero(giEquivalent?.fy2);
+    const giFy3 = this.toFiniteNumberOrZero(giEquivalent?.fy3);
+    const giFy4 = this.toFiniteNumberOrZero(giEquivalent?.fy4);
+    const giExp = this.toFiniteNumberOrZero(giEquivalent?.extrapolated);
+    if (giFy1 < 1 || giFy2 < 1 || giFy3 < 1 || giFy4 < 1) {
+      throw new BadRequestException({
+        success: false,
+        message:
+          'Please enter equivalent product fields correctly , It should be more than 0.',
+        errors: {
+          gi: {
+            fy1: giFy1,
+            fy2: giFy2,
+            fy3: giFy3,
+            fy4: giFy4,
+          },
+        },
+      });
+    }
+
+    output[12] = {
+      unit: 'kWh/unit',
+      fy1: giFy1 ? Number((eec.fy1 / giFy1).toFixed(4)) : 0,
+      fy2: giFy2 ? Number((eec.fy2 / giFy2).toFixed(4)) : 0,
+      fy3: giFy3 ? Number((eec.fy3 / giFy3).toFixed(4)) : 0,
+      fy4: giFy4 ? Number((eec.fy4 / giFy4).toFixed(4)) : 0,
+      exp: giExp ? Number((eec.exp / giExp).toFixed(4)) : 0,
+    };
+
+    output[13] = {
+      unit: 'kWh/unit',
+      fy1: giFy1 ? Number((output[8].fy1 / giFy1).toFixed(4)) : 0,
+      fy2: giFy2 ? Number((output[7].fy2 / giFy2).toFixed(4)) : 0,
+      fy3: giFy3 ? Number((output[7].fy3 / giFy3).toFixed(4)) : 0,
+      fy4: giFy4 ? Number((output[7].fy4 / giFy4).toFixed(4)) : 0,
+      exp: giExp ? Number((output[7].exp / giExp).toFixed(4)) : 0,
+    };
+
+    output[14] = {
+      unit: 'kWh/unit',
+      fy1: giFy1 ? Number((output[9].fy1 / giFy1).toFixed(4)) : 0,
+      fy2: giFy2 ? Number((output[9].fy2 / giFy2).toFixed(4)) : 0,
+      fy3: giFy3 ? Number((output[9].fy3 / giFy3).toFixed(4)) : 0,
+      fy4: giFy4 ? Number((output[9].fy4 / giFy4).toFixed(4)) : 0,
+      exp: giExp ? Number((output[9].exp / giExp).toFixed(4)) : 0,
+    };
+
+    output[15] = {
+      unit: 'GJ/unit',
+      fy1: giFy1 ? Number(((output[9].fy1 / giFy1) / 277.778).toFixed(4)) : 0,
+      fy2: giFy2 ? Number(((output[9].fy2 / giFy2) / 277.778).toFixed(4)) : 0,
+      fy3: giFy3 ? Number(((output[9].fy3 / giFy3) / 277.778).toFixed(4)) : 0,
+      fy4: giFy4 ? Number(((output[9].fy4 / giFy4) / 277.778).toFixed(4)) : 0,
+      exp: giExp ? Number(((output[9].exp / giExp) / 277.778).toFixed(4)) : 0,
+    };
+
+    output[16] = {
+      unit: '%',
+      fy1: 0,
+      fy2: output[14].fy1 ? Number((((output[14].fy1 - output[14].fy2) * 100) / output[14].fy1).toFixed(4)) : 0,
+      fy3: output[14].fy2 ? Number((((output[14].fy2 - output[14].fy3) * 100) / output[14].fy2).toFixed(4)) : 0,
+      fy4: output[14].fy3 ? Number((((output[14].fy3 - output[14].fy4) * 100) / output[14].fy3).toFixed(4)) : 0,
+      exp: output[14].fy3 ? Number((((output[14].exp - output[14].exp) * 100) / output[14].fy3).toFixed(4)) : 0,
+    };
+
+    output[142] = {
+      unit: '%',
+      fy1: 0,
+      fy2: 0,
+      fy3: 0,
+      fy4: output[15].fy1 ? Number((((output[15].fy1 - output[15].fy4) * 100) / output[15].fy1).toFixed(4)) : 0,
+      exp: 0,
+    };
+
+    const docs = (masterEeRows as any[]).map((masterRow: any, index: number) => {
+      const legacyKey = this.pickEeLegacyKeyForMasterRow(masterRow, index);
+      const row = output[legacyKey] ?? {
+        unit: masterRow.reference_unit ?? '',
+        fy1: 0,
+        fy2: 0,
+        fy3: 0,
+        fy4: 0,
+        exp: 0,
+      };
+      return {
+        company_id: companyObjectId,
+        project_id: projectObjectId,
+        data_id: new Types.ObjectId(String(masterRow._id)),
+        info_type: 'ee',
+        parameter: masterRow.parameter,
+        reference_unit: String(row.unit ?? masterRow.reference_unit ?? ''),
+        details: String(row.unit ?? masterRow.reference_unit ?? ''),
+        fy1: this.toFiniteNumberOrZero(row.fy1),
+        fy2: this.toFiniteNumberOrZero(row.fy2),
+        fy3: this.toFiniteNumberOrZero(row.fy3),
+        fy4: this.toFiniteNumberOrZero(row.fy4),
+        extrapolated: this.toFiniteNumberOrZero(row.exp),
+        fy5: this.toFiniteNumberOrZero(row.exp),
+        document_status: PRIMARY_DATA_DOC_STATUS.PENDING,
+        final_submit: 0,
+      };
+    });
+
+    await this.primaryDataFormModel.deleteMany({
+      company_id: companyObjectId,
+      project_id: projectObjectId,
+      info_type: 'ee',
+    });
+    if (docs.length) {
+      await this.primaryDataFormModel.insertMany(docs);
+    }
+
+    return {
+      status: 'success',
+      success: true,
+      message: 'Primary Data save successfully',
+      data: {
+        form_type: 'ee',
+        saved_count: docs.length,
+      },
+    };
   }
 
   /**
@@ -8918,6 +9333,71 @@ export class CompanyProjectsService {
       message: 'Primary Data save successfully',
       data: { primary_data_approval_count: approvalCount },
     };
+  }
+
+  /**
+   * Export Energy Efficiency rows for a company (Laravel-compatible energy_export).
+   */
+  async exportEnergyEfficiencyForCompany(
+    companyId: string,
+  ): Promise<{ buffer: Buffer; filename: string }> {
+    const cId = new Types.ObjectId(companyId);
+    const rows = await this.primaryDataFormModel
+      .find({ company_id: cId, info_type: 'ee' })
+      .lean();
+    const dataIds = [
+      ...new Set((rows as any[]).map((r) => String(r?.data_id || '')).filter(Boolean)),
+    ];
+    const masters = dataIds.length
+      ? await this.masterPrimaryDataChecklistModel
+          .find({ _id: { $in: dataIds.map((id) => new Types.ObjectId(id)) } })
+          .lean()
+      : [];
+    const masterById = new Map((masters as any[]).map((m) => [String(m._id), m]));
+    const merged = (rows as any[])
+      .map((r) => {
+        const m = masterById.get(String(r?.data_id || ''));
+        return {
+          checklist_order: Number(m?.checklist_order ?? 0),
+          checklist_name: String(m?.checklist_name ?? ''),
+          parameter: String(m?.parameter ?? r?.parameter ?? ''),
+          reference_unit: String(r?.reference_unit ?? ''),
+          fy1: this.toFiniteNumberOrZero(r?.fy1),
+          fy2: this.toFiniteNumberOrZero(r?.fy2),
+          fy3: this.toFiniteNumberOrZero(r?.fy3),
+          fy4: this.toFiniteNumberOrZero(r?.fy4),
+          extrapolated: this.toFiniteNumberOrZero(r?.extrapolated ?? r?.fy5),
+        };
+      })
+      .sort((a, b) => a.checklist_order - b.checklist_order);
+
+    let Workbook: any;
+    try {
+      const exceljs = await import('exceljs');
+      Workbook = exceljs.Workbook;
+    } catch {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Excel export requires the exceljs package. Run: npm install exceljs',
+      });
+    }
+
+    const wb = new Workbook();
+    const ws = wb.addWorksheet('Energy Efficiency');
+    ws.columns = [
+      { header: 'checklist_order', key: 'checklist_order', width: 16 },
+      { header: 'checklist_name', key: 'checklist_name', width: 28 },
+      { header: 'parameter', key: 'parameter', width: 42 },
+      { header: 'reference_unit', key: 'reference_unit', width: 16 },
+      { header: 'fy1', key: 'fy1', width: 12 },
+      { header: 'fy2', key: 'fy2', width: 12 },
+      { header: 'fy3', key: 'fy3', width: 12 },
+      { header: 'fy4', key: 'fy4', width: 12 },
+      { header: 'extrapolated', key: 'extrapolated', width: 14 },
+    ];
+    ws.addRows(merged);
+    const buffer = (await wb.xlsx.writeBuffer()) as Buffer;
+    return { buffer, filename: 'Energy_Efficiency.xlsx' };
   }
 
   /**
