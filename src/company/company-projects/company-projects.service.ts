@@ -8420,8 +8420,12 @@ export class CompanyProjectsService {
       pushField(legacyGi[key], 'fy4', row?.fy4 ?? 0);
       pushField(legacyGi[key], 'exp', row?.fy5 ?? row?.extrapolated ?? null);
       const refUnit = row?.reference_unit ?? '';
-      pushField(legacyGi[key], 'reference_unit', refUnit);
-      pushField(legacyGi[key], 'equivalent_product', refUnit);
+      if (legacyGi[key].reference_unit === undefined || legacyGi[key].reference_unit === '') {
+        legacyGi[key].reference_unit = refUnit;
+      }
+      if (legacyGi[key].equivalent_product === undefined || legacyGi[key].equivalent_product === '') {
+        legacyGi[key].equivalent_product = refUnit;
+      }
     }
 
     return {
@@ -8532,12 +8536,15 @@ export class CompanyProjectsService {
     const parseGiFromFlatBody = (input: Record<string, any>): Record<string, any> => {
       const parsed: Record<string, any> = {};
       const keyRegex =
-        /^gi\[([^\]]+)\]\[(data_id|parameter|reference_unit|equivalent_product|details|fy1|fy2|fy3|fy4|exp)\](?:\[(\d*)\])?$/;
+        /^gi\[([^\]]+)\]\[(data_id|parameter|reference_unit|equivalent_product|equivalent_unit|details|fy1|fy2|fy3|fy4|exp)\](?:\[(\d*)\])?$/;
       for (const [rawKey, rawVal] of Object.entries(input || {})) {
         const m = rawKey.match(keyRegex);
         if (!m) continue;
         const dataId = m[1];
-        const field = m[2] === 'equivalent_product' ? 'reference_unit' : m[2];
+        const field =
+          m[2] === 'equivalent_product' || m[2] === 'equivalent_unit'
+            ? 'reference_unit'
+            : m[2];
         const indexToken = m[3];
         const hasIndex = indexToken !== undefined;
         if (!parsed[dataId]) parsed[dataId] = {};
@@ -8577,22 +8584,69 @@ export class CompanyProjectsService {
         }
         bucket[field].push(value);
       };
+      const isEquivalentMetaValue = (
+        value: unknown,
+        refUnit: unknown,
+        explicitEquivalent: unknown,
+      ): boolean => {
+        const text = String(value ?? '').trim().toLowerCase();
+        if (!text) return false;
+        if (text.startsWith('equivalent')) return true;
+        const unitText = String(refUnit ?? '').trim().toLowerCase();
+        const explicitText = String(explicitEquivalent ?? '').trim().toLowerCase();
+        return (unitText && text === unitText) || (explicitText && text === explicitText);
+      };
       for (const [idx, row] of (body.gi as any[]).entries()) {
         const dataId = String(row?.data_id ?? row?.dataId ?? idx);
         if (!gi[dataId]) gi[dataId] = {};
         const bucket = gi[dataId];
 
         // Keep scalar selectors/reference on bucket.
-        const refUnit = pick(row, ['reference_unit', 'equivalent_product', 'equivalentProduct', 'unit']);
+        const explicitEquivalent = pick(row, [
+          'equivalent_product',
+          'equivalentProduct',
+          'equivalent_unit',
+          'equivalentUnit',
+        ]);
+        const refUnit = pick(row, [
+          'reference_unit',
+          'equivalent_product',
+          'equivalentProduct',
+          'equivalent_unit',
+          'equivalentUnit',
+          'unit',
+        ]);
         if (refUnit !== undefined) bucket.reference_unit = refUnit;
-        if (row?.equivalent_product !== undefined || row?.equivalentProduct !== undefined) {
-          bucket.equivalent_product = pick(row, ['equivalent_product', 'equivalentProduct']);
+        if (
+          row?.equivalent_product !== undefined ||
+          row?.equivalentProduct !== undefined ||
+          row?.equivalent_unit !== undefined ||
+          row?.equivalentUnit !== undefined
+        ) {
+          bucket.equivalent_product = pick(row, [
+            'equivalent_product',
+            'equivalentProduct',
+            'equivalent_unit',
+            'equivalentUnit',
+          ]);
+        }
+        const hasExplicitEquivalentOnlyRow =
+          (row?.equivalent_product !== undefined ||
+            row?.equivalentProduct !== undefined ||
+            row?.equivalent_unit !== undefined ||
+            row?.equivalentUnit !== undefined) &&
+          pick(row, ['details', 'product_name', 'productName', 'name', 'product']) === undefined;
+        if (hasExplicitEquivalentOnlyRow) {
+          bucket._equivalent_only = true;
         }
         if (row?.parameter !== undefined) bucket.parameter = row.parameter;
         if (row?.data_id !== undefined) bucket.data_id = row.data_id;
 
         // Collect product-like rows as arrays so same data_id can hold multiple lines.
-        const details = pick(row, ['details', 'product_name', 'productName', 'name', 'product']);
+        const rawDetails = pick(row, ['details', 'product_name', 'productName', 'name', 'product']);
+        const details = isEquivalentMetaValue(rawDetails, refUnit, explicitEquivalent)
+          ? undefined
+          : rawDetails;
         const fy1 = pick(row, ['fy1', 'fy_1', 'fy23_24', 'fy_23_24']);
         const fy2 = pick(row, ['fy2', 'fy_2', 'fy24_25', 'fy_24_25']);
         const fy3 = pick(row, ['fy3', 'fy_3', 'fy25_26', 'fy_25_26']);
@@ -8617,7 +8671,12 @@ export class CompanyProjectsService {
     }
 
     let globalEquivalentProduct = String(
-      body?.equivalent_product ?? body?.equivalentProduct ?? body?.reference_unit ?? '',
+      body?.equivalent_product ??
+        body?.equivalentProduct ??
+        body?.equivalent_unit ??
+        body?.equivalentUnit ??
+        body?.reference_unit ??
+        '',
     ).trim();
 
     if (!globalEquivalentProduct) {
@@ -8733,7 +8792,9 @@ export class CompanyProjectsService {
         '';
 
       for (let i = 0; i < rowCount; i++) {
+        const isEquivalentOnlyRow = Boolean((row as any)?._equivalent_only);
         const details = String((detailsArray[i] ?? '')).trim();
+        const normalizedDetails = details || (isEquivalentOnlyRow ? 'Equivalent Product' : '');
         const fy1 = toPositive(fy1Array[i]);
         const fy2 = toPositive(fy2Array[i]);
         const fy3 = toPositive(fy3Array[i]);
@@ -8742,7 +8803,7 @@ export class CompanyProjectsService {
 
         const hasOnlyEquivalent =
           !!rowReferenceUnit &&
-          !details &&
+          !normalizedDetails &&
           fy1 == null &&
           fy2 == null &&
           fy3 == null &&
@@ -8752,7 +8813,7 @@ export class CompanyProjectsService {
           continue;
         }
 
-        if (!details) {
+        if (!normalizedDetails) {
           throw new BadRequestException({
             status: 'error',
             message: `details is required for GI row ${dataId}`,
@@ -8779,7 +8840,7 @@ export class CompanyProjectsService {
           info_type: 'gi',
           parameter: master.parameter,
           reference_unit: rowReferenceUnit,
-          details,
+          details: normalizedDetails,
           fy1,
           fy2,
           fy3,
