@@ -2,7 +2,6 @@ import {
   Allow,
   IsEmail,
   IsIn,
-  IsNotEmpty,
   IsNumber,
   IsOptional,
   IsString,
@@ -13,7 +12,8 @@ import {
 } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
 
-export class CreateProformaInvoiceV2Dto {
+export class UpdateProformaInvoiceV2Dto {
+  @IsOptional()
   @Transform(({ value, obj }) => {
     if (value === 'proforma' || value === 'tax') return value;
     const paymentFor = String(obj?.payment_for ?? '').trim().toLowerCase();
@@ -25,7 +25,7 @@ export class CreateProformaInvoiceV2Dto {
     return value;
   })
   @IsIn(['proforma', 'tax'])
-  invoice_type: 'proforma' | 'tax';
+  invoice_type?: 'proforma' | 'tax';
 
   @IsOptional()
   @IsIn(['per_inv', 'inv'])
@@ -35,35 +35,41 @@ export class CreateProformaInvoiceV2Dto {
   @IsIn(['proforma', 'tax'])
   payment_type?: 'proforma' | 'tax';
 
+  @IsOptional()
   @IsString()
-  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
-  @IsNotEmpty()
+  @Transform(({ value }) => {
+    if (value === '' || value === null || value === undefined) return undefined;
+    return typeof value === 'string' ? value.trim() : value;
+  })
   @MaxLength(50)
-  invoice_title: string;
+  invoice_title?: string;
 
+  @IsOptional()
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(1)
-  payable_amount: number;
+  payable_amount?: number;
 
-  /** GST rate % (0–28), not rupee amount */
+  @IsOptional()
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
   @Max(28)
-  sgst: number;
+  sgst?: number;
 
+  @IsOptional()
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
   @Max(28)
-  cgst: number;
+  cgst?: number;
 
+  @IsOptional()
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
   @Max(28)
-  igst: number;
+  igst?: number;
 
   @IsOptional()
   @IsString()
@@ -93,7 +99,7 @@ export class CreateProformaInvoiceV2Dto {
   @Matches(/^\d{2}$/, { message: 'place_of_supply_state_code must be a valid state code (01–38)' })
   place_of_supply_state_code?: string;
 
-  /** Client preview only; tax is computed server-side from rates + payable_amount. */
+  /** Client preview only; ignored on update (server recomputes). */
   @IsOptional()
   @Allow()
   sgst_amt?: unknown;
@@ -114,9 +120,10 @@ export class CreateProformaInvoiceV2Dto {
   @Allow()
   is_intra_state?: unknown;
 
+  @IsOptional()
   @Type(() => Number)
   @IsIn([0, 1])
-  send_reminder: 0 | 1;
+  send_reminder?: 0 | 1;
 
   @IsOptional()
   @IsEmail()

@@ -31,6 +31,19 @@ import { RegistrationInfoDto } from './dto/registration-info.dto';
 import { SubmitPaymentDto } from './dto/submit-payment.dto';
 import { UpdateInvoiceApprovalDto } from './dto/update-invoice-approval.dto';
 import { CreateProformaInvoiceV2Dto } from './dto/create-proforma-invoice-v2.dto';
+import { UpdateProformaInvoiceV2Dto } from './dto/update-proforma-invoice-v2.dto';
+import {
+  financeV2StrictStateCodesEnabled,
+  FinanceV2ComputedTax,
+  isFinanceV2Taxable,
+  parseFinanceV2StateCode,
+  round2,
+  computeAndValidateFinanceV2Gst,
+} from './finance-v2-invoice-gst.util';
+import {
+  parseCiiExpenseStateCode,
+  validateCiiExpenseGstWithStates,
+} from './cii-expense-gst.util';
 import { UpdateFinanceV2ReminderDto } from './dto/update-finance-v2-reminder.dto';
 import { SubmitFinanceV2PaymentDto } from './dto/submit-finance-v2-payment.dto';
 import { UpdateFinanceV2ApprovalDto } from './dto/update-finance-v2-approval.dto';
@@ -5179,6 +5192,18 @@ export class CompanyProjectsService {
           sgst: Number(inv.sgst ?? 0),
           cgst: Number(inv.cgst ?? 0),
           igst: Number(inv.igst ?? 0),
+          supplier_state_code: inv.supplier_state_code ?? null,
+          place_of_supply_state_code: inv.place_of_supply_state_code ?? null,
+          transaction_type: inv.transaction_type ?? null,
+          is_intra_state:
+            inv.transaction_type === 'intra'
+              ? true
+              : inv.transaction_type === 'inter'
+                ? false
+                : inv.supplier_state_code != null &&
+                    inv.place_of_supply_state_code != null
+                  ? inv.supplier_state_code === inv.place_of_supply_state_code
+                  : null,
           tax_amount: Number(inv.tax_amount ?? 0),
           total_amount: Number(inv.total_amount ?? 0),
           trans_id: inv.trans_id ?? null,
@@ -5217,6 +5242,40 @@ export class CompanyProjectsService {
     };
   }
 
+  private computeFinanceV2GstForInvoice(args: {
+    invoice_type: 'proforma' | 'tax';
+    payable_amount: number;
+    sgst: number;
+    cgst: number;
+    igst: number;
+    supplier_state_code?: string;
+    place_of_supply_state_code?: string;
+  }): FinanceV2ComputedTax & { supplier_state_code?: string; place_of_supply_state_code?: string } {
+    const supplier = parseFinanceV2StateCode(args.supplier_state_code, 'Supplier state code');
+    const place = parseFinanceV2StateCode(args.place_of_supply_state_code, 'Place of supply state code');
+    const taxable = isFinanceV2Taxable(args.invoice_type, args.sgst, args.cgst, args.igst);
+    if (financeV2StrictStateCodesEnabled() && taxable && (supplier === null || place === null)) {
+      throw new BadRequestException({
+        status: 'error',
+        message:
+          'supplier_state_code and place_of_supply_state_code are required for taxable invoices.',
+      });
+    }
+    const computed = computeAndValidateFinanceV2Gst({
+      payable_amount: args.payable_amount,
+      sgst: args.sgst,
+      cgst: args.cgst,
+      igst: args.igst,
+      supplier_state_code: supplier,
+      place_of_supply_state_code: place,
+    });
+    return {
+      ...computed,
+      supplier_state_code: supplier ?? undefined,
+      place_of_supply_state_code: place ?? undefined,
+    };
+  }
+
   /**
    * Finance v2 (new API family): create Proforma/Tax invoice with tax split + reminder settings.
    */
@@ -5250,8 +5309,17 @@ export class CompanyProjectsService {
     const sgst = Number(dto.sgst);
     const cgst = Number(dto.cgst);
     const igst = Number(dto.igst);
-    const taxAmount = sgst + cgst + igst;
-    const totalAmount = payable + taxAmount;
+    const gst = this.computeFinanceV2GstForInvoice({
+      invoice_type: dto.invoice_type,
+      payable_amount: payable,
+      sgst,
+      cgst,
+      igst,
+      supplier_state_code: dto.supplier_state_code,
+      place_of_supply_state_code: dto.place_of_supply_state_code,
+    });
+    const taxAmount = gst.tax_amount;
+    const totalAmount = gst.total_amount;
 
     // Guard duplicate active Proforma rows (new API business rule).
     if (paymentFor === PAYMENT_FOR_PROFORMA) {
@@ -5287,11 +5355,14 @@ export class CompanyProjectsService {
         { path: relativePath, filename: file.originalname, uploaded_at: new Date() },
       ],
       payable_amount: payable,
-      sgst,
-      cgst,
-      igst,
+      sgst: gst.sgst_rate,
+      cgst: gst.cgst_rate,
+      igst: gst.igst_rate,
       tax_amount: taxAmount,
       total_amount: totalAmount,
+      supplier_state_code: gst.supplier_state_code,
+      place_of_supply_state_code: gst.place_of_supply_state_code,
+      ...(gst.transaction_type ? { transaction_type: gst.transaction_type } : {}),
       send_reminder: Number(dto.send_reminder),
       send_invoice_to: dto.send_invoice_to ?? undefined,
       reminder_date: reminderDate,
@@ -5317,6 +5388,152 @@ export class CompanyProjectsService {
       data: {
         invoice_id: String((invoice as any)._id),
         reminder_date: reminderDate?.toISOString?.() ?? null,
+        invoices: list.data.invoices,
+      },
+    };
+  }
+
+  async updateFinanceV2InvoiceByProjectId(
+    projectId: string,
+    invoiceId: string,
+    dto: UpdateProformaInvoiceV2Dto,
+    file?: Express.Multer.File,
+  ) {
+    return this.withFinanceV2MongoRetry(async () => {
+      const resolved = await this.resolveProjectForAdmin(projectId);
+      if (!resolved?.company_id) {
+        throw new NotFoundException({ status: 'error', message: 'Project not found' });
+      }
+      return this.updateFinanceV2Invoice(
+        String(resolved.company_id),
+        String(resolved._id),
+        invoiceId,
+        dto,
+        file,
+      );
+    });
+  }
+
+  async updateFinanceV2Invoice(
+    companyId: string,
+    projectId: string,
+    invoiceId: string,
+    dto: UpdateProformaInvoiceV2Dto,
+    file?: Express.Multer.File,
+  ) {
+    if (!Types.ObjectId.isValid(invoiceId)) {
+      throw new BadRequestException({ status: 'error', message: 'Invalid invoice id' });
+    }
+
+    const project = await this.projectModel.findOne({ _id: projectId, company_id: companyId });
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const existing = await this.companyInvoiceModel.findOne({
+      _id: invoiceId,
+      company_id: companyId,
+      project_id: projectId,
+      invoice_type: { $in: ['proforma', 'tax'] },
+    });
+    if (!existing) {
+      throw new NotFoundException({ status: 'error', message: 'Invoice not found' });
+    }
+
+    const invoice_type = (dto.invoice_type ?? existing.invoice_type) as 'proforma' | 'tax';
+    if (invoice_type !== 'proforma' && invoice_type !== 'tax') {
+      throw new BadRequestException({ status: 'error', message: 'Invalid invoice type' });
+    }
+
+    const payable = dto.payable_amount ?? Number(existing.payable_amount ?? 0);
+    const sgst = dto.sgst ?? Number(existing.sgst ?? 0);
+    const cgst = dto.cgst ?? Number(existing.cgst ?? 0);
+    const igst = dto.igst ?? Number(existing.igst ?? 0);
+    const supplierRaw =
+      dto.supplier_state_code !== undefined
+        ? dto.supplier_state_code
+        : (existing as any).supplier_state_code;
+    const placeRaw =
+      dto.place_of_supply_state_code !== undefined
+        ? dto.place_of_supply_state_code
+        : (existing as any).place_of_supply_state_code;
+
+    const gst = this.computeFinanceV2GstForInvoice({
+      invoice_type,
+      payable_amount: payable,
+      sgst,
+      cgst,
+      igst,
+      supplier_state_code: supplierRaw,
+      place_of_supply_state_code: placeRaw,
+    });
+
+    const paymentFor = invoice_type === 'tax' ? PAYMENT_FOR_TAX : PAYMENT_FOR_PROFORMA;
+
+    if (paymentFor === PAYMENT_FOR_PROFORMA) {
+      const duplicate = await this.companyInvoiceModel.findOne({
+        company_id: companyId,
+        project_id: projectId,
+        invoice_type: 'proforma',
+        approval_status: { $in: [0, 3] },
+        _id: { $ne: invoiceId },
+      });
+      if (duplicate) {
+        throw new BadRequestException({
+          status: 'error',
+          message: 'An active Proforma invoice already exists for this project.',
+        });
+      }
+    }
+
+    existing.payment_for = paymentFor;
+    existing.invoice_type = invoice_type;
+    if (dto.invoice_title !== undefined) {
+      existing.invoice_title = dto.invoice_title;
+    }
+    existing.payable_amount = payable;
+    existing.sgst = gst.sgst_rate;
+    existing.cgst = gst.cgst_rate;
+    existing.igst = gst.igst_rate;
+    existing.tax_amount = gst.tax_amount;
+    existing.total_amount = gst.total_amount;
+    (existing as any).supplier_state_code = gst.supplier_state_code;
+    (existing as any).place_of_supply_state_code = gst.place_of_supply_state_code;
+    if (gst.transaction_type) {
+      (existing as any).transaction_type = gst.transaction_type;
+    } else {
+      (existing as any).transaction_type = undefined;
+    }
+
+    const paid = Number(existing.paid_amount ?? 0);
+    existing.due_amount = round2(Math.max(0, gst.total_amount - paid));
+
+    if (dto.send_reminder !== undefined) {
+      existing.send_reminder = Number(dto.send_reminder);
+    }
+    if (dto.send_invoice_to !== undefined) {
+      existing.send_invoice_to = dto.send_invoice_to;
+    }
+
+    if (file) {
+      const relativePath = `uploads/company/${companyId}/finance-v2/${file.filename}`;
+      const hist = Array.isArray((existing as any).invoice_document_history)
+        ? [...(existing as any).invoice_document_history]
+        : [];
+      hist.push({ path: relativePath, filename: file.originalname, uploaded_at: new Date() });
+      existing.invoice_document = relativePath;
+      existing.invoice_document_filename = file.originalname;
+      (existing as any).invoice_document_history = hist;
+    }
+
+    await existing.save();
+
+    const list = await this.getFinanceV2Invoices(companyId, projectId);
+    return {
+      status: 'success',
+      message: 'Finance v2 invoice updated successfully',
+      data: {
+        invoice_id: String((existing as any)._id),
         invoices: list.data.invoices,
       },
     };
@@ -5803,6 +6020,8 @@ export class CompanyProjectsService {
               }))
             : [],
           approval_status: Number(inv.approval_status ?? 0),
+          supplier_state_code: inv.supplier_state_code ?? null,
+          place_of_supply_state_code: inv.place_of_supply_state_code ?? null,
           upload_sequence: idx + 1, // newest first in current sort order
           version_number: invoices.length - idx, // oldest=1, newest=max
           created_at: inv.createdAt,
@@ -5899,6 +6118,8 @@ export class CompanyProjectsService {
       igst: number;
       payment_date: string;
       payment_for: string;
+      supplier_state_code?: string;
+      place_of_supply_state_code?: string;
     },
     file: Express.Multer.File,
   ) {
@@ -5911,6 +6132,18 @@ export class CompanyProjectsService {
     const sgst = Number(payload.sgst);
     const cgst = Number(payload.cgst);
     const igst = Number(payload.igst);
+
+    const supplier = parseCiiExpenseStateCode(payload.supplier_state_code, 'supplier_state_code');
+    const place = parseCiiExpenseStateCode(payload.place_of_supply_state_code, 'place_of_supply_state_code');
+    const txn = validateCiiExpenseGstWithStates({
+      invoiceamount,
+      sgst,
+      cgst,
+      igst,
+      supplier_state_code: supplier,
+      place_of_supply_state_code: place,
+    });
+
     const cgstAmount = (invoiceamount * cgst) / 100;
     const sgstAmount = (invoiceamount * sgst) / 100;
     const igstAmount = (invoiceamount * igst) / 100;
@@ -5933,6 +6166,9 @@ export class CompanyProjectsService {
       payment_date: new Date(payload.payment_date),
       payment_status: 1,
       approval_status: 1,
+      supplier_state_code: supplier ?? undefined,
+      place_of_supply_state_code: place ?? undefined,
+      ...(txn.transaction_type ? { transaction_type: txn.transaction_type } : {}),
     });
 
     return { status: 'success', message: 'Invoice Uploaded Successfully!' };
@@ -5949,6 +6185,8 @@ export class CompanyProjectsService {
       igst: number;
       payment_date: string;
       payment_for: string;
+      supplier_state_code?: string;
+      place_of_supply_state_code?: string;
     },
     file?: Express.Multer.File,
   ) {
@@ -5971,6 +6209,27 @@ export class CompanyProjectsService {
     const sgst = Number(payload.sgst);
     const cgst = Number(payload.cgst);
     const igst = Number(payload.igst);
+
+    const supplierRaw =
+      payload.supplier_state_code !== undefined
+        ? payload.supplier_state_code
+        : (invoice as any).supplier_state_code;
+    const placeRaw =
+      payload.place_of_supply_state_code !== undefined
+        ? payload.place_of_supply_state_code
+        : (invoice as any).place_of_supply_state_code;
+
+    const supplier = parseCiiExpenseStateCode(supplierRaw, 'supplier_state_code');
+    const place = parseCiiExpenseStateCode(placeRaw, 'place_of_supply_state_code');
+    const txn = validateCiiExpenseGstWithStates({
+      invoiceamount,
+      sgst,
+      cgst,
+      igst,
+      supplier_state_code: supplier,
+      place_of_supply_state_code: place,
+    });
+
     const cgstAmount = (invoiceamount * cgst) / 100;
     const sgstAmount = (invoiceamount * sgst) / 100;
     const igstAmount = (invoiceamount * igst) / 100;
@@ -5985,6 +6244,13 @@ export class CompanyProjectsService {
     invoice.tax_amount = cgstAmount + sgstAmount + igstAmount;
     invoice.total_amount = total_amount;
     invoice.payment_date = new Date(payload.payment_date);
+    (invoice as any).supplier_state_code = supplier ?? undefined;
+    (invoice as any).place_of_supply_state_code = place ?? undefined;
+    if (txn.transaction_type) {
+      (invoice as any).transaction_type = txn.transaction_type;
+    } else {
+      (invoice as any).transaction_type = undefined;
+    }
     if (file) {
       invoice.invoice_document = `uploads/company/${String(resolved.company_id)}/expenses/${file.filename}`;
       invoice.invoice_document_filename = file.originalname;

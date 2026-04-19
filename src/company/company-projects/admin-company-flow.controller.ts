@@ -4,6 +4,7 @@ import {
   Controller,
   Delete,
   Get,
+  HttpException,
   Param,
   Patch,
   Post,
@@ -933,10 +934,13 @@ export class AdminCompanyFlowController {
           igst,
           payment_date,
           payment_for,
+          supplier_state_code: body?.supplier_state_code,
+          place_of_supply_state_code: body?.place_of_supply_state_code,
         },
         regFeeInvoice,
       );
     } catch (error) {
+      if (error instanceof HttpException) throw error;
       return { status: 'error', message: 'Some Error Occurred...' };
     }
   }
@@ -1019,10 +1023,13 @@ export class AdminCompanyFlowController {
           igst,
           payment_date,
           payment_for,
+          supplier_state_code: body?.supplier_state_code,
+          place_of_supply_state_code: body?.place_of_supply_state_code,
         },
         regFeeInvoice,
       );
     } catch (error) {
+      if (error instanceof HttpException) throw error;
       return { status: 'error', message: 'Some Error Occurred...' };
     }
   }

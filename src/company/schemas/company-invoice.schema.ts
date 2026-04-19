@@ -100,6 +100,17 @@ export class CompanyInvoice {
   @Prop({ default: 0 })
   igst?: number;
 
+  /** Indian state code (GST), 01–38 */
+  @Prop()
+  supplier_state_code?: string;
+
+  @Prop()
+  place_of_supply_state_code?: string;
+
+  /** intra | inter when state codes are set; omitted for legacy rows */
+  @Prop()
+  transaction_type?: 'intra' | 'inter';
+
   /** 0/1 toggle for every-15-days reminders */
   @Prop({ default: 0 })
   send_reminder?: number;

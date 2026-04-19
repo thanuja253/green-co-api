@@ -39,6 +39,7 @@ import { AssignFacilitatorDto } from './dto/assign-facilitator.dto';
 import { SubmitPaymentDto } from './dto/submit-payment.dto';
 import { UpdateInvoiceApprovalDto } from './dto/update-invoice-approval.dto';
 import { CreateProformaInvoiceV2Dto } from './dto/create-proforma-invoice-v2.dto';
+import { UpdateProformaInvoiceV2Dto } from './dto/update-proforma-invoice-v2.dto';
 import { UpdateFinanceV2ReminderDto } from './dto/update-finance-v2-reminder.dto';
 import { SubmitFinanceV2PaymentDto } from './dto/submit-finance-v2-payment.dto';
 import { UpdateFinanceV2ApprovalDto } from './dto/update-finance-v2-approval.dto';
@@ -1319,7 +1320,7 @@ export class CompanyProjectsController {
    * Finance v2 (new API): create/list Proforma/Tax invoice rows with SGST/CGST/IGST + reminder settings.
    * These endpoints are separate from legacy `/invoices/*` APIs.
    */
-  @Get(':projectId/finance-v2/proforma-invoices')
+  @Get([':projectId/finance-v2/proforma-invoices', ':projectId/finance-v2/invoices'])
   @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
   async getFinanceV2Invoices(
     @Param('projectId') projectId: string,
@@ -1327,7 +1328,7 @@ export class CompanyProjectsController {
     return this.companyProjectsService.getFinanceV2InvoicesByProjectId(projectId);
   }
 
-  @Post(':projectId/finance-v2/proforma-invoices')
+  @Post([':projectId/finance-v2/proforma-invoices', ':projectId/finance-v2/invoices'])
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
   @UseInterceptors(
     FileInterceptor('invoice_document', {
@@ -1373,6 +1374,52 @@ export class CompanyProjectsController {
       });
     }
     return this.companyProjectsService.createFinanceV2InvoiceByProjectId(projectId, dto, file);
+  }
+
+  @Patch([
+    ':projectId/finance-v2/proforma-invoices/:invoiceId',
+    ':projectId/finance-v2/invoices/:invoiceId',
+  ])
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  @UseInterceptors(
+    FileInterceptor('invoice_document', {
+      storage: diskStorage({
+        destination: (req, file, cb) => {
+          const projectId = (req as any).params?.projectId || 'unknown';
+          const uploadPath = join(process.cwd(), 'uploads', 'company', projectId, 'finance-v2');
+          if (!fs.existsSync(uploadPath)) {
+            fs.mkdirSync(uploadPath, { recursive: true });
+          }
+          cb(null, uploadPath);
+        },
+        filename: (req, file, cb) => {
+          const ext = extname(file.originalname);
+          cb(null, `finance-v2-${Date.now()}${ext}`);
+        },
+      }),
+      limits: { fileSize: 10 * 1024 * 1024 },
+      fileFilter: (req, file, cb) => {
+        const allowed = [
+          'application/pdf',
+          'image/jpeg',
+          'image/jpg',
+          'image/png',
+        ];
+        if (allowed.includes(file.mimetype)) {
+          cb(null, true);
+        } else {
+          cb(new Error('Invoice document must be PDF, JPG, JPEG or PNG.'), false);
+        }
+      },
+    }),
+  )
+  async updateFinanceV2Invoice(
+    @Param('projectId') projectId: string,
+    @Param('invoiceId') invoiceId: string,
+    @Body() dto: UpdateProformaInvoiceV2Dto,
+    @UploadedFile() file?: Express.Multer.File,
+  ): Promise<any> {
+    return this.companyProjectsService.updateFinanceV2InvoiceByProjectId(projectId, invoiceId, dto, file);
   }
 
   @Patch(':projectId/finance-v2/proforma-invoices/:invoiceId/reminder-settings')
