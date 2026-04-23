@@ -73,7 +73,6 @@ export class AssessorProfileService {
       'pan_number',
       'enrollment_date',
       'gst_registered',
-      'gst_number',
       'lead_assessor',
       'assessor_grade',
       'emergency_contact_name',
@@ -92,6 +91,13 @@ export class AssessorProfileService {
       }
     }
 
+    // GST number is required only when GST registered = Yes/true/1
+    const gstRegisteredRaw = pick('gst_registered');
+    const gstRegistered = this.toBool(gstRegisteredRaw);
+    if (gstRegistered && !this.requireNonEmpty(pick('gst_number'))) {
+      errors.gst_number = ['gst_number is required when GST is Yes.'];
+    }
+
     // Required documents (assessor flow)
     const requiredDocs = [
       'profile_image',
@@ -99,7 +105,6 @@ export class AssessorProfileService {
       'vendor_registration_form',
       'non_disclosure_agreement',
       'health_declaration',
-      'gst_declaration',
       'pan_card',
       'cancelled_cheque',
     ] as const;
@@ -109,6 +114,16 @@ export class AssessorProfileService {
       const hasExisting = this.requireNonEmpty((existing as any)?.[docField]);
       if (!hasNew && !hasExisting) {
         errors[docField] = [`${docField} document is required.`];
+      }
+    }
+
+    // GST declaration required only when GST is Yes/true/1
+    if (gstRegistered) {
+      const docField = 'gst_declaration';
+      const hasNew = !!files?.[docField]?.[0];
+      const hasExisting = this.requireNonEmpty((existing as any)?.[docField]);
+      if (!hasNew && !hasExisting) {
+        errors[docField] = [`${docField} document is required when GST is Yes.`];
       }
     }
 

@@ -4,6 +4,7 @@ import { ParameterManagementController } from './parameter-management.controller
 import { ParameterManagementService } from './parameter-management.service';
 import { ParameterManagement, ParameterManagementSchema } from '../schemas/parameter-management.schema';
 import { GroupManagement, GroupManagementSchema } from '../schemas/group-management.schema';
+import { Sector, SectorSchema } from '../schemas/sector.schema';
 import {
   MasterChecklistSector,
   MasterChecklistSectorSchema,
@@ -14,6 +15,7 @@ import {
     MongooseModule.forFeature([
       { name: ParameterManagement.name, schema: ParameterManagementSchema },
       { name: GroupManagement.name, schema: GroupManagementSchema },
+      { name: Sector.name, schema: SectorSchema },
       { name: MasterChecklistSector.name, schema: MasterChecklistSectorSchema },
     ]),
   ],

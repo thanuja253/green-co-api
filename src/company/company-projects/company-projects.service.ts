@@ -1216,6 +1216,7 @@ export class CompanyProjectsService {
     // Any admin update keeps the profile approved.
     assessor.approval_status = 'Approved';
     assessor.approval_remarks = '';
+    assessor.profile_status = 'Complete';
 
     assessor.profile_image = filePath(files?.profile_image) ?? assessor.profile_image;
     assessor.biodata = filePath(files?.biodata) ?? assessor.biodata;

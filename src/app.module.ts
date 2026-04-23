@@ -16,6 +16,7 @@ import { GroupManagementModule } from './company/group-management/group-manageme
 import { SectorManagementModule } from './company/sector-management/sector-management.module';
 import { ParameterManagementModule } from './company/parameter-management/parameter-management.module';
 import { CreditManagementModule } from './company/credit-management/credit-management.module';
+import { AssessmentChecklistDocumentsModule } from './company/assessment-checklist-documents/assessment-checklist-documents.module';
 import { AppController } from './app.controller';
 import { ScheduleModule } from '@nestjs/schedule';
 
@@ -51,6 +52,7 @@ import { ScheduleModule } from '@nestjs/schedule';
     SectorManagementModule,
     ParameterManagementModule,
     CreditManagementModule,
+    AssessmentChecklistDocumentsModule,
   ],
   controllers: [AppController],
 })

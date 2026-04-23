@@ -3,6 +3,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { ParameterManagement, ParameterManagementDocument } from '../schemas/parameter-management.schema';
 import { GroupManagement, GroupManagementDocument } from '../schemas/group-management.schema';
+import { Sector, SectorDocument } from '../schemas/sector.schema';
 import {
   MasterChecklistSector,
   MasterChecklistSectorDocument,
@@ -17,6 +18,8 @@ export class ParameterManagementService {
     private readonly parameterModel: Model<ParameterManagementDocument>,
     @InjectModel(GroupManagement.name)
     private readonly groupModel: Model<GroupManagementDocument>,
+    @InjectModel(Sector.name)
+    private readonly sectorModel: Model<SectorDocument>,
     @InjectModel(MasterChecklistSector.name)
     private readonly checklistSectorModel: Model<MasterChecklistSectorDocument>,
   ) {}
@@ -280,6 +283,53 @@ export class ParameterManagementService {
     return {
       filename: `criteria-${Date.now()}.csv`,
       content: csvLines.join('\n'),
+    };
+  }
+
+  async listCriteriaForSector(sectorId: string) {
+    const sector = await this.sectorModel.findById(String(sectorId || '').trim()).lean();
+    if (!sector) {
+      throw new NotFoundException({ status: 'error', message: 'Sector not found' });
+    }
+    const groupId = String((sector as any).group_id || '').trim();
+    const groupName = String((sector as any).group_name || '').trim();
+    if (!groupId) {
+      throw new BadRequestException({ status: 'error', message: 'Sector does not have a group mapping' });
+    }
+
+    const mappings = await this.checklistSectorModel
+      .find({ group_id: groupId })
+      .select('criterian_id from_date')
+      .lean();
+    const criteriaIds = [...new Set(mappings.map((m: any) => String(m.criterian_id || '').trim()).filter(Boolean))];
+    if (!criteriaIds.length) {
+      return {
+        status: 'success',
+        message: 'Criteria fetched successfully',
+        data: {
+          sector_id: String((sector as any)._id),
+          sector_name: String((sector as any).name || ''),
+          group_id: groupId,
+          group_name: groupName,
+          criteria: [],
+        },
+      };
+    }
+
+    const rows = await this.parameterModel
+      .find({ _id: { $in: criteriaIds } } as any)
+      .sort({ name: 1 })
+      .lean();
+    return {
+      status: 'success',
+      message: 'Criteria fetched successfully',
+      data: {
+        sector_id: String((sector as any)._id),
+        sector_name: String((sector as any).name || ''),
+        group_id: groupId,
+        group_name: groupName,
+        criteria: rows.map((r: any) => this.mapRow(r)),
+      },
     };
   }
 }

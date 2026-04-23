@@ -56,6 +56,17 @@ export class ParameterManagementController {
     return this.parameterService.listParameters(query);
   }
 
+  /**
+   * Public/company helper for Assessment Submittals:
+   * Given a sector id, returns group + sector + all criteria (parameters) mapped to that group.
+   *
+   * GET /api/company/assessment-criteria/sector/:sectorId
+   */
+  @Get('api/company/assessment-criteria/sector/:sectorId')
+  async listCriteriaForSector(@Param('sectorId') sectorId: string) {
+    return this.parameterService.listCriteriaForSector(sectorId);
+  }
+
   // Legacy datatable endpoint compatibility
   @Get('api/admin/criteria_data')
   @Get('admin/criteria_data')
