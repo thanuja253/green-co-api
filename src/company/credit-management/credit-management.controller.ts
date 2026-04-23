@@ -1,4 +1,5 @@
-import { Body, Controller, Get, Param, Post, Query, UsePipes, ValidationPipe } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, UseInterceptors, UsePipes, ValidationPipe } from '@nestjs/common';
+import { AnyFilesInterceptor } from '@nestjs/platform-express';
 import { CreditManagementService } from './credit-management.service';
 import { CreateCreditManagementDto } from './dto/create-credit-management.dto';
 import { ListCreditManagementQueryDto } from './dto/list-credit-management-query.dto';
@@ -13,6 +14,7 @@ export class CreditManagementController {
   @Post('admin/credit-management')
   @Post('api/admin/credits')
   @Post('admin/credits')
+  @UseInterceptors(AnyFilesInterceptor())
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
   async createCredit(@Body() payload: CreateCreditManagementDto) {
     return this.creditService.createCredit(payload);

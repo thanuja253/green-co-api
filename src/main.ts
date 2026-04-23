@@ -67,6 +67,36 @@ async function bootstrap() {
     next();
   });
 
+  // Backward compatibility for sector routes:
+  // Frontend often calls plural/master-data paths while backend handler is singular (/api/admin/sector).
+  app.use((req, _res, next) => {
+    const original = req.url || '';
+    const [pathOnly, query = ''] = original.split('?');
+    const suffix = query ? `?${query}` : '';
+
+    const pluralWithId = pathOnly.match(/^\/api\/admin\/sectors\/([^/]+)$/);
+    if (pluralWithId) {
+      req.url = `/api/admin/sector/${pluralWithId[1]}${suffix}`;
+      return next();
+    }
+    if (pathOnly === '/api/admin/sectors') {
+      req.url = `/api/admin/sector${suffix}`;
+      return next();
+    }
+
+    const masterDataWithId = pathOnly.match(/^\/api\/admin\/master-data\/sectors\/([^/]+)$/);
+    if (masterDataWithId) {
+      req.url = `/api/admin/sector/${masterDataWithId[1]}${suffix}`;
+      return next();
+    }
+    if (pathOnly === '/api/admin/master-data/sectors') {
+      req.url = `/api/admin/sector${suffix}`;
+      return next();
+    }
+
+    next();
+  });
+
   // Legacy assessor profile update aliases used by frontend:
   // /api/admin/assessors/:id/profile and /api/admin/assessors/:id/public -> /api/admin/assessors/:id/edit
   app.use((req, res, next) => {

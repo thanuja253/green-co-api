@@ -44,6 +44,8 @@ export function getAllowedCorsOrigin(origin: string | undefined): string | false
     return origin;
   if (origin.startsWith('http://127.0.0.1:') || origin.startsWith('https://127.0.0.1:'))
     return origin;
+  // IPv6 loopback (some browsers send this instead of localhost)
+  if (origin.startsWith('http://[::1]:') || origin.startsWith('https://[::1]:')) return origin;
 
   return false;
 }

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, UsePipes, ValidationPipe } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, UsePipes, ValidationPipe } from '@nestjs/common';
 import { RegistrationMastersService } from './registration-masters.service';
 import { CreateIndustryDto } from './dto/create-industry.dto';
 import { BulkCreateIndustriesDto } from './dto/bulk-create-industries.dto';
@@ -60,6 +60,11 @@ export class AdminMastersController {
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
   async createAssessorGradesBulk(@Body() dto: BulkCreateAssessorGradesDto) {
     return this.registrationMastersService.createAssessorGradesBulk(dto.grades);
+  }
+
+  @Get('ifsc/:ifsc')
+  async getBankDetailsByIfsc(@Param('ifsc') ifsc: string) {
+    return this.registrationMastersService.getBankDetailsByIfsc(ifsc);
   }
 }
 

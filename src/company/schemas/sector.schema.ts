@@ -9,6 +9,9 @@ export class Sector {
   name: string;
 
   @Prop()
+  group_id?: string;
+
+  @Prop()
   group_name?: string;
 
   @Prop({ default: '1' })

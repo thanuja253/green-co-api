@@ -3,6 +3,10 @@ import { IsDateString, IsIn, IsNumber, IsOptional, IsString, MaxLength, Min } fr
 
 export class UpsertOutstandingDetailsDto {
   @IsOptional()
+  @IsString()
+  outstanding_id?: string;
+
+  @IsOptional()
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)

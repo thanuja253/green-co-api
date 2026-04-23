@@ -1,4 +1,7 @@
-import { Injectable, InternalServerErrorException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Industry, IndustryDocument } from '../schemas/industry.schema';
@@ -10,6 +13,7 @@ import { AssessorGrade, AssessorGradeDocument } from '../schemas/assessor-grade.
 import { CreateIndustryDto } from './dto/create-industry.dto';
 import { CreateStateDto } from './dto/create-state.dto';
 import { CreateAssessorGradeDto } from './dto/create-assessor-grade.dto';
+import { lookupIfscDetails } from '../../common/ifsc-lookup.util';
 
 @Injectable()
 export class RegistrationMastersService {
@@ -28,6 +32,23 @@ export class RegistrationMastersService {
     private readonly assessorGradeModel: Model<AssessorGradeDocument>,
   ) {}
 
+  async getBankDetailsByIfsc(rawIfsc: string) {
+    const result = await lookupIfscDetails(rawIfsc);
+    return {
+      status: 'success',
+      message: 'Bank details fetched successfully',
+      data: {
+        ifsc_code: result.ifsc_code,
+        bank_name: result.bank_name,
+        branch_name: result.branch_name,
+        address: result.address,
+        city: result.city,
+        district: result.district,
+        state: result.state,
+      },
+    };
+  }
+
   async getRegistrationMasters(): Promise<{
     status: 'success';
     message: string;
@@ -42,7 +63,7 @@ export class RegistrationMastersService {
     try {
       console.log('[RegistrationMasters] Fetching master data...');
       // Fetch all data - try with status filter first, fallback to all if empty
-      const [industriesFiltered, entitiesFiltered, sectors, statesFiltered, facilitatorsFiltered] =
+      const [industriesFiltered, entitiesFiltered, statesFiltered, facilitatorsFiltered] =
         await Promise.all([
           // Industries: try status = 1 or "1" or missing
           this.industryModel
@@ -67,12 +88,6 @@ export class RegistrationMastersService {
             })
             .sort({ name: 1 })
             .select('_id name')
-            .lean(),
-          // Sectors: no status field, return all (include group_name for GROUP / SECTOR UI)
-          this.sectorModel
-            .find({})
-            .sort({ group_name: 1, name: 1 })
-            .select('_id name group_name')
             .lean(),
           // States: same as industries/entities
           this.stateModel
@@ -120,7 +135,7 @@ export class RegistrationMastersService {
       console.log('[RegistrationMasters] Results:', {
         industries: industries.length,
         entities: entities.length,
-        sectors: sectors.length,
+        sectors: 0,
         states: states.length,
         facilitators: facilitators.length,
       });
@@ -137,11 +152,7 @@ export class RegistrationMastersService {
             id: e._id.toString(),
             name: e.name,
           })),
-          sectors: sectors.map((s: any) => ({
-            id: s._id.toString(),
-            name: s.name,
-            group_name: s.group_name || '',
-          })),
+          sectors: [],
           states: states.map((s: any) => ({
             id: s._id.toString(),
             name: s.name,
@@ -230,6 +241,36 @@ export class RegistrationMastersService {
       status: 'success',
       message: 'Groups and sectors',
       data: { groups, sectors: sectorList },
+    };
+  }
+
+  /**
+   * Get active sectors only (for Registration form "Type of Sector" dropdown).
+   * Excludes inactive sectors (status = 0).
+   */
+  async getActiveSectors(): Promise<{
+    status: 'success';
+    message: string;
+    data: { sectors: Array<{ id: string; name: string; group_name?: string }> };
+  }> {
+    const sectors = await this.sectorModel
+      .find({
+        $or: [{ status: 1 }, { status: '1' }, { status: { $exists: false } }],
+      })
+      .sort({ name: 1 })
+      .select('_id name group_name')
+      .lean();
+
+    return {
+      status: 'success',
+      message: 'Active sectors loaded',
+      data: {
+        sectors: (sectors as any[]).map((s) => ({
+          id: s._id.toString(),
+          name: s.name,
+          group_name: s.group_name || '',
+        })),
+      },
     };
   }
 

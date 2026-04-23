@@ -19,6 +19,10 @@ export class ListSectorsQueryDto {
 
   @IsOptional()
   @IsString()
+  group_id?: string;
+
+  @IsOptional()
+  @IsString()
   status?: string;
 
   @IsOptional()

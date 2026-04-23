@@ -9,6 +9,7 @@ import { Model } from 'mongoose';
 import { Facilitator, FacilitatorDocument } from '../schemas/facilitator.schema';
 import { CreateFacilitatorProfileDto } from './dto/create-facilitator-profile.dto';
 import { ListFacilitatorsQueryDto } from './dto/list-facilitators-query.dto';
+import { lookupIfscDetails } from '../../common/ifsc-lookup.util';
 
 @Injectable()
 export class FacilitatorsService {
@@ -89,6 +90,28 @@ export class FacilitatorsService {
       approval_status: a.approval_status || 'Pending',
       approval_remarks: a.approval_remarks || '',
       profile_status: a.profile_status || 'Incomplete',
+    };
+  }
+
+  private async deriveBankDetails(
+    ifscCodeRaw: unknown,
+    fallbackBankName = '',
+    fallbackBranchName = '',
+  ): Promise<{ ifsc_code: string; bank_name: string; branch_name: string }> {
+    const ifscCode = String(ifscCodeRaw || '').trim().toUpperCase();
+    if (!ifscCode) {
+      return {
+        ifsc_code: '',
+        bank_name: String(fallbackBankName || '').trim(),
+        branch_name: String(fallbackBranchName || '').trim(),
+      };
+    }
+
+    const lookedUp = await lookupIfscDetails(ifscCode);
+    return {
+      ifsc_code: lookedUp.ifsc_code,
+      bank_name: lookedUp.bank_name || String(fallbackBankName || '').trim(),
+      branch_name: lookedUp.branch_name || String(fallbackBranchName || '').trim(),
     };
   }
 
@@ -227,6 +250,7 @@ export class FacilitatorsService {
       throw new BadRequestException({ status: 'validations', errors: { email: ['Facilitator with this email already exists.'] } });
     }
     const filePath = (f?: Express.Multer.File[]) => (f?.[0] ? `uploads/facilitators/${f[0].filename}` : '');
+    const bankInfo = await this.deriveBankDetails(dto.ifsc_code, dto.bank_name, dto.branch_name);
     const row = await this.facilitatorModel.create({
       name: dto.name.trim(),
       email: normalizedEmail,
@@ -251,10 +275,10 @@ export class FacilitatorsService {
       emergency_city: dto.emergency_city || '',
       emergency_state: dto.emergency_state || '',
       emergency_pincode: dto.emergency_pincode || '',
-      bank_name: dto.bank_name || '',
+      bank_name: bankInfo.bank_name || '',
       account_number: dto.account_number || '',
-      branch_name: dto.branch_name || '',
-      ifsc_code: dto.ifsc_code || '',
+      branch_name: bankInfo.branch_name || '',
+      ifsc_code: bankInfo.ifsc_code || '',
       biodata: filePath(files?.biodata),
       vendor_registration_form: filePath(files?.vendor_registration_form),
       non_disclosure_agreement: filePath(files?.non_disclosure_agreement),
@@ -292,6 +316,11 @@ export class FacilitatorsService {
     if (!row) throw new NotFoundException({ status: 'error', message: 'Facilitator not found' });
 
     const filePath = (f?: Express.Multer.File[]) => (f?.[0] ? `uploads/facilitators/${f[0].filename}` : undefined);
+    const bankInfo = await this.deriveBankDetails(
+      dto.ifsc_code ?? row.ifsc_code,
+      dto.bank_name ?? row.bank_name,
+      dto.branch_name ?? row.branch_name,
+    );
     row.name = (dto.name || row.name || '').trim();
     row.email = (dto.email || row.email || '').trim().toLowerCase();
     row.mobile = (dto.mobile || row.mobile || '').trim();
@@ -315,10 +344,10 @@ export class FacilitatorsService {
     row.emergency_city = dto.emergency_city ?? row.emergency_city;
     row.emergency_state = dto.emergency_state ?? row.emergency_state;
     row.emergency_pincode = dto.emergency_pincode ?? row.emergency_pincode;
-    row.bank_name = dto.bank_name ?? row.bank_name;
+    row.bank_name = bankInfo.bank_name;
     row.account_number = dto.account_number ?? row.account_number;
-    row.branch_name = dto.branch_name ?? row.branch_name;
-    row.ifsc_code = dto.ifsc_code ?? row.ifsc_code;
+    row.branch_name = bankInfo.branch_name;
+    row.ifsc_code = bankInfo.ifsc_code;
     row.status = (dto.status || row.status || '1').toString();
     row.profile_image = filePath(files?.profile_image) ?? row.profile_image;
     row.biodata = filePath(files?.biodata) ?? row.biodata;

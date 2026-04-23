@@ -40,10 +40,6 @@ import {
   round2,
   computeAndValidateFinanceV2Gst,
 } from './finance-v2-invoice-gst.util';
-import {
-  parseCiiExpenseStateCode,
-  validateCiiExpenseGstWithStates,
-} from './cii-expense-gst.util';
 import { UpdateFinanceV2ReminderDto } from './dto/update-finance-v2-reminder.dto';
 import { SubmitFinanceV2PaymentDto } from './dto/submit-finance-v2-payment.dto';
 import { UpdateFinanceV2ApprovalDto } from './dto/update-finance-v2-approval.dto';
@@ -61,9 +57,12 @@ import * as fs from 'fs';
 import { GridFSBucket } from 'mongodb';
 import type { Response } from 'express';
 import { getCertificationType } from '../../helpers/certification.helper';
+import { passwordGeneration } from '../../helpers/password.helper';
 import { NotificationsService } from '../notifications/notifications.service';
 import { MailService } from '../../mail/mail.service';
 import { Cron, CronExpression } from '@nestjs/schedule';
+import * as bcrypt from 'bcrypt';
+import { lookupIfscDetails } from '../../common/ifsc-lookup.util';
 
 /** View Certificate score band: 9 rows × 20 numbers (points bands 1–10 … 191–200). Normalize so frontend always gets number[][]. */
 function normalizeScoreBandRows(rows: any[]): number[][] {
@@ -547,6 +546,28 @@ export class CompanyProjectsService {
     return 'uploads/pic.jpeg';
   }
 
+  private async deriveBankDetails(
+    ifscCodeRaw: unknown,
+    fallbackBankName = '',
+    fallbackBranchName = '',
+  ): Promise<{ ifsc_code: string; bank_name: string; branch_name: string }> {
+    const ifscCode = String(ifscCodeRaw || '').trim().toUpperCase();
+    if (!ifscCode) {
+      return {
+        ifsc_code: '',
+        bank_name: String(fallbackBankName || '').trim(),
+        branch_name: String(fallbackBranchName || '').trim(),
+      };
+    }
+
+    const lookedUp = await lookupIfscDetails(ifscCode);
+    return {
+      ifsc_code: lookedUp.ifsc_code,
+      bank_name: lookedUp.bank_name || String(fallbackBankName || '').trim(),
+      branch_name: lookedUp.branch_name || String(fallbackBranchName || '').trim(),
+    };
+  }
+
   private mapAssessorResponse(a: any) {
     const profileImage = this.toPublicFilePath(a.profile_image);
     const biodata = this.toPublicFilePath(a.biodata);
@@ -611,7 +632,12 @@ export class CompanyProjectsService {
     };
   }
 
-  async createAssessorAdminFlow(name: string, email: string, mobile: string) {
+  async createAssessorAdminFlow(
+    name: string,
+    email: string,
+    mobile: string,
+    sendCredentials: boolean = false,
+  ) {
     const normalizedEmail = email.trim().toLowerCase();
     if (!mobile || !mobile.trim()) {
       throw new BadRequestException({
@@ -631,22 +657,58 @@ export class CompanyProjectsService {
       });
     }
 
+    const tempPassword = sendCredentials ? passwordGeneration(12) : null;
+    const passwordHash = tempPassword ? await bcrypt.hash(tempPassword, 10) : undefined;
+
     const assessor = await this.assessorModel.create({
       name: name.trim(),
       email: normalizedEmail,
       mobile: mobile.trim(),
       status: '1',
+      ...(passwordHash ? { password: passwordHash } : {}),
     });
+
+    let credentialsEmailSent = false;
+    let emailErrorMessage: string | null = null;
+    if (sendCredentials && tempPassword) {
+      try {
+        await this.mailService.sendAssessorCredentialsEmail(
+          normalizedEmail,
+          name.trim(),
+          tempPassword,
+        );
+        credentialsEmailSent = true;
+      } catch (error) {
+        const rawMessage =
+          String((error as any)?.message || '').trim() ||
+          'Failed to send credentials email. Please retry later.';
+        const lower = rawMessage.toLowerCase();
+        const looksLikeResendSandbox =
+          (lower.includes('resend api error 403') || lower.includes('validation_error')) &&
+          (lower.includes('testing emails') || lower.includes('own email address'));
+        emailErrorMessage = looksLikeResendSandbox
+          ? 'Credentials email blocked by Resend sandbox mode. Verify a sending domain and use a verified from-address to send to external recipients.'
+          : rawMessage;
+      }
+    }
 
     return {
       status: 'success',
-      message: 'Assessor added successfully',
+      message:
+        sendCredentials && credentialsEmailSent
+          ? 'Assessor created. Credentials sent to email.'
+          : sendCredentials
+            ? 'Assessor created, but credentials email could not be sent.'
+            : 'Assessor added successfully',
       data: {
         id: assessor._id.toString(),
         name: assessor.name,
         email: assessor.email,
         mobile: (assessor as any).mobile,
         status: assessor.status,
+        send_credentials: sendCredentials,
+        credentials_email_sent: credentialsEmailSent,
+        ...(emailErrorMessage ? { credentials_email_error: emailErrorMessage } : {}),
       },
     };
   }
@@ -1031,14 +1093,18 @@ export class CompanyProjectsService {
       });
     }
 
-    const filePath = (f?: Express.Multer.File[]) => (f?.[0] ? this.getFixedAssessorUploadPath() : '');
+    const filePath = (f?: Express.Multer.File[]) =>
+      f?.[0] ? `uploads/assessors/${f[0].filename}` : '';
+    const bankInfo = await this.deriveBankDetails(dto.ifsc_code, dto.bank_name, dto.branch_name);
 
     const assessor = await this.assessorModel.create({
       name: dto.name.trim(),
       email: normalizedEmail,
       mobile: dto.mobile.trim(),
       status: (dto.status || '1').toString(),
-      approval_status: 'Pending',
+      // Admin-created profiles should be auto-approved (no approval cycle).
+      approval_status: 'Approved',
+      approval_remarks: '',
       profile_status: 'Complete',
       industry_category: dto.industry_category || '',
       alternate_mobile: dto.alternate_mobile || '',
@@ -1060,10 +1126,10 @@ export class CompanyProjectsService {
       emergency_city: dto.emergency_city || '',
       emergency_state: dto.emergency_state || '',
       emergency_pincode: dto.emergency_pincode || '',
-      bank_name: dto.bank_name || '',
+      bank_name: bankInfo.bank_name || '',
       account_number: dto.account_number || '',
-      branch_name: dto.branch_name || '',
-      ifsc_code: dto.ifsc_code || '',
+      branch_name: bankInfo.branch_name || '',
+      ifsc_code: bankInfo.ifsc_code || '',
       biodata: filePath(files?.biodata),
       vendor_registration_form: filePath(files?.vendor_registration_form),
       non_disclosure_agreement: filePath(files?.non_disclosure_agreement),
@@ -1111,7 +1177,13 @@ export class CompanyProjectsService {
       });
     }
 
-    const filePath = (f?: Express.Multer.File[]) => (f?.[0] ? this.getFixedAssessorUploadPath() : undefined);
+    const filePath = (f?: Express.Multer.File[]) =>
+      f?.[0] ? `uploads/assessors/${f[0].filename}` : undefined;
+    const bankInfo = await this.deriveBankDetails(
+      dto.ifsc_code ?? assessor.ifsc_code,
+      dto.bank_name ?? assessor.bank_name,
+      dto.branch_name ?? assessor.branch_name,
+    );
 
     assessor.name = (dto.name || assessor.name).trim();
     assessor.email = normalizedEmail;
@@ -1137,10 +1209,13 @@ export class CompanyProjectsService {
     assessor.emergency_city = dto.emergency_city ?? assessor.emergency_city ?? '';
     assessor.emergency_state = dto.emergency_state ?? assessor.emergency_state ?? '';
     assessor.emergency_pincode = dto.emergency_pincode ?? assessor.emergency_pincode ?? '';
-    assessor.bank_name = dto.bank_name ?? assessor.bank_name ?? '';
+    assessor.bank_name = bankInfo.bank_name;
     assessor.account_number = dto.account_number ?? assessor.account_number ?? '';
-    assessor.branch_name = dto.branch_name ?? assessor.branch_name ?? '';
-    assessor.ifsc_code = dto.ifsc_code ?? assessor.ifsc_code ?? '';
+    assessor.branch_name = bankInfo.branch_name;
+    assessor.ifsc_code = bankInfo.ifsc_code;
+    // Any admin update keeps the profile approved.
+    assessor.approval_status = 'Approved';
+    assessor.approval_remarks = '';
 
     assessor.profile_image = filePath(files?.profile_image) ?? assessor.profile_image;
     assessor.biodata = filePath(files?.biodata) ?? assessor.biodata;
@@ -6118,8 +6193,6 @@ export class CompanyProjectsService {
       igst: number;
       payment_date: string;
       payment_for: string;
-      supplier_state_code?: string;
-      place_of_supply_state_code?: string;
     },
     file: Express.Multer.File,
   ) {
@@ -6132,17 +6205,6 @@ export class CompanyProjectsService {
     const sgst = Number(payload.sgst);
     const cgst = Number(payload.cgst);
     const igst = Number(payload.igst);
-
-    const supplier = parseCiiExpenseStateCode(payload.supplier_state_code, 'supplier_state_code');
-    const place = parseCiiExpenseStateCode(payload.place_of_supply_state_code, 'place_of_supply_state_code');
-    const txn = validateCiiExpenseGstWithStates({
-      invoiceamount,
-      sgst,
-      cgst,
-      igst,
-      supplier_state_code: supplier,
-      place_of_supply_state_code: place,
-    });
 
     const cgstAmount = (invoiceamount * cgst) / 100;
     const sgstAmount = (invoiceamount * sgst) / 100;
@@ -6166,9 +6228,6 @@ export class CompanyProjectsService {
       payment_date: new Date(payload.payment_date),
       payment_status: 1,
       approval_status: 1,
-      supplier_state_code: supplier ?? undefined,
-      place_of_supply_state_code: place ?? undefined,
-      ...(txn.transaction_type ? { transaction_type: txn.transaction_type } : {}),
     });
 
     return { status: 'success', message: 'Invoice Uploaded Successfully!' };
@@ -6185,8 +6244,6 @@ export class CompanyProjectsService {
       igst: number;
       payment_date: string;
       payment_for: string;
-      supplier_state_code?: string;
-      place_of_supply_state_code?: string;
     },
     file?: Express.Multer.File,
   ) {
@@ -6210,26 +6267,6 @@ export class CompanyProjectsService {
     const cgst = Number(payload.cgst);
     const igst = Number(payload.igst);
 
-    const supplierRaw =
-      payload.supplier_state_code !== undefined
-        ? payload.supplier_state_code
-        : (invoice as any).supplier_state_code;
-    const placeRaw =
-      payload.place_of_supply_state_code !== undefined
-        ? payload.place_of_supply_state_code
-        : (invoice as any).place_of_supply_state_code;
-
-    const supplier = parseCiiExpenseStateCode(supplierRaw, 'supplier_state_code');
-    const place = parseCiiExpenseStateCode(placeRaw, 'place_of_supply_state_code');
-    const txn = validateCiiExpenseGstWithStates({
-      invoiceamount,
-      sgst,
-      cgst,
-      igst,
-      supplier_state_code: supplier,
-      place_of_supply_state_code: place,
-    });
-
     const cgstAmount = (invoiceamount * cgst) / 100;
     const sgstAmount = (invoiceamount * sgst) / 100;
     const igstAmount = (invoiceamount * igst) / 100;
@@ -6244,13 +6281,6 @@ export class CompanyProjectsService {
     invoice.tax_amount = cgstAmount + sgstAmount + igstAmount;
     invoice.total_amount = total_amount;
     invoice.payment_date = new Date(payload.payment_date);
-    (invoice as any).supplier_state_code = supplier ?? undefined;
-    (invoice as any).place_of_supply_state_code = place ?? undefined;
-    if (txn.transaction_type) {
-      (invoice as any).transaction_type = txn.transaction_type;
-    } else {
-      (invoice as any).transaction_type = undefined;
-    }
     if (file) {
       invoice.invoice_document = `uploads/company/${String(resolved.company_id)}/expenses/${file.filename}`;
       invoice.invoice_document_filename = file.originalname;
@@ -6381,6 +6411,79 @@ export class CompanyProjectsService {
     return [...history, entry];
   }
 
+  private createOutstandingId(): string {
+    return new Types.ObjectId().toHexString();
+  }
+
+  private getOutstandingRecords(projectLike: any): any[] {
+    const list = Array.isArray(projectLike?.outstanding_details_list)
+      ? projectLike.outstanding_details_list.filter((x: any) => x && typeof x === 'object')
+      : [];
+    if (list.length) {
+      return list.map((x: any) => ({
+        ...((x && typeof x.toObject === 'function') ? x.toObject() : x),
+        outstanding_id: String(
+          ((x && typeof x.toObject === 'function') ? x.toObject() : x)?.outstanding_id ||
+            this.createOutstandingId(),
+        ),
+      }));
+    }
+    const single = projectLike?.outstanding_details;
+    if (single && typeof single === 'object') {
+      const normalizedSingle =
+        single && typeof (single as any).toObject === 'function'
+          ? (single as any).toObject()
+          : single;
+      return [
+        {
+          ...normalizedSingle,
+          outstanding_id: String((normalizedSingle as any)?.outstanding_id || this.createOutstandingId()),
+        },
+      ];
+    }
+    return [];
+  }
+
+  private toOutstandingApiData(details: any): any {
+    const outstandingAmount = Number(details?.outstanding_amount ?? 0);
+    const outstandingPaid = Number(details?.outstanding_amt_paid ?? 0);
+    const dueAmount = Number(
+      details?.due_outstanding_amt ?? Math.max(0, outstandingAmount - outstandingPaid),
+    );
+    const paymentHistory = this.getOutstandingPaymentHistory(details);
+    const nextAction = dueAmount > 0 ? 'pay_due' : 'paid';
+    return {
+      outstanding_id: String(details?.outstanding_id ?? ''),
+      outstanding_amount: outstandingAmount,
+      outstanding_amt: outstandingAmount,
+      date: details?.date ?? null,
+      outstanding_date: details?.date ?? null,
+      remarks: details?.remarks || '',
+      outstanding_remark: details?.remarks || '',
+      status: details?.status || 'Unpaid',
+      paid_amt: outstandingPaid,
+      outstanding_amt_paid: outstandingPaid,
+      due_outstanding_amt: dueAmount,
+      remaining_amount: dueAmount,
+      remaining_balance: dueAmount,
+      paid_date: details?.paid_date ?? null,
+      paid_remark: details?.paid_remark ?? '',
+      payment_history: paymentHistory.map((entry: any) => ({
+        payment_amount: Number(entry.payment_amount ?? 0),
+        paid_date: entry.paid_date ? new Date(entry.paid_date).toISOString() : null,
+        paid_remark: String(entry.paid_remark ?? ''),
+        paid_total_after: Number(entry.paid_total_after ?? 0),
+        due_amount_after: Number(entry.due_amount_after ?? 0),
+        status_after: this.normalizeOutstandingStatus(entry.status_after),
+        source: String(entry.source ?? 'due_payment'),
+        created_at: entry.created_at ? new Date(entry.created_at).toISOString() : null,
+      })),
+      payment_history_count: paymentHistory.length,
+      next_action: nextAction,
+      action_button_label: nextAction === 'pay_due' ? 'Pay Due' : 'Paid',
+    };
+  }
+
   async getOutstandingDetailsByProjectId(projectId: string) {
     const resolved = await this.resolveProjectForAdmin(projectId);
     if (!resolved?._id) {
@@ -6392,51 +6495,32 @@ export class CompanyProjectsService {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
 
-    const details = (project as any).outstanding_details || {};
-    const outstandingAmount = Number(details.outstanding_amount ?? 0);
-    const outstandingPaid = Number(details.outstanding_amt_paid ?? 0);
-    const dueAmount = Number(
-      details.due_outstanding_amt ??
-        Math.max(0, outstandingAmount - outstandingPaid),
-    );
-    const paymentHistory = this.getOutstandingPaymentHistory(details);
-    const nextAction = dueAmount > 0 ? 'pay_due' : 'paid';
+    const records = this.getOutstandingRecords(project as any);
+    const legacyActive =
+      (project as any).outstanding_details &&
+      typeof (project as any).outstanding_details === 'object'
+        ? (project as any).outstanding_details
+        : null;
+    const hasLegacyId = String((legacyActive as any)?.outstanding_id ?? '').trim() !== '';
+    const active = records.length ? records[records.length - 1] : hasLegacyId ? legacyActive : legacyActive || {};
+    const activeData = this.toOutstandingApiData(active);
+    const outstandingInvoices = records.map((record: any) => this.toOutstandingApiData(record));
     return {
       status: 'success',
       message: 'Outstanding details fetched successfully',
       data: {
-        outstanding_amount: outstandingAmount,
-        outstanding_amt: outstandingAmount,
-        date: details.date ?? null,
-        outstanding_date: details.date ?? null,
-        remarks: details.remarks || '',
-        outstanding_remark: details.remarks || '',
-        status: details.status || 'Unpaid',
-        paid_amt: outstandingPaid,
-        outstanding_amt_paid: outstandingPaid,
-        due_outstanding_amt: dueAmount,
-        remaining_amount: dueAmount,
-        remaining_balance: dueAmount,
-        paid_date: details.paid_date ?? null,
-        paid_remark: details.paid_remark ?? '',
-        payment_history: paymentHistory.map((entry: any) => ({
-          payment_amount: Number(entry.payment_amount ?? 0),
-          paid_date: entry.paid_date ? new Date(entry.paid_date).toISOString() : null,
-          paid_remark: String(entry.paid_remark ?? ''),
-          paid_total_after: Number(entry.paid_total_after ?? 0),
-          due_amount_after: Number(entry.due_amount_after ?? 0),
-          status_after: this.normalizeOutstandingStatus(entry.status_after),
-          source: String(entry.source ?? 'due_payment'),
-          created_at: entry.created_at ? new Date(entry.created_at).toISOString() : null,
-        })),
-        payment_history_count: paymentHistory.length,
-        next_action: nextAction,
-        action_button_label: nextAction === 'pay_due' ? 'Pay Due' : 'Paid',
+        ...activeData,
+        outstanding_invoices: outstandingInvoices,
+        outstanding_invoice_count: outstandingInvoices.length,
       },
     };
   }
 
-  async upsertOutstandingDetailsByProjectId(projectId: string, dto: UpsertOutstandingDetailsDto) {
+  async upsertOutstandingDetailsByProjectId(
+    projectId: string,
+    dto: UpsertOutstandingDetailsDto,
+    createNew: boolean = false,
+  ) {
     const resolved = await this.resolveProjectForAdmin(projectId);
     if (!resolved?._id) {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
@@ -6496,8 +6580,29 @@ export class CompanyProjectsService {
     const outstandingPaid = normalizedStatus === 'Paid' || normalizedStatus === 'Partial' ? paidAmt : 0;
     const dueOutstanding = Math.max(0, outstandingAmount - outstandingPaid);
     const finalStatus = dueOutstanding <= 0 ? 'Paid' : outstandingPaid > 0 ? 'Partial' : 'Unpaid';
-    const nextAction = dueOutstanding > 0 ? 'pay_due' : 'paid';
-    const existingDetails = ((project as any).outstanding_details || {}) as any;
+    const records = this.getOutstandingRecords(project as any);
+    const requestedId = String(dto.outstanding_id ?? '').trim();
+    const currentId = String((project as any)?.outstanding_details?.outstanding_id ?? '').trim();
+    const targetIndex =
+      requestedId !== ''
+        ? records.findIndex((r: any) => String(r?.outstanding_id) === requestedId)
+        : currentId !== ''
+          ? records.findIndex((r: any) => String(r?.outstanding_id) === currentId)
+          : records.length - 1;
+    if (requestedId && targetIndex < 0) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Outstanding invoice not found for this project',
+      });
+    }
+
+    // For backward compatibility with old frontend behavior:
+    // PATCH without outstanding_id should also create a new outstanding invoice row.
+    const shouldCreate = createNew || targetIndex < 0 || requestedId === '';
+    const outstandingId = shouldCreate
+      ? this.createOutstandingId()
+      : String(records[targetIndex]?.outstanding_id);
+    const existingDetails = shouldCreate ? {} : ((records[targetIndex] || {}) as any);
     let paymentHistory = this.getOutstandingPaymentHistory(existingDetails);
     if (outstandingPaid > 0) {
       paymentHistory = this.appendOutstandingHistoryEntry(existingDetails, {
@@ -6513,6 +6618,7 @@ export class CompanyProjectsService {
     }
 
     const payload = {
+      outstanding_id: outstandingId,
       outstanding_amount: outstandingAmount,
       date: new Date(dateRaw),
       remarks: remarksRaw,
@@ -6530,40 +6636,25 @@ export class CompanyProjectsService {
       payment_history: paymentHistory,
     };
 
+    const nextRecords = [...records];
+    if (shouldCreate) {
+      nextRecords.push(payload);
+    } else {
+      nextRecords[targetIndex] = payload;
+    }
     (project as any).outstanding_details = payload;
+    (project as any).outstanding_details_list = nextRecords;
     await project.save();
+
+    const saved = this.toOutstandingApiData(payload);
 
     return {
       status: 'success',
       message: 'Outstanding details saved successfully',
       data: {
-        outstanding_amount: payload.outstanding_amount,
-        outstanding_amt: payload.outstanding_amount,
-        date: payload.date.toISOString(),
-        outstanding_date: payload.date.toISOString(),
-        remarks: payload.remarks,
-        outstanding_remark: payload.remarks,
-        status: payload.status,
-        paid_amt: payload.outstanding_amt_paid,
-        outstanding_amt_paid: payload.outstanding_amt_paid,
-        due_outstanding_amt: payload.due_outstanding_amt,
-        remaining_amount: payload.due_outstanding_amt,
-        remaining_balance: payload.due_outstanding_amt,
-        paid_date: payload.paid_date ? payload.paid_date.toISOString() : null,
-        paid_remark: payload.paid_remark,
-        payment_history: paymentHistory.map((entry: any) => ({
-          payment_amount: Number(entry.payment_amount ?? 0),
-          paid_date: entry.paid_date ? new Date(entry.paid_date).toISOString() : null,
-          paid_remark: String(entry.paid_remark ?? ''),
-          paid_total_after: Number(entry.paid_total_after ?? 0),
-          due_amount_after: Number(entry.due_amount_after ?? 0),
-          status_after: this.normalizeOutstandingStatus(entry.status_after),
-          source: String(entry.source ?? 'due_payment'),
-          created_at: entry.created_at ? new Date(entry.created_at).toISOString() : null,
-        })),
-        payment_history_count: paymentHistory.length,
-        next_action: nextAction,
-        action_button_label: nextAction === 'pay_due' ? 'Pay Due' : 'Paid',
+        ...saved,
+        outstanding_invoices: nextRecords.map((record: any) => this.toOutstandingApiData(record)),
+        outstanding_invoice_count: nextRecords.length,
       },
     };
   }
@@ -6579,22 +6670,86 @@ export class CompanyProjectsService {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
 
-    const details = ((project as any).outstanding_details || {}) as any;
-    const outstandingAmount = Number(details.outstanding_amount ?? 0);
-    const paidSoFar = Number(details.outstanding_amt_paid ?? details.paid_amt ?? 0);
-    const currentDue = Number(details.due_outstanding_amt ?? Math.max(0, outstandingAmount - paidSoFar));
+    const records = this.getOutstandingRecords(project as any);
+    const requestedId = String(dto.outstanding_id ?? '').trim();
+    const currentId = String((project as any)?.outstanding_details?.outstanding_id ?? '').trim();
     const dueAmt = Number(dto.due_amt ?? dto.due_amount);
-
     if (!Number.isFinite(dueAmt) || dueAmt < 0) {
       throw new BadRequestException({
         status: 'error',
         message: 'due_amt is required and must be >= 0',
       });
     }
+    const getDueForRecord = (record: any): number => {
+      const amount = Number(record?.outstanding_amount ?? 0);
+      const paid = Number(record?.outstanding_amt_paid ?? record?.paid_amt ?? 0);
+      return Number(record?.due_outstanding_amt ?? Math.max(0, amount - paid));
+    };
+    let targetIndex = -1;
+    if (requestedId !== '') {
+      targetIndex = records.findIndex((r: any) => String(r?.outstanding_id) === requestedId);
+    } else {
+      const currentIndex =
+        currentId !== '' ? records.findIndex((r: any) => String(r?.outstanding_id) === currentId) : -1;
+      if (currentIndex >= 0 && getDueForRecord(records[currentIndex]) >= dueAmt) {
+        targetIndex = currentIndex;
+      } else {
+        // When no id is provided, choose the latest outstanding that can satisfy the entered due_amt.
+        for (let i = records.length - 1; i >= 0; i--) {
+          if (getDueForRecord(records[i]) >= dueAmt) {
+            targetIndex = i;
+            break;
+          }
+        }
+        // If no record can satisfy due_amt, fall back to latest with any pending due for clearer error.
+        if (targetIndex < 0) {
+          for (let i = records.length - 1; i >= 0; i--) {
+            if (getDueForRecord(records[i]) > 0) {
+              targetIndex = i;
+              break;
+            }
+          }
+        }
+        if (targetIndex < 0) {
+          targetIndex = currentIndex >= 0 ? currentIndex : records.length - 1;
+        }
+      }
+    }
+    if (targetIndex < 0) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Outstanding invoice not found for this project',
+      });
+    }
+    let selectedIndex = targetIndex;
+    let details = { ...(records[selectedIndex] || {}) } as any;
+    let outstandingAmount = Number(details.outstanding_amount ?? 0);
+    let paidSoFar = Number(details.outstanding_amt_paid ?? details.paid_amt ?? 0);
+    let currentDue = Number(details.due_outstanding_amt ?? Math.max(0, outstandingAmount - paidSoFar));
+
+    // If chosen id is stale/mismatched, auto-switch to a record that can satisfy due_amt.
+    if (dueAmt > currentDue) {
+      for (let i = records.length - 1; i >= 0; i--) {
+        if (i === selectedIndex) continue;
+        if (getDueForRecord(records[i]) >= dueAmt) {
+          selectedIndex = i;
+          details = { ...(records[selectedIndex] || {}) } as any;
+          outstandingAmount = Number(details.outstanding_amount ?? 0);
+          paidSoFar = Number(details.outstanding_amt_paid ?? details.paid_amt ?? 0);
+          currentDue = Number(
+            details.due_outstanding_amt ?? Math.max(0, outstandingAmount - paidSoFar),
+          );
+          break;
+        }
+      }
+    }
+
     if (dueAmt > currentDue) {
       throw new BadRequestException({
         status: 'error',
-        message: 'due_amt cannot exceed current due_outstanding_amt',
+        message: `due_amt cannot exceed current due_outstanding_amt (outstanding_id=${String(
+          details.outstanding_id ?? '',
+        )}, current_due=${currentDue})`,
       });
     }
 
@@ -6621,32 +6776,21 @@ export class CompanyProjectsService {
     details.paid_remark = paidRemark;
     details.payment_history = paymentHistory;
 
+    const nextRecords = [...records];
+    nextRecords[selectedIndex] = details;
     (project as any).outstanding_details = details;
+    (project as any).outstanding_details_list = nextRecords;
     await project.save();
+
+    const saved = this.toOutstandingApiData(details);
 
     return {
       status: 'success',
       message: 'Due payment applied successfully',
       data: {
-        outstanding_amount: Number(details.outstanding_amount ?? 0),
-        outstanding_amt_paid: Number(details.outstanding_amt_paid ?? 0),
-        due_outstanding_amt: Number(details.due_outstanding_amt ?? 0),
-        remaining_amount: Number(details.due_outstanding_amt ?? 0),
-        remaining_balance: Number(details.due_outstanding_amt ?? 0),
-        status: details.status ?? 'Unpaid',
-        payment_history: paymentHistory.map((entry: any) => ({
-          payment_amount: Number(entry.payment_amount ?? 0),
-          paid_date: entry.paid_date ? new Date(entry.paid_date).toISOString() : null,
-          paid_remark: String(entry.paid_remark ?? ''),
-          paid_total_after: Number(entry.paid_total_after ?? 0),
-          due_amount_after: Number(entry.due_amount_after ?? 0),
-          status_after: this.normalizeOutstandingStatus(entry.status_after),
-          source: String(entry.source ?? 'due_payment'),
-          created_at: entry.created_at ? new Date(entry.created_at).toISOString() : null,
-        })),
-        payment_history_count: paymentHistory.length,
-        next_action: Number(details.due_outstanding_amt ?? 0) > 0 ? 'pay_due' : 'paid',
-        action_button_label: Number(details.due_outstanding_amt ?? 0) > 0 ? 'Pay Due' : 'Paid',
+        ...saved,
+        outstanding_invoices: nextRecords.map((record: any) => this.toOutstandingApiData(record)),
+        outstanding_invoice_count: nextRecords.length,
       },
     };
   }

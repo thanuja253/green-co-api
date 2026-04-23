@@ -12,11 +12,42 @@ export class CreditManagementService {
     private readonly creditModel: Model<CreditManagementDocument>,
   ) {}
 
+  private resolveChecklistCriteria(payload: CreateCreditManagementDto): string {
+    const rawCriteriaId = payload?.criteria_id as any;
+    const criteriaFromObject =
+      rawCriteriaId && typeof rawCriteriaId === 'object'
+        ? String(rawCriteriaId.criteria_name || rawCriteriaId.name || rawCriteriaId._id || '')
+        : '';
+    return String(
+      payload?.checklist_criteria || criteriaFromObject || payload?.criteria_name || rawCriteriaId || '',
+    ).trim();
+  }
+
+  private resolveCreditMainHeading(payload: CreateCreditManagementDto): string {
+    const rawCriteriaId = payload?.criteria_id as any;
+    const fromObj =
+      rawCriteriaId && typeof rawCriteriaId === 'object'
+        ? String(rawCriteriaId.criteria_name || rawCriteriaId.name || '')
+        : '';
+    return String(payload?.credit_main_heading || payload?.criteria_name || fromObj || '').trim();
+  }
+
+  private resolveCreditNumber(payload: CreateCreditManagementDto): string {
+    const rawCriteriaId = payload?.criteria_id as any;
+    const fromObj =
+      rawCriteriaId && typeof rawCriteriaId === 'object'
+        ? String(rawCriteriaId.group_name || rawCriteriaId.credit_name || '')
+        : '';
+    return String(payload?.credit_number || payload?.group_name || fromObj || '').trim();
+  }
+
   private mapRow(doc: any) {
     return {
       id: String(doc._id),
       checklist_criteria: doc.checklist_criteria || '',
+      criteria_name: doc.credit_main_heading || '',
       credit_main_heading: doc.credit_main_heading || '',
+      group_name: doc.credit_number || '',
       credit_number: doc.credit_number || '',
       parameter: doc.parameter || '',
       max_score: doc.max_score || '',
@@ -28,9 +59,9 @@ export class CreditManagementService {
   }
 
   async createCredit(payload: CreateCreditManagementDto) {
-    const checklistCriteria = String(payload?.checklist_criteria || '').trim();
-    const creditMainHeading = String(payload?.credit_main_heading || '').trim();
-    const creditNumber = String(payload?.credit_number || '').trim();
+    const checklistCriteria = this.resolveChecklistCriteria(payload);
+    const creditMainHeading = this.resolveCreditMainHeading(payload);
+    const creditNumber = this.resolveCreditNumber(payload);
     const parameter = String(payload?.parameter || '').trim();
     const maxScore = String(payload?.max_score || '').trim();
     const requirements = String(payload?.requirements || '').trim();

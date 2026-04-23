@@ -1,4 +1,4 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, Param } from '@nestjs/common';
 import { RegistrationMastersService } from './registration-masters.service';
 
 @Controller('api/company')
@@ -42,6 +42,15 @@ export class RegistrationMastersController {
   }
 
   /**
+   * GET /api/company/sectors
+   * Returns active sectors only (status = 1) for Registration form dropdown.
+   */
+  @Get('sectors')
+  async getActiveSectors() {
+    return this.registrationMastersService.getActiveSectors();
+  }
+
+  /**
    * GET /api/company/assessment-categories
    * Returns category tabs for Assessment Submittals (GSC, IE, PSL, MS, EM, CBM, WTM, MRM, GBE).
    */
@@ -57,6 +66,15 @@ export class RegistrationMastersController {
   @Get('assessor-grades')
   async getAssessorGrades() {
     return this.registrationMastersService.getActiveAssessorGrades();
+  }
+
+  /**
+   * GET /api/company/ifsc/:ifsc
+   * Returns bank and branch details for a valid IFSC.
+   */
+  @Get('ifsc/:ifsc')
+  async getBankDetailsByIfsc(@Param('ifsc') ifsc: string) {
+    return this.registrationMastersService.getBankDetailsByIfsc(ifsc);
   }
 
 }

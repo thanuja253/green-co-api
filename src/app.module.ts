@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
 import { CompanyAuthModule } from './company/company-auth/company-auth.module';
+import { AssessorAuthModule } from './company/assessor-auth/assessor-auth.module';
 import { CompanyProjectsModule } from './company/company-projects/company-projects.module';
 import { NotificationsModule } from './company/notifications/notifications.module';
 import { FacilitatorsModule } from './company/facilitators/facilitators.module';
@@ -35,6 +36,7 @@ import { ScheduleModule } from '@nestjs/schedule';
       inject: [ConfigService],
     }),
     CompanyAuthModule,
+    AssessorAuthModule,
     ScheduleModule.forRoot(),
     CompanyProjectsModule,
     NotificationsModule,

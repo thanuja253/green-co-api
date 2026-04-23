@@ -16,6 +16,10 @@ export class AppController {
         register: '/api/company/auth/register',
         login: '/api/company/auth/login',
         forgotPassword: '/api/company/auth/forgot-password',
+        assessorLogin: '/api/assessor/auth/login',
+        assessorChangePassword: '/api/assessor/auth/change-password',
+        assessorForgotPassword: '/api/assessor/auth/forgot-password',
+        assessorMyProjects: '/api/assessor/auth/myprojects',
       },
     };
   }

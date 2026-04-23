@@ -251,6 +251,7 @@ export class AdminCompanyFlowController {
       dto.name,
       dto.email,
       mobile,
+      dto.send_credentials === true,
     );
   }
 
@@ -738,7 +739,7 @@ export class AdminCompanyFlowController {
     @Param('projectId') projectId: string,
     @Body() dto: UpsertOutstandingDetailsDto,
   ): Promise<any> {
-    return this.companyProjectsService.upsertOutstandingDetailsByProjectId(projectId, dto);
+    return this.companyProjectsService.upsertOutstandingDetailsByProjectId(projectId, dto, true);
   }
 
   @Patch('api/admin/projects/:projectId/outstanding')
@@ -748,7 +749,7 @@ export class AdminCompanyFlowController {
     @Param('projectId') projectId: string,
     @Body() dto: UpsertOutstandingDetailsDto,
   ): Promise<any> {
-    return this.companyProjectsService.upsertOutstandingDetailsByProjectId(projectId, dto);
+    return this.companyProjectsService.upsertOutstandingDetailsByProjectId(projectId, dto, false);
   }
 
   @Post('api/admin/projects/:projectId/outstanding/due-payment')
@@ -934,8 +935,6 @@ export class AdminCompanyFlowController {
           igst,
           payment_date,
           payment_for,
-          supplier_state_code: body?.supplier_state_code,
-          place_of_supply_state_code: body?.place_of_supply_state_code,
         },
         regFeeInvoice,
       );
@@ -1023,8 +1022,6 @@ export class AdminCompanyFlowController {
           igst,
           payment_date,
           payment_for,
-          supplier_state_code: body?.supplier_state_code,
-          place_of_supply_state_code: body?.place_of_supply_state_code,
         },
         regFeeInvoice,
       );

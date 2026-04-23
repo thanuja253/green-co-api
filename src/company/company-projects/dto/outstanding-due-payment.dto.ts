@@ -3,6 +3,10 @@ import { IsDateString, IsNumber, IsOptional, IsString, MaxLength, Min } from 'cl
 
 export class OutstandingDuePaymentDto {
   @IsOptional()
+  @IsString()
+  outstanding_id?: string;
+
+  @IsOptional()
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)

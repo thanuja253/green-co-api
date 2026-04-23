@@ -1,4 +1,6 @@
 import { Injectable } from '@nestjs/common';
+import * as nodemailer from 'nodemailer';
+import * as dotenv from 'dotenv';
 
 type MailPayload = {
   from?: string;
@@ -12,11 +14,60 @@ export class MailService {
   private readonly transporter: { sendMail: (mailOptions: MailPayload) => Promise<void> };
   private readonly mailProvider: string;
   private readonly resendApiKey: string;
+  private readonly smtpTransporter?: nodemailer.Transporter;
 
   constructor() {
+    // Ensure .env values are available regardless of provider init order.
+    dotenv.config({ path: '.env' });
     this.mailProvider = (process.env.MAIL_PROVIDER || 'resend').toLowerCase();
     this.resendApiKey = (process.env.RESEND_API_KEY || '').trim();
 
+    if (this.mailProvider === 'smtp') {
+      const host = (process.env.SMTP_SERVER_HOST || '').trim();
+      const port = Number(process.env.SMTP_SERVER_PORT || 587);
+      const secure = String(process.env.SMTP_SERVER_SECURE || 'false').toLowerCase() === 'true';
+      const service = (process.env.SMTP_SERVER_SERVICE || '').trim();
+      const user = (process.env.SMTP_SERVER_USER || '').trim();
+      const pass = (process.env.SMTP_SERVER_PASS || '').trim();
+
+      if (!host && !service) {
+        console.warn('[MailService] SMTP selected but host/service is missing. Falling back to resend.');
+      } else if (!user || !pass) {
+        console.warn('[MailService] SMTP selected but user/pass missing. Falling back to resend.');
+      } else {
+        const smtpTimeoutMs = this.getOutboundMailTimeoutMs();
+        this.smtpTransporter = nodemailer.createTransport({
+          ...(service ? { service } : { host, port, secure }),
+          auth: { user, pass },
+          connectionTimeout: smtpTimeoutMs,
+          greetingTimeout: smtpTimeoutMs,
+          socketTimeout: smtpTimeoutMs,
+        });
+
+        this.transporter = {
+          sendMail: async (mailOptions: MailPayload): Promise<void> => {
+            await this.smtpTransporter!.sendMail({
+              from: mailOptions.from || process.env.MAIL_FROM_ADDRESS || user,
+              to: mailOptions.to,
+              subject: mailOptions.subject,
+              html: mailOptions.html,
+            });
+          },
+        };
+
+        const verifyOnStart =
+          String(process.env.MAIL_SMTP_VERIFY_ON_START || 'false').toLowerCase() === 'true';
+        if (verifyOnStart) {
+          this.smtpTransporter
+            .verify()
+            .then(() => console.log('[MailService] SMTP connection verified successfully.'))
+            .catch((err) => this.logSmtpErrorContext(err, user));
+        }
+        return;
+      }
+    }
+
+    // Default/fallback provider is Resend.
     this.transporter = {
       sendMail: async (mailOptions: MailPayload): Promise<void> => {
         await this.sendViaResend(mailOptions);
@@ -24,14 +75,10 @@ export class MailService {
     };
 
     if (this.mailProvider !== 'resend') {
-      console.warn(
-        `[MailService] Unsupported MAIL_PROVIDER=${this.mailProvider}. Falling back to resend.`,
-      );
+      console.warn(`[MailService] MAIL_PROVIDER=${this.mailProvider} not usable. Using resend fallback.`);
     }
     if (!this.resendApiKey) {
-      console.warn(
-        '[MailService] RESEND_API_KEY is missing. Email sending will fail until this environment variable is set.',
-      );
+      console.warn('[MailService] RESEND_API_KEY is missing. Email sending will fail until this environment variable is set.');
     }
   }
 
@@ -129,24 +176,87 @@ export class MailService {
     }
   }
 
+  /** Same URL as assessor invite credentials (`ASSESSOR_LOGIN_URL` or `FRONTEND_URL/assessor/login`). */
+  private getAssessorPortalLoginUrl(): string {
+    const base = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
+    return (
+      (process.env.ASSESSOR_LOGIN_URL || '').trim() ||
+      `${base}/assessor/login`
+    );
+  }
+
+  async sendAssessorCredentialsEmail(
+    email: string,
+    assessorName: string,
+    temporaryPassword: string,
+  ): Promise<void> {
+    const loginUrl = this.getAssessorPortalLoginUrl();
+    const mailOptions = {
+      from: process.env.MAIL_FROM_ADDRESS || 'noreply@greenco.com',
+      to: email,
+      subject: 'GreenCo - Assessor account credentials',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2>Welcome to GreenCo</h2>
+          <p>Dear ${assessorName || 'Assessor'},</p>
+          <p>Your assessor account has been created by GreenCo Admin.</p>
+          <p><strong>Login Email:</strong> ${email}</p>
+          <p><strong>Temporary Password:</strong> ${temporaryPassword}</p>
+          <p>Please sign in and change your password after first login.</p>
+          <p><a href="${loginUrl}" target="_blank">Login to Assessor Portal</a></p>
+          <p>If the button does not open, use this URL: ${loginUrl}</p>
+          <p>Best regards,<br/>GreenCo Team</p>
+        </div>
+      `,
+    };
+    try {
+      await this.transporter.sendMail(mailOptions);
+    } catch (err) {
+      this.logSmtpErrorContext(err, email);
+      throw err;
+    }
+  }
+
+  private getOutboundMailTimeoutMs(): number {
+    return Math.max(
+      5000,
+      Number.parseInt(process.env.MAIL_SMTP_TIMEOUT_MS || '25000', 10) || 25000,
+    );
+  }
+
   private async sendViaResend(mailOptions: MailPayload): Promise<void> {
     if (!this.resendApiKey) {
       throw new Error('RESEND_API_KEY is not configured.');
     }
 
-    const response = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${this.resendApiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        from: mailOptions.from || process.env.MAIL_FROM_ADDRESS || 'noreply@greenco.com',
-        to: [mailOptions.to],
-        subject: mailOptions.subject,
-        html: mailOptions.html,
-      }),
-    });
+    const timeoutMs = this.getOutboundMailTimeoutMs();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    let response: Response;
+    try {
+      response = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.resendApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: mailOptions.from || process.env.MAIL_FROM_ADDRESS || 'noreply@greenco.com',
+          to: [mailOptions.to],
+          subject: mailOptions.subject,
+          html: mailOptions.html,
+        }),
+        signal: controller.signal,
+      });
+    } catch (e) {
+      if ((e as Error)?.name === 'AbortError') {
+        throw new Error(`Resend request timed out after ${timeoutMs}ms`);
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
 
     if (!response.ok) {
       const responseText = await response.text();
@@ -169,6 +279,41 @@ export class MailService {
       console.error(
         '[MailService] Outbound network issue detected while sending email.',
       );
+    }
+  }
+
+  /**
+   * Assessor forgot-password: same layout and login link as {@link sendAssessorCredentialsEmail}.
+   */
+  async sendAssessorPasswordResetEmail(
+    email: string,
+    assessorName: string,
+    temporaryPassword: string,
+  ): Promise<void> {
+    const loginUrl = this.getAssessorPortalLoginUrl();
+    const mailOptions = {
+      from: process.env.MAIL_FROM_ADDRESS || 'noreply@greenco.com',
+      to: email,
+      subject: 'GreenCo - Assessor password reset',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2>Welcome to GreenCo</h2>
+          <p>Dear ${assessorName || 'Assessor'},</p>
+          <p>Your assessor password has been reset by your request (or an administrator).</p>
+          <p><strong>Login Email:</strong> ${email}</p>
+          <p><strong>Temporary Password:</strong> ${temporaryPassword}</p>
+          <p>Please sign in and change your password after login.</p>
+          <p><a href="${loginUrl}" target="_blank">Login to Assessor Portal</a></p>
+          <p>If the button does not open, use this URL: ${loginUrl}</p>
+          <p>Best regards,<br/>GreenCo Team</p>
+        </div>
+      `,
+    };
+    try {
+      await this.transporter.sendMail(mailOptions);
+    } catch (err) {
+      this.logSmtpErrorContext(err, email);
+      throw err;
     }
   }
 

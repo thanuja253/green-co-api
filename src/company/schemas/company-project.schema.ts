@@ -146,6 +146,7 @@ export class CompanyProject {
   /** Outstanding details captured from Finance > Outstanding form. */
   @Prop({
     type: {
+      outstanding_id: { type: String, default: null },
       outstanding_amount: { type: Number, default: 0 },
       date: { type: Date, default: null },
       remarks: { type: String, default: '' },
@@ -173,6 +174,7 @@ export class CompanyProject {
     default: null,
   })
   outstanding_details?: {
+    outstanding_id?: string | null;
     outstanding_amount: number;
     date: Date | null;
     remarks: string;
@@ -192,6 +194,60 @@ export class CompanyProject {
       created_at: Date;
     }>;
   } | null;
+
+  /** Multiple outstanding invoices (new), each with independent payment history. */
+  @Prop({
+    type: [
+      {
+        outstanding_id: { type: String, required: true },
+        outstanding_amount: { type: Number, default: 0 },
+        date: { type: Date, default: null },
+        remarks: { type: String, default: '' },
+        status: { type: String, default: 'Unpaid' },
+        outstanding_amt_paid: { type: Number, default: 0 },
+        due_outstanding_amt: { type: Number, default: 0 },
+        paid_date: { type: Date, default: null },
+        paid_remark: { type: String, default: '' },
+        payment_history: {
+          type: [
+            {
+              payment_amount: { type: Number, default: 0 },
+              paid_date: { type: Date, default: null },
+              paid_remark: { type: String, default: '' },
+              paid_total_after: { type: Number, default: 0 },
+              due_amount_after: { type: Number, default: 0 },
+              status_after: { type: String, default: 'Unpaid' },
+              source: { type: String, default: 'due_payment' },
+              created_at: { type: Date, default: () => new Date() },
+            },
+          ],
+          default: [],
+        },
+      },
+    ],
+    default: [],
+  })
+  outstanding_details_list?: Array<{
+    outstanding_id: string;
+    outstanding_amount: number;
+    date: Date | null;
+    remarks: string;
+    status: 'Unpaid' | 'Partial' | 'Paid';
+    outstanding_amt_paid?: number;
+    due_outstanding_amt?: number;
+    paid_date?: Date | null;
+    paid_remark?: string;
+    payment_history?: Array<{
+      payment_amount: number;
+      paid_date: Date | null;
+      paid_remark: string;
+      paid_total_after: number;
+      due_amount_after: number;
+      status_after: 'Unpaid' | 'Partial' | 'Paid';
+      source: 'due_payment' | 'initial_paid' | 'legacy_backfill' | 'manual_update';
+      created_at: Date;
+    }>;
+  }>;
 }
 
 export const CompanyProjectSchema = SchemaFactory.createForClass(CompanyProject);

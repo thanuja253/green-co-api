@@ -24,5 +24,18 @@ export class ListParametersQueryDto {
   @IsOptional()
   @IsString()
   search?: string;
+
+  // DataTables compatibility
+  @IsOptional()
+  @IsString()
+  draw?: string;
+
+  @IsOptional()
+  @IsString()
+  start?: string;
+
+  @IsOptional()
+  @IsString()
+  length?: string;
 }
 

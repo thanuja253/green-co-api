@@ -14,6 +14,9 @@ export class Assessor {
   @Prop({ required: true, trim: true })
   mobile: string;
 
+  @Prop({ select: false })
+  password?: string;
+
   @Prop({ default: '1' })
   status: string;
 
