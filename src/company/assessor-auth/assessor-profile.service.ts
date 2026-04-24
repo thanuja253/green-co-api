@@ -3,6 +3,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Assessor, AssessorDocument } from '../schemas/assessor.schema';
 import { lookupIfscDetails } from '../../common/ifsc-lookup.util';
+import { ASSESSOR_PROFILE_DOCUMENT_KEYS } from './assessor-profile-document-keys';
 
 @Injectable()
 export class AssessorProfileService {
@@ -217,6 +218,25 @@ export class AssessorProfileService {
     assessor.gst_declaration = filePath(files?.gst_declaration) ?? assessor.gst_declaration;
     assessor.pan_card = filePath(files?.pan_card) ?? assessor.pan_card;
     assessor.cancelled_cheque = filePath(files?.cancelled_cheque) ?? assessor.cancelled_cheque;
+
+    const prev = ((assessor as any).document_approvals || {}) as Record<
+      string,
+      { status?: string; remarks?: string }
+    >;
+    const docApprovals: Record<string, { status: string; remarks: string }> = {};
+    for (const k of Object.keys(prev)) {
+      const e = prev[k];
+      docApprovals[k] = {
+        status: String(e?.status || 'Pending'),
+        remarks: String(e?.remarks ?? '').trim(),
+      };
+    }
+    for (const key of ASSESSOR_PROFILE_DOCUMENT_KEYS) {
+      if (files?.[key]?.[0]) {
+        docApprovals[key] = { status: 'Pending', remarks: '' };
+      }
+    }
+    (assessor as any).document_approvals = docApprovals;
 
     // Assessor submissions always require admin review.
     assessor.approval_status = 'Pending';

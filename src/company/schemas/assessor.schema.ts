@@ -124,6 +124,13 @@ export class Assessor {
 
   @Prop({ default: 'Incomplete' })
   profile_status?: string;
+
+  /**
+   * Per uploaded document: admin approve/reject. Keys match multer field names
+   * (e.g. pan_card, cancelled_cheque). Re-uploading a file resets that key to Pending.
+   */
+  @Prop({ type: Object, default: {} })
+  document_approvals?: Record<string, { status?: string; remarks?: string }>;
 }
 
 export const AssessorSchema = SchemaFactory.createForClass(Assessor);

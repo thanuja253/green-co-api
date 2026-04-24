@@ -19,6 +19,10 @@ import { Facilitator, FacilitatorDocument } from '../schemas/facilitator.schema'
 import { Coordinator, CoordinatorDocument } from '../schemas/coordinator.schema';
 import { Assessor, AssessorDocument } from '../schemas/assessor.schema';
 import {
+  ASSESSOR_PROFILE_DOCUMENT_KEYS,
+  isAssessorProfileDocumentKey,
+} from '../assessor-auth/assessor-profile-document-keys';
+import {
   PrimaryDataForm,
   PrimaryDataFormDocument,
   PRIMARY_DATA_DOC_STATUS,
@@ -568,6 +572,23 @@ export class CompanyProjectsService {
     };
   }
 
+  private buildDocumentApprovalsMap(a: any): Record<string, { status: string; remarks: string }> {
+    const stored = (a?.document_approvals || {}) as Record<string, { status?: string; remarks?: string }>;
+    const out: Record<string, { status: string; remarks: string }> = {};
+    for (const key of ASSESSOR_PROFILE_DOCUMENT_KEYS) {
+      const pathVal = String((a as any)?.[key] ?? '').trim();
+      if (!pathVal) continue;
+      const entry = stored[key];
+      out[key] = {
+        status: ['Pending', 'Approved', 'Rejected'].includes(String(entry?.status || ''))
+          ? String(entry!.status)
+          : 'Pending',
+        remarks: String(entry?.remarks ?? '').trim(),
+      };
+    }
+    return out;
+  }
+
   private mapAssessorResponse(a: any) {
     const profileImage = this.toPublicFilePath(a.profile_image);
     const biodata = this.toPublicFilePath(a.biodata);
@@ -629,6 +650,7 @@ export class CompanyProjectsService {
       approval_status: a.approval_status || 'Pending',
       approval_remarks: a.approval_remarks || '',
       profile_status: a.profile_status || 'Incomplete',
+      document_approvals: this.buildDocumentApprovalsMap(a),
     };
   }
 
@@ -889,11 +911,101 @@ export class CompanyProjectsService {
 
     assessor.approval_status = approvalStatus;
     assessor.approval_remarks = (remarks || '').trim();
+
+    const remarksTrim = (remarks || '').trim();
+    if (approvalStatus === 'Approved' || approvalStatus === 'Rejected') {
+      const prev = ((assessor as any).document_approvals || {}) as Record<
+        string,
+        { status?: string; remarks?: string }
+      >;
+      const docApprovals: Record<string, { status: string; remarks: string }> = {};
+      for (const k of Object.keys(prev)) {
+        const e = prev[k];
+        docApprovals[k] = {
+          status: String(e?.status || 'Pending'),
+          remarks: String(e?.remarks ?? '').trim(),
+        };
+      }
+      for (const key of ASSESSOR_PROFILE_DOCUMENT_KEYS) {
+        const pathVal = String((assessor as any)[key] ?? '').trim();
+        if (!pathVal) continue;
+        docApprovals[key] = {
+          status: approvalStatus,
+          remarks: approvalStatus === 'Rejected' ? remarksTrim : '',
+        };
+      }
+      (assessor as any).document_approvals = docApprovals;
+    }
+
     await assessor.save();
 
     return {
       status: 'success',
       message: `Assessor ${approvalStatus.toLowerCase()} successfully`,
+      data: this.mapAssessorResponse(assessor.toObject()),
+    };
+  }
+
+  async updateAssessorDocumentApprovalAdminFlow(
+    assessorId: string,
+    documentKey: string,
+    status: 'Approved' | 'Rejected' | 'Pending',
+    remarks?: string,
+  ) {
+    if (!isAssessorProfileDocumentKey(documentKey)) {
+      throw new BadRequestException({
+        status: 'error',
+        message: `Invalid document key. Allowed: ${ASSESSOR_PROFILE_DOCUMENT_KEYS.join(', ')}`,
+      });
+    }
+    const assessor = await this.assessorModel.findById(assessorId);
+    if (!assessor) {
+      throw new NotFoundException({ status: 'error', message: 'Assessor not found' });
+    }
+    const pathVal = String((assessor as any)[documentKey] ?? '').trim();
+    if (!pathVal) {
+      throw new BadRequestException({
+        status: 'error',
+        message: `No file uploaded for document "${documentKey}"`,
+      });
+    }
+    const prev = ((assessor as any).document_approvals || {}) as Record<
+      string,
+      { status?: string; remarks?: string }
+    >;
+    const docApprovals: Record<string, { status: string; remarks: string }> = {};
+    for (const k of Object.keys(prev)) {
+      const e = prev[k];
+      docApprovals[k] = {
+        status: String(e?.status || 'Pending'),
+        remarks: String(e?.remarks ?? '').trim(),
+      };
+    }
+    docApprovals[documentKey] = {
+      status,
+      remarks: String(remarks ?? '').trim(),
+    };
+    (assessor as any).document_approvals = docApprovals;
+
+    const all = this.buildDocumentApprovalsMap(assessor.toObject());
+    const values = Object.values(all);
+    const anyRejected = values.some((v) => v.status === 'Rejected');
+    const anyPending = values.some((v) => v.status === 'Pending');
+    const allApproved = values.length > 0 && values.every((v) => v.status === 'Approved');
+    if (anyRejected) {
+      assessor.approval_status = 'Rejected';
+    } else if (anyPending) {
+      assessor.approval_status = 'Pending';
+      assessor.approval_remarks = '';
+    } else if (allApproved) {
+      assessor.approval_status = 'Approved';
+      assessor.approval_remarks = '';
+    }
+
+    await assessor.save();
+    return {
+      status: 'success',
+      message: `Document ${documentKey} marked as ${status}`,
       data: this.mapAssessorResponse(assessor.toObject()),
     };
   }
@@ -1097,6 +1209,14 @@ export class CompanyProjectsService {
       f?.[0] ? `uploads/assessors/${f[0].filename}` : '';
     const bankInfo = await this.deriveBankDetails(dto.ifsc_code, dto.bank_name, dto.branch_name);
 
+    const document_approvals: Record<string, { status: string; remarks: string }> = {};
+    for (const key of ASSESSOR_PROFILE_DOCUMENT_KEYS) {
+      const p = filePath((files as any)?.[key]);
+      if (String(p || '').trim()) {
+        document_approvals[key] = { status: 'Approved', remarks: '' };
+      }
+    }
+
     const assessor = await this.assessorModel.create({
       name: dto.name.trim(),
       email: normalizedEmail,
@@ -1106,6 +1226,7 @@ export class CompanyProjectsService {
       approval_status: 'Approved',
       approval_remarks: '',
       profile_status: 'Complete',
+      document_approvals,
       industry_category: dto.industry_category || '',
       alternate_mobile: dto.alternate_mobile || '',
       address_line_1: dto.address_line_1 || '',
@@ -1226,6 +1347,25 @@ export class CompanyProjectsService {
     assessor.gst_declaration = filePath(files?.gst_declaration) ?? assessor.gst_declaration;
     assessor.pan_card = filePath(files?.pan_card) ?? assessor.pan_card;
     assessor.cancelled_cheque = filePath(files?.cancelled_cheque) ?? assessor.cancelled_cheque;
+
+    const prevAdmin = ((assessor as any).document_approvals || {}) as Record<
+      string,
+      { status?: string; remarks?: string }
+    >;
+    const docApprovals: Record<string, { status: string; remarks: string }> = {};
+    for (const k of Object.keys(prevAdmin)) {
+      const e = prevAdmin[k];
+      docApprovals[k] = {
+        status: String(e?.status || 'Pending'),
+        remarks: String(e?.remarks ?? '').trim(),
+      };
+    }
+    for (const key of ASSESSOR_PROFILE_DOCUMENT_KEYS) {
+      if (files?.[key]?.[0]) {
+        docApprovals[key] = { status: 'Approved', remarks: '' };
+      }
+    }
+    (assessor as any).document_approvals = docApprovals;
 
     await assessor.save();
 

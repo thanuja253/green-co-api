@@ -32,6 +32,7 @@ import { CreateAssessorDto } from './dto/create-assessor.dto';
 import { CreateAssessorProfileDto } from './dto/create-assessor-profile.dto';
 import { ListAssessorsQueryDto } from './dto/list-assessors-query.dto';
 import { UpdateAssessorApprovalDto } from './dto/update-assessor-approval.dto';
+import { UpdateAssessorDocumentApprovalDto } from './dto/update-assessor-document-approval.dto';
 import { ReportsQueryDto } from './dto/reports-query.dto';
 import { AssignFacilitatorDto } from './dto/assign-facilitator.dto';
 import { CreateCoordinatorDto } from './dto/create-coordinator.dto';
@@ -296,6 +297,31 @@ export class AdminCompanyFlowController {
     return this.companyProjectsService.updateAssessorApprovalStatusAdminFlow(
       assessorId,
       status,
+      dto.remarks,
+    );
+  }
+
+  /**
+   * Admin: approve/reject/pending one assessor-uploaded document (PAN, cheque, etc.).
+   * Re-upload by assessor resets that document to Pending (see assessor PATCH profile).
+   *
+   * PATCH /api/admin/assessors/:assessorId/documents/:documentKey/approval
+   * body: { "status": "Approved" | "Rejected" | "Pending", "remarks": "..." }
+   */
+  @Patch('api/admin/assessors/:assessorId/documents/:documentKey/approval')
+  @Patch('admin/assessors/:assessorId/documents/:documentKey/approval')
+  @Post('api/admin/assessors/:assessorId/documents/:documentKey/approval-status')
+  @Post('admin/assessors/:assessorId/documents/:documentKey/approval-status')
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
+  async updateAssessorDocumentApproval(
+    @Param('assessorId') assessorId: string,
+    @Param('documentKey') documentKey: string,
+    @Body() dto: UpdateAssessorDocumentApprovalDto,
+  ): Promise<any> {
+    return this.companyProjectsService.updateAssessorDocumentApprovalAdminFlow(
+      assessorId,
+      documentKey,
+      dto.status,
       dto.remarks,
     );
   }

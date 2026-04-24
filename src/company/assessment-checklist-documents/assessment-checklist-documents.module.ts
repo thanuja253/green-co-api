@@ -9,8 +9,10 @@ import {
   ParameterManagement,
   ParameterManagementSchema,
 } from '../schemas/parameter-management.schema';
+import { Company, CompanySchema } from '../schemas/company.schema';
 import { AssessmentChecklistDocumentsController } from './assessment-checklist-documents.controller';
 import { AssessmentChecklistDocumentsService } from './assessment-checklist-documents.service';
+import { AccountStatusGuard } from '../company-auth/guards/account-status.guard';
 
 @Module({
   imports: [
@@ -18,10 +20,11 @@ import { AssessmentChecklistDocumentsService } from './assessment-checklist-docu
       { name: AssessmentChecklistDocument.name, schema: AssessmentChecklistDocumentSchema },
       { name: Sector.name, schema: SectorSchema },
       { name: ParameterManagement.name, schema: ParameterManagementSchema },
+      { name: Company.name, schema: CompanySchema },
     ]),
   ],
   controllers: [AssessmentChecklistDocumentsController],
-  providers: [AssessmentChecklistDocumentsService],
+  providers: [AssessmentChecklistDocumentsService, AccountStatusGuard],
 })
 export class AssessmentChecklistDocumentsModule {}
 

@@ -30,10 +30,18 @@ export class AssessmentChecklistDocumentsController {
   /**
    * Company: list checklist docs for project (optionally filter by criteria_id)
    * GET /api/company/projects/:projectId/assessment-checklist-documents?criteria_id=...
+   * GET /api/companies/projects/:projectId/assessment-checklist-documents?criteria_id=... (alias)
    */
   @Get('api/company/projects/:projectId/assessment-checklist-documents')
-  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   async listCompany(
+    @Param('projectId') projectId: string,
+    @Query('criteria_id') criteriaId?: string,
+  ) {
+    return this.docsService.listForProject(projectId, criteriaId);
+  }
+
+  @Get('api/companies/projects/:projectId/assessment-checklist-documents')
+  async listCompanyAlias(
     @Param('projectId') projectId: string,
     @Query('criteria_id') criteriaId?: string,
   ) {
@@ -43,6 +51,7 @@ export class AssessmentChecklistDocumentsController {
   /**
    * Company: upload checklist doc (Pending until admin approves)
    * POST /api/company/projects/:projectId/assessment-checklist-documents
+   * POST /api/companies/projects/:projectId/assessment-checklist-documents (alias)
    * multipart: document(file), title(string), sector_id(string), criteria_id(string)
    */
   @Post('api/company/projects/:projectId/assessment-checklist-documents')
@@ -79,6 +88,62 @@ export class AssessmentChecklistDocumentsController {
   )
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
   async uploadCompany(
+    @Req() req: Request & { user: { userId: string } },
+    @Param('projectId') projectId: string,
+    @UploadedFile() file: Express.Multer.File,
+    @Body() body: any,
+  ) {
+    if (!file) {
+      return { status: 'error', message: 'No file uploaded. Field name must be document.' };
+    }
+    const title = String(body?.title || '').trim();
+    const sectorId = String(body?.sector_id || body?.sectorId || '').trim();
+    const criteriaId = String(body?.criteria_id || body?.criteriaId || '').trim();
+    return this.docsService.uploadForProject({
+      projectId,
+      sectorId,
+      criteriaId,
+      title,
+      documentPath: `uploads/companyproject/assessmentChecklist/${projectId}/${file.filename}`,
+      uploadedByRole: 'COMPANY',
+      uploadedById: req.user.userId,
+    });
+  }
+
+  @Post('api/companies/projects/:projectId/assessment-checklist-documents')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
+  @UseInterceptors(
+    FileInterceptor('document', {
+      storage: diskStorage({
+        destination: (req, _file, cb) => {
+          const pid = (req as any).params.projectId;
+          const uploadPath = join(process.cwd(), 'uploads', 'companyproject', 'assessmentChecklist', pid);
+          if (!fs.existsSync(uploadPath)) fs.mkdirSync(uploadPath, { recursive: true });
+          cb(null, uploadPath);
+        },
+        filename: (_req, file, cb) => {
+          const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+          cb(null, `checklist-${unique}${extname(file.originalname)}`);
+        },
+      }),
+      limits: { fileSize: 10 * 1024 * 1024 },
+      fileFilter: (_req, file, cb) => {
+        const allowed = [
+          'application/pdf',
+          'image/png',
+          'image/jpeg',
+          'image/jpg',
+        ];
+        if (!allowed.includes(file.mimetype)) {
+          cb(new Error('Only PDF/PNG/JPG/JPEG are allowed'), false);
+          return;
+        }
+        cb(null, true);
+      },
+    }),
+  )
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
+  async uploadCompanyAlias(
     @Req() req: Request & { user: { userId: string } },
     @Param('projectId') projectId: string,
     @UploadedFile() file: Express.Multer.File,
