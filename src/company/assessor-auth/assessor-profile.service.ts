@@ -3,7 +3,10 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Assessor, AssessorDocument } from '../schemas/assessor.schema';
 import { lookupIfscDetails } from '../../common/ifsc-lookup.util';
-import { ASSESSOR_PROFILE_DOCUMENT_KEYS } from './assessor-profile-document-keys';
+import {
+  ASSESSOR_PROFILE_DOCUMENT_KEYS,
+  ASSESSOR_REVIEW_REQUIRED_DOCUMENT_KEYS,
+} from './assessor-profile-document-keys';
 
 @Injectable()
 export class AssessorProfileService {
@@ -231,16 +234,22 @@ export class AssessorProfileService {
         remarks: String(e?.remarks ?? '').trim(),
       };
     }
+    let reviewRequiredDocChanged = false;
     for (const key of ASSESSOR_PROFILE_DOCUMENT_KEYS) {
       if (files?.[key]?.[0]) {
         docApprovals[key] = { status: 'Pending', remarks: '' };
+        if ((ASSESSOR_REVIEW_REQUIRED_DOCUMENT_KEYS as readonly string[]).includes(key)) {
+          reviewRequiredDocChanged = true;
+        }
       }
     }
     (assessor as any).document_approvals = docApprovals;
 
-    // Assessor submissions always require admin review.
-    assessor.approval_status = 'Pending';
-    assessor.approval_remarks = '';
+    // Re-review only when one of the approval-required docs changes.
+    if (reviewRequiredDocChanged) {
+      assessor.approval_status = 'Pending';
+      assessor.approval_remarks = '';
+    }
     assessor.profile_status = 'Complete';
 
     await assessor.save();

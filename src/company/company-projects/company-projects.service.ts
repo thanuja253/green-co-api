@@ -20,6 +20,7 @@ import { Coordinator, CoordinatorDocument } from '../schemas/coordinator.schema'
 import { Assessor, AssessorDocument } from '../schemas/assessor.schema';
 import {
   ASSESSOR_PROFILE_DOCUMENT_KEYS,
+  ASSESSOR_REVIEW_REQUIRED_DOCUMENT_KEYS,
   isAssessorProfileDocumentKey,
 } from '../assessor-auth/assessor-profile-document-keys';
 import {
@@ -31,6 +32,18 @@ import {
   MasterPrimaryDataChecklist,
   MasterPrimaryDataChecklistDocument,
 } from '../schemas/master-primary-data-checklist.schema';
+import {
+  CreditManagement,
+  CreditManagementDocument,
+} from '../schemas/credit-management.schema';
+import {
+  ParameterManagement,
+  ParameterManagementDocument,
+} from '../schemas/parameter-management.schema';
+import {
+  MasterChecklistSector,
+  MasterChecklistSectorDocument,
+} from '../schemas/master-checklist-sector.schema';
 import { RegistrationInfoDto } from './dto/registration-info.dto';
 import { SubmitPaymentDto } from './dto/submit-payment.dto';
 import { UpdateInvoiceApprovalDto } from './dto/update-invoice-approval.dto';
@@ -281,10 +294,26 @@ export class CompanyProjectsService {
     private readonly primaryDataFormModel: Model<PrimaryDataFormDocument>,
     @InjectModel(MasterPrimaryDataChecklist.name)
     private readonly masterPrimaryDataChecklistModel: Model<MasterPrimaryDataChecklistDocument>,
+    @InjectModel(CreditManagement.name)
+    private readonly creditManagementModel: Model<CreditManagementDocument>,
+    @InjectModel(ParameterManagement.name)
+    private readonly parameterManagementModel: Model<ParameterManagementDocument>,
+    @InjectModel(MasterChecklistSector.name)
+    private readonly masterChecklistSectorModel: Model<MasterChecklistSectorDocument>,
     @InjectConnection() private readonly mongoConnection: Connection,
     private readonly notificationsService: NotificationsService,
     private readonly mailService: MailService,
   ) {}
+
+  private calculateTentativeLevel(percentage: number): string {
+    if (percentage >= 85) return 'Platinum+';
+    if (percentage >= 75) return 'Platinum';
+    if (percentage >= 65) return 'Gold';
+    if (percentage >= 55) return 'Silver';
+    if (percentage >= 45) return 'Bronze';
+    if (percentage >= 35) return 'Certified';
+    return 'Not Classified';
+  }
 
   private isTransientMongoConnectivityError(error: unknown): boolean {
     const msg = String((error as any)?.message || '');
@@ -587,6 +616,16 @@ export class CompanyProjectsService {
       };
     }
     return out;
+  }
+
+  private buildReviewRequiredApprovalsMap(a: any): Record<string, { status: string; remarks: string }> {
+    const all = this.buildDocumentApprovalsMap(a);
+    const required: Record<string, { status: string; remarks: string }> = {};
+    for (const key of ASSESSOR_REVIEW_REQUIRED_DOCUMENT_KEYS) {
+      if (!all[key]) continue;
+      required[key] = all[key];
+    }
+    return required;
   }
 
   private mapAssessorResponse(a: any) {
@@ -987,8 +1026,8 @@ export class CompanyProjectsService {
     };
     (assessor as any).document_approvals = docApprovals;
 
-    const all = this.buildDocumentApprovalsMap(assessor.toObject());
-    const values = Object.values(all);
+    const required = this.buildReviewRequiredApprovalsMap(assessor.toObject());
+    const values = Object.values(required);
     const anyRejected = values.some((v) => v.status === 'Rejected');
     const anyPending = values.some((v) => v.status === 'Pending');
     const allApproved = values.length > 0 && values.every((v) => v.status === 'Approved');
@@ -1754,6 +1793,898 @@ export class CompanyProjectsService {
       status: 'success',
       message: 'Score band visibility updated',
       data: { score_band_status: project.score_band_status },
+    };
+  }
+
+  private parseAssessmentScoringPayload(body: Record<string, any>): {
+    criteriaId: string;
+    groupId: string;
+    rows: Array<{
+      parameter_id: string;
+      preliminary_score: number;
+      assessor_score: number;
+      max_score: number;
+      coordinator_remarks: string;
+    }>;
+  } {
+    const criteriaId = String(
+      body?.criteria_id ?? body?.criteriaId ?? body?.criteria ?? body?.criteriaID ?? '',
+    ).trim();
+    const groupId = String(body?.group_id ?? body?.groupId ?? '').trim();
+
+    const pickNumber = (...values: unknown[]): number => {
+      for (const value of values) {
+        if (value === null || value === undefined) continue;
+        const text = String(value).trim();
+        if (text === '') continue;
+        const parsed = Number(text);
+        if (!Number.isNaN(parsed)) return parsed;
+      }
+      return 0;
+    };
+
+    // New JSON format preferred by modern frontend.
+    if (Array.isArray(body?.rows)) {
+      const rows = body.rows
+        .map((r: any) => ({
+          parameter_id: String(r?.parameter_id ?? r?.parameterId ?? '').trim(),
+          preliminary_score: pickNumber(
+            r?.preliminary_score,
+            r?.pre_assessment_score,
+            r?.preAssessmentScore,
+            r?.preassessment_score,
+            r?.preassessmentscore,
+            r?.preassesmentscore,
+          ),
+          assessor_score: pickNumber(
+            r?.assessor_score,
+            r?.assessment_score,
+            r?.assessmentScore,
+            r?.assessmentscore,
+            r?.assesmentscore,
+            r?.final_score,
+            r?.finalScore,
+          ),
+          max_score: pickNumber(r?.max_score, r?.maxScore),
+          coordinator_remarks: String(r?.coordinator_remarks ?? r?.remarks ?? '').trim(),
+        }))
+        .filter((r: any) => r.parameter_id);
+      return { criteriaId, groupId, rows };
+    }
+
+    // Legacy form format:
+    // parameter_id{ID}, preassesmentscore{ID}, coordinatorremarks{ID}, max_score{ID?}
+    const rowMap = new Map<
+      string,
+      {
+        parameter_id: string;
+        preliminary_score: number;
+        assessor_score: number;
+        max_score: number;
+        coordinator_remarks: string;
+      }
+    >();
+    for (const key of Object.keys(body || {})) {
+      const parameterMatch = key.match(/^parameter_id(.+)$/);
+      if (parameterMatch) {
+        const suffix = String(parameterMatch[1] || '').trim();
+        const parameterId = String(body[key] ?? '').trim();
+        if (!parameterId) continue;
+        rowMap.set(suffix, {
+          parameter_id: parameterId,
+          preliminary_score: pickNumber(
+            body[`preassesmentscore${suffix}`], // legacy misspelling
+            body[`preassessmentscore${suffix}`],
+            body[`pre_assessment_score${suffix}`],
+            body[`preliminary_score${suffix}`],
+          ),
+          assessor_score: pickNumber(
+            body[`assesmentscore${suffix}`], // legacy misspelling
+            body[`assessmentscore${suffix}`],
+            body[`assessment_score${suffix}`],
+            body[`assessor_score${suffix}`],
+            body[`finalscore${suffix}`],
+            body[`final_score${suffix}`],
+          ),
+          max_score: pickNumber(body[`max_score${suffix}`], body[`maxscore${suffix}`]),
+          coordinator_remarks: String(
+            body[`coordinatorremarks${suffix}`] ??
+              body[`coordinator_remarks${suffix}`] ??
+              body[`remarks${suffix}`] ??
+              '',
+          ).trim(),
+        });
+      }
+    }
+
+    return {
+      criteriaId,
+      groupId,
+      rows: Array.from(rowMap.values()),
+    };
+  }
+
+  async getAssessmentScoringForAdmin(projectId: string, criteriaId?: string) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?._id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const project = await this.projectModel.findById(resolved._id).lean();
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const scoringStore = ((project as any).registration_info?.assessment_scoring ||
+      {}) as Record<string, any>;
+    const byCriteria = (scoringStore?.by_criteria || {}) as Record<string, any>;
+    if (criteriaId?.trim()) {
+      const key = criteriaId.trim();
+      const legacyFlat =
+        (scoringStore?.[key] as Record<string, any>) ||
+        (((project as any).registration_info?.assessment_scores || {}) as Record<string, any>)?.[key];
+      const loaded = (byCriteria[key] || legacyFlat || null) as Record<string, any> | null;
+
+      // Build parameter/max-score rows from Group Management (Scoring/Credit master)
+      // so UI has max score + description before first save.
+      const criteriaDoc = Types.ObjectId.isValid(key)
+        ? await this.parameterManagementModel.findById(key).select('name short_name').lean()
+        : null;
+      const namesToMatch = [
+        key,
+        String((criteriaDoc as any)?.name || '').trim(),
+        String((criteriaDoc as any)?.short_name || '').trim(),
+      ].filter(Boolean);
+      const criteriaShortName = String((criteriaDoc as any)?.short_name || '').trim();
+      const escaped = namesToMatch.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+      let masterRows: any[] = [];
+      if (escaped.length) {
+        // First pass: strict exact-name matches across legacy fields.
+        masterRows = await this.creditManagementModel
+          .find({
+            $or: escaped.flatMap((name) => [
+              { checklist_criteria: { $regex: `^${name}$`, $options: 'i' } },
+              { credit_main_heading: { $regex: `^${name}$`, $options: 'i' } },
+            ]),
+          } as any)
+          .select('_id parameter requirements max_score checklist_criteria credit_main_heading')
+          .sort({ createdAt: 1 })
+          .lean();
+
+        // Second pass fallback: relaxed contains match for legacy dirty data.
+        if (!masterRows.length) {
+          masterRows = await this.creditManagementModel
+            .find({
+              $or: escaped.flatMap((name) => [
+                { checklist_criteria: { $regex: name, $options: 'i' } },
+                { credit_main_heading: { $regex: name, $options: 'i' } },
+              ]),
+            } as any)
+            .select('_id parameter requirements max_score checklist_criteria credit_main_heading')
+            .sort({ createdAt: 1 })
+            .lean();
+        }
+
+        // Third pass fallback: short code match against credit number/group label
+        // e.g. criteria short_name "RM" should match "RM CREDIT 1".
+        if (!masterRows.length && criteriaShortName) {
+          const shortEscaped = criteriaShortName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          masterRows = await this.creditManagementModel
+            .find({
+              $or: [
+                { credit_number: { $regex: `^${shortEscaped}(\\b|\\s|-)`, $options: 'i' } },
+                { credit_number: { $regex: shortEscaped, $options: 'i' } },
+              ],
+            } as any)
+            .select('_id parameter requirements max_score checklist_criteria credit_main_heading')
+            .sort({ createdAt: 1 })
+            .lean();
+        }
+      }
+      const savedRows = Array.isArray(loaded?.rows) ? (loaded?.rows as Array<Record<string, any>>) : [];
+      const savedByParamId = new Map<string, Record<string, any>>(
+        savedRows.map((r) => [String(r?.parameter_id || '').trim(), r]),
+      );
+
+      const mergedRows = (masterRows as any[]).map((m) => {
+        const pid = String(m?._id || '').trim();
+        const saved = savedByParamId.get(pid);
+        const preliminaryScore =
+          Number(saved?.preliminary_score ?? saved?.pre_assessment_score ?? 0) || 0;
+        const assessorScore =
+          Number(
+            saved?.assessor_score ??
+              saved?.assessment_score ??
+              saved?.assesment_score ??
+              saved?.final_score ??
+              0,
+          ) || 0;
+        const assessorRemarks = String(
+          saved?.assessor_remarks ?? saved?.remarks ?? '',
+        ).trim();
+        return {
+          parameter_id: pid,
+          parameter: String(m?.parameter || '').trim(),
+          description: String(m?.requirements || '').trim(),
+          max_score: Number(m?.max_score || 0) || 0,
+          preliminary_score: preliminaryScore,
+          pre_assessment_score: preliminaryScore,
+          assessor_score: assessorScore,
+          assessment_score: assessorScore,
+          assesment_score: assessorScore,
+          final_score: assessorScore,
+          assessor_remarks: assessorRemarks,
+          remarks: assessorRemarks,
+          coordinator_remarks: String(saved?.coordinator_remarks || '').trim(),
+        };
+      });
+
+      let rows: any[] = mergedRows.length > 0 ? mergedRows : savedRows;
+      if (mergedRows.length > 0 && savedRows.length > 0) {
+        const hasDirectSavedMatch = mergedRows.some(
+          (r: any) =>
+            Number(r?.preliminary_score || 0) > 0 ||
+            Number(r?.assessor_score || 0) > 0 ||
+            String(r?.coordinator_remarks || '').trim().length > 0,
+        );
+
+        // Legacy datasets can save parameter_id from a different source than
+        // current credit master IDs. When that happens, direct ID-merge fails
+        // and refresh shows zeros; preserve saved scores by row-order fallback.
+        if (!hasDirectSavedMatch) {
+          rows = mergedRows.map((m: any, idx: number) => {
+            const s = savedRows[idx] || {};
+            const preliminaryScore =
+              Number(s?.preliminary_score ?? s?.pre_assessment_score ?? 0) || 0;
+            const assessorScore =
+              Number(
+                s?.assessor_score ??
+                  s?.assessment_score ??
+                  s?.assesment_score ??
+                  s?.final_score ??
+                  0,
+              ) || 0;
+            const assessorRemarks = String(
+              s?.assessor_remarks ?? s?.remarks ?? '',
+            ).trim();
+            return {
+              ...m,
+              preliminary_score: preliminaryScore,
+              pre_assessment_score: preliminaryScore,
+              assessor_score: assessorScore,
+              assessment_score: assessorScore,
+              assesment_score: assessorScore,
+              final_score: assessorScore,
+              assessor_remarks: assessorRemarks,
+              remarks: assessorRemarks,
+              coordinator_remarks: String(s?.coordinator_remarks ?? s?.remarks ?? '').trim(),
+            };
+          });
+        }
+      }
+
+      let totalMaxScore = 0;
+      let totalPreAssessmentScore = 0;
+      let totalFinalScore = 0;
+      for (const r of rows as any[]) {
+        totalMaxScore += Number(r?.max_score || 0) || 0;
+        totalPreAssessmentScore += Number(r?.preliminary_score || 0) || 0;
+        totalFinalScore += Number(r?.assessor_score || 0) || 0;
+      }
+
+      const scoring = {
+        criteria_id: key,
+        group_id: loaded?.group_id ?? null,
+        rows,
+        total_max_score: totalMaxScore,
+        total_pre_assessment_score: totalPreAssessmentScore,
+        total_final_score: totalFinalScore,
+        final_submitted: !!loaded?.final_submitted,
+        updated_at: loaded?.updated_at || null,
+      };
+      return {
+        status: 'success',
+        message: 'Assessment scoring loaded',
+        data: {
+          project_id: String((project as any)._id),
+          criteria_id: key,
+          scoring,
+        },
+      };
+    }
+
+    return {
+      status: 'success',
+      message: 'Assessment scoring loaded',
+      data: {
+        project_id: String((project as any)._id),
+        by_criteria: byCriteria,
+      },
+    };
+  }
+
+  async storeAssessmentScoresForAdmin(projectId: string, body: Record<string, any>, finalSubmit = false) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const project = await this.projectModel.findById(resolved._id);
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const parsed = this.parseAssessmentScoringPayload(body || {});
+    if (!parsed.criteriaId) {
+      throw new BadRequestException({
+        status: 'validations',
+        errors: { criteria_id: ['criteria_id is required.'] },
+      });
+    }
+    if (!parsed.rows.length) {
+      throw new BadRequestException({
+        status: 'validations',
+        errors: { rows: ['At least one scoring row is required.'] },
+      });
+    }
+
+    const rowIdsNeedingMax = parsed.rows
+      .filter((r) => !(Number(r.max_score) > 0) && Types.ObjectId.isValid(r.parameter_id))
+      .map((r) => new Types.ObjectId(r.parameter_id));
+    const maxScoreMap = new Map<string, number>();
+    if (rowIdsNeedingMax.length) {
+      const masterRows = await this.creditManagementModel
+        .find({ _id: { $in: rowIdsNeedingMax } } as any)
+        .select('_id max_score')
+        .lean();
+      for (const m of masterRows as any[]) {
+        const id = String(m?._id || '').trim();
+        const max = Number(m?.max_score || 0) || 0;
+        if (id) maxScoreMap.set(id, max);
+      }
+    }
+
+    const rows = parsed.rows.map((r) => ({
+      ...r,
+      max_score:
+        Number(r.max_score) > 0
+          ? Number(r.max_score)
+          : maxScoreMap.get(String(r.parameter_id).trim()) || 0,
+    }));
+
+    const totalMaxScore = rows.reduce((s, r) => s + (Number(r.max_score) || 0), 0);
+    const totalPreAssessmentScore = rows.reduce(
+      (s, r) => s + (Number(r.preliminary_score) || 0),
+      0,
+    );
+    const totalFinalScore = rows.reduce((s, r) => s + (Number(r.assessor_score) || 0), 0);
+
+    const registrationInfo = ((project as any).registration_info || {}) as Record<string, any>;
+    const scoringStore = (registrationInfo.assessment_scoring || {}) as Record<string, any>;
+    const byCriteria = (scoringStore.by_criteria || {}) as Record<string, any>;
+
+    byCriteria[parsed.criteriaId] = {
+      criteria_id: parsed.criteriaId,
+      group_id: parsed.groupId || null,
+      rows,
+      total_max_score: totalMaxScore,
+      total_pre_assessment_score: totalPreAssessmentScore,
+      total_final_score: totalFinalScore,
+      final_submitted: !!finalSubmit,
+      updated_at: new Date(),
+      ...(finalSubmit ? { final_submitted_at: new Date() } : {}),
+    };
+
+    scoringStore.by_criteria = byCriteria;
+    registrationInfo.assessment_scoring = scoringStore;
+    (project as any).registration_info = registrationInfo;
+    // `registration_info` is a flexible object field; mark modified so nested
+    // assessment_scoring changes are always persisted.
+    (project as any).markModified?.('registration_info');
+
+    // Keep project summary fields in sync for certificate summary screens.
+    if (finalSubmit) {
+      const allCriteriaRows = Object.values(byCriteria) as any[];
+      const aggMax = allCriteriaRows.reduce((s, x) => s + (Number(x?.total_max_score) || 0), 0);
+      const aggFinal = allCriteriaRows.reduce((s, x) => s + (Number(x?.total_final_score) || 0), 0);
+      const percentage = aggMax > 0 ? Number(((aggFinal / aggMax) * 100).toFixed(2)) : 0;
+      (project as any).max_points = aggMax;
+      (project as any).total_score = aggFinal;
+      (project as any).percentage_score = percentage;
+    }
+
+    await project.save();
+
+    return {
+      status: 'success',
+      message: finalSubmit
+        ? 'Assessment scores final submitted successfully'
+        : 'Assessment scores saved successfully',
+      data: {
+        criteria_id: parsed.criteriaId,
+        total_max_score: totalMaxScore,
+        total_pre_assessment_score: totalPreAssessmentScore,
+        total_final_score: totalFinalScore,
+        final_submitted: !!finalSubmit,
+      },
+    };
+  }
+
+  private parseAssessorScorePayload(body: Record<string, any>): {
+    criteriaId: string;
+    rowsByParameterId: Array<{ parameter_id: string; assessor_score: number; assessor_remarks: string }>;
+    indexedRows: Array<{ index: number; assessor_score: number; assessor_remarks: string }>;
+  } {
+    const criteriaId = String(body?.criteria_id ?? body?.criteriaId ?? body?.criteria ?? '').trim();
+    const rowsByParameterId: Array<{
+      parameter_id: string;
+      assessor_score: number;
+      assessor_remarks: string;
+    }> = [];
+    const indexedRows: Array<{ index: number; assessor_score: number; assessor_remarks: string }> = [];
+
+    const toNumber = (value: unknown): number => {
+      if (value === null || value === undefined) return 0;
+      const text = String(value).trim();
+      if (!text) return 0;
+      const num = Number(text);
+      return Number.isNaN(num) ? 0 : num;
+    };
+
+    if (Array.isArray(body?.rows)) {
+      for (const row of body.rows as any[]) {
+        const parameterId = String(row?.parameter_id ?? row?.parameterId ?? '').trim();
+        const assessorScore = toNumber(
+          row?.assessor_score ??
+            row?.assessment_score ??
+            row?.assesment_score ??
+            row?.final_score ??
+            row?.score,
+        );
+        const assessorRemarks = String(
+          row?.assessor_remarks ?? row?.remarks ?? row?.assessorRemarks ?? '',
+        ).trim();
+        if (parameterId) {
+          rowsByParameterId.push({
+            parameter_id: parameterId,
+            assessor_score: assessorScore,
+            assessor_remarks: assessorRemarks,
+          });
+        }
+      }
+      return { criteriaId, rowsByParameterId, indexedRows };
+    }
+
+    const suffixSet = new Set<string>();
+    for (const key of Object.keys(body || {})) {
+      const m = key.match(/^asses?mentscore(.+)$/i);
+      if (m) suffixSet.add(String(m[1] || '').trim());
+    }
+    for (const suffix of suffixSet) {
+      const parameterId = String(body[`parameter_id${suffix}`] ?? body[`parameterId${suffix}`] ?? '').trim();
+      const score = toNumber(
+        body[`assesmentscore${suffix}`] ??
+          body[`assessmentscore${suffix}`] ??
+          body[`assessment_score${suffix}`] ??
+          body[`assessor_score${suffix}`] ??
+          body[`final_score${suffix}`],
+      );
+      const remarks = String(
+        body[`assessor_remarks${suffix}`] ??
+          body[`remarks${suffix}`] ??
+          body[`assessorremarks${suffix}`] ??
+          '',
+      ).trim();
+      if (parameterId) {
+        rowsByParameterId.push({
+          parameter_id: parameterId,
+          assessor_score: score,
+          assessor_remarks: remarks,
+        });
+      } else if (/^\d+$/.test(suffix)) {
+        indexedRows.push({
+          index: Math.max(0, Number(suffix) - 1),
+          assessor_score: score,
+          assessor_remarks: remarks,
+        });
+      }
+    }
+
+    return { criteriaId, rowsByParameterId, indexedRows };
+  }
+
+  private async upsertAssessorScores(
+    assessorId: string,
+    projectId: string,
+    body: Record<string, any>,
+    finalSubmit: boolean,
+  ): Promise<any> {
+    if (!Types.ObjectId.isValid(projectId)) {
+      throw new BadRequestException({ status: 'error', message: 'Invalid project id' });
+    }
+
+    const project = await this.projectModel.findById(projectId);
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const assessor = await this.assessorModel.findById(assessorId).lean();
+    if (!assessor) {
+      throw new NotFoundException({ status: 'error', message: 'Assessor not found' });
+    }
+
+    const assigned = await this.companyAssessorModel
+      .findOne({ project_id: projectId, assessor_id: assessorId })
+      .lean();
+    if (!assigned) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Assessor is not assigned to this project.',
+      });
+    }
+
+    const parsed = this.parseAssessorScorePayload(body || {});
+    if (!parsed.criteriaId) {
+      throw new BadRequestException({
+        status: 'validations',
+        errors: { criteria_id: ['criteria_id is required.'] },
+      });
+    }
+
+    const registrationInfo = ((project as any).registration_info || {}) as Record<string, any>;
+    const scoringStore = (registrationInfo.assessment_scoring || {}) as Record<string, any>;
+    const byCriteria = (scoringStore.by_criteria || {}) as Record<string, any>;
+
+    const existingCriteria = byCriteria[parsed.criteriaId] || {};
+    let existingRows = Array.isArray(existingCriteria?.rows) ? [...existingCriteria.rows] : [];
+
+    if (!existingRows.length) {
+      const loaded = await this.getAssessmentScoringForAdmin(projectId, parsed.criteriaId);
+      existingRows = Array.isArray((loaded as any)?.data?.scoring?.rows)
+        ? ([...(loaded as any).data.scoring.rows] as Array<Record<string, any>>)
+        : [];
+    }
+
+    if (!existingRows.length) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'No scoring rows found for this criteria.',
+      });
+    }
+
+    let updatedCount = 0;
+    const patchByParamId = new Map<string, { assessor_score: number; assessor_remarks: string }>(
+      parsed.rowsByParameterId.map((r) => [r.parameter_id, r]),
+    );
+    const patchByIndex = new Map<number, { assessor_score: number; assessor_remarks: string }>(
+      parsed.indexedRows.map((r) => [r.index, r]),
+    );
+
+    const now = new Date();
+    const nextRows = existingRows.map((row: any, idx: number) => {
+      const paramId = String(row?.parameter_id || '').trim();
+      const patch = (paramId ? patchByParamId.get(paramId) : undefined) || patchByIndex.get(idx);
+      if (!patch) return row;
+      updatedCount += 1;
+      const score = Number(patch.assessor_score || 0) || 0;
+      const remarks = String(patch.assessor_remarks || '').trim();
+      return {
+        ...row,
+        assessor_score: score,
+        assessment_score: score,
+        assesment_score: score,
+        final_score: score,
+        assessor_remarks: remarks,
+        assessor_id: assessorId,
+        assessor_updated_at: now,
+        ...(finalSubmit ? { assessor_approval: 1, assessor_approved_at: now } : {}),
+      };
+    });
+
+    if (updatedCount === 0) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'No assessor scoring rows matched the payload.',
+      });
+    }
+
+    const totalMaxScore = nextRows.reduce((s, r) => s + (Number(r?.max_score) || 0), 0);
+    const totalPreAssessmentScore = nextRows.reduce(
+      (s, r) => s + (Number(r?.preliminary_score ?? r?.pre_assessment_score ?? 0) || 0),
+      0,
+    );
+    const totalFinalScore = nextRows.reduce(
+      (s, r) =>
+        s +
+        (Number(
+          r?.assessor_score ?? r?.assessment_score ?? r?.assesment_score ?? r?.final_score ?? 0,
+        ) || 0),
+      0,
+    );
+
+    byCriteria[parsed.criteriaId] = {
+      ...existingCriteria,
+      criteria_id: parsed.criteriaId,
+      rows: nextRows,
+      total_max_score: totalMaxScore,
+      total_pre_assessment_score: totalPreAssessmentScore,
+      total_final_score: totalFinalScore,
+      updated_at: now,
+      ...(finalSubmit ? { assessor_final_submitted: true, assessor_final_submitted_at: now } : {}),
+    };
+
+    scoringStore.by_criteria = byCriteria;
+    registrationInfo.assessment_scoring = scoringStore;
+    (project as any).registration_info = registrationInfo;
+
+    if (finalSubmit) {
+      const companyId = String((project as any).company_id || '').trim();
+      const assessorName = String((assessor as any)?.name || 'Assessor').trim();
+      const description = `Assessor ${assessorName} has Submitted the Scoring`;
+
+      // Keep latest milestone state aligned with assessor final scoring submit.
+      const existingMilestone = await this.companyActivityModel
+        .findOne({
+          company_id: companyId,
+          project_id: String((project as any)._id),
+          milestone_flow: 15,
+          activity_type: 'assessor',
+        })
+        .sort({ createdAt: -1 });
+
+      if (existingMilestone) {
+        existingMilestone.description = description;
+        existingMilestone.milestone_completed = true;
+        await existingMilestone.save();
+      } else {
+        await this.companyActivityModel.create({
+          company_id: companyId,
+          project_id: projectId,
+          description,
+          activity_type: 'assessor',
+          milestone_flow: 15,
+          milestone_completed: true,
+        });
+      }
+
+      // Keep project next step aligned to the latest completed milestone.
+      const completedActivities = await this.companyActivityModel
+        .find({
+          company_id: companyId,
+          project_id: String((project as any)._id),
+          milestone_completed: true,
+          milestone_flow: { $ne: null },
+        })
+        .select('milestone_flow')
+        .lean();
+
+      const latestCompletedMilestone = (completedActivities as any[]).reduce((max, a) => {
+        const n = Number(a?.milestone_flow || 0);
+        return n > max ? n : max;
+      }, 0);
+
+      const currentNext = Number((project as any).next_activities_id || 0);
+      const computedNext = latestCompletedMilestone > 0 ? latestCompletedMilestone + 1 : currentNext;
+      if (computedNext > currentNext) {
+        (project as any).next_activities_id = computedNext;
+      }
+    }
+
+    (project as any).markModified?.('registration_info');
+    await project.save();
+
+    return {
+      status: 'success',
+      message: finalSubmit
+        ? 'Scoring Data Submitted Successfully.'
+        : `${updatedCount} Parameters Scoring Data Saved Successfully.`,
+      data: {
+        criteria_id: parsed.criteriaId,
+        updated_rows: updatedCount,
+        total_max_score: totalMaxScore,
+        total_pre_assessment_score: totalPreAssessmentScore,
+        total_final_score: totalFinalScore,
+        assessor_final_submitted: !!finalSubmit,
+      },
+    };
+  }
+
+  async updateAssessorScore(
+    assessorId: string,
+    projectId: string,
+    body: Record<string, any>,
+  ): Promise<any> {
+    return this.upsertAssessorScores(assessorId, projectId, body, false);
+  }
+
+  async finalSubmitAssessorScore(
+    assessorId: string,
+    projectId: string,
+    body: Record<string, any>,
+  ): Promise<any> {
+    return this.upsertAssessorScores(assessorId, projectId, body, true);
+  }
+
+  async getAssessmentSummarySheetForAdmin(projectId: string, criteriaId?: string) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?._id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const project = await this.projectModel.findById(resolved._id).lean();
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const byCriteria =
+      ((project as any).registration_info?.assessment_scoring?.by_criteria || {}) as Record<string, any>;
+    const persistedKeys = Object.keys(byCriteria);
+    let rows = persistedKeys.map((k) => byCriteria[k]).filter(Boolean);
+
+    // Always return overall combined summary (all criteria),
+    // even when frontend sends criteria_id by mistake.
+    // If persisted rows are missing/incomplete, synthesize current rows from
+    // sector/group mapped criteria and merge by criteria_id.
+    const company = await this.companyModel
+      .findById((project as any).company_id)
+      .select('mst_sector_id')
+      .lean();
+    const sectorId = String((company as any)?.mst_sector_id || '').trim();
+    if (sectorId) {
+      const sector = await this.sectorModel.findById(sectorId).select('group_id').lean();
+      const groupId = String((sector as any)?.group_id || '').trim();
+      let mappings = await this.masterChecklistSectorModel
+        .find({ sector_id: sectorId } as any)
+        .select('criterian_id')
+        .lean();
+      if (!mappings.length && groupId) {
+        mappings = await this.masterChecklistSectorModel
+          .find({ group_id: groupId } as any)
+          .select('criterian_id')
+          .lean();
+      }
+
+      const mappedCriteriaIds = [
+        ...new Set(
+          (mappings as any[])
+            .map((m) => String(m?.criterian_id || '').trim())
+            .filter(Boolean),
+        ),
+      ];
+      const rowMap = new Map<string, any>();
+      for (const row of rows as any[]) {
+        const cid = String(row?.criteria_id || '').trim();
+        if (!cid) continue;
+        rowMap.set(cid, row);
+      }
+      for (const cid of mappedCriteriaIds) {
+        if (rowMap.has(cid)) continue;
+        const current = await this.getAssessmentScoringForAdmin(projectId, cid);
+        const sc = (current as any)?.data?.scoring as Record<string, any> | undefined;
+        if (sc) rowMap.set(cid, sc);
+      }
+      rows = Array.from(rowMap.values());
+    }
+
+    // Last resort fallback when no mapped criteria rows could be built.
+    const requestedCriteriaId = String(criteriaId || '').trim();
+    if (!rows.length && requestedCriteriaId) {
+      const current = await this.getAssessmentScoringForAdmin(projectId, requestedCriteriaId);
+      const sc = (current as any)?.data?.scoring as Record<string, any> | undefined;
+      if (sc) rows = [sc];
+    }
+
+    const keys = [
+      ...new Set(
+        rows
+          .map((r: any) => String(r?.criteria_id || '').trim())
+          .filter(Boolean),
+      ),
+    ];
+    const criteriaDocs = await this.parameterManagementModel
+      .find({ _id: { $in: keys.filter((k) => Types.ObjectId.isValid(k)).map((k) => new Types.ObjectId(k)) } } as any)
+      .select('_id name short_name')
+      .lean();
+    const criteriaNameMap = new Map<string, { name: string; short_name: string }>(
+      (criteriaDocs as any[]).map((c) => [
+        String(c?._id),
+        { name: String(c?.name || ''), short_name: String(c?.short_name || '') },
+      ]),
+    );
+
+    const totalMaxScore = rows.reduce((s, r) => s + (Number(r?.total_max_score) || 0), 0);
+    const totalPreAssessmentScore = rows.reduce(
+      (s, r) => s + (Number(r?.total_pre_assessment_score) || 0),
+      0,
+    );
+    const totalFinalScore = rows.reduce((s, r) => s + (Number(r?.total_final_score) || 0), 0);
+    const percentage = totalMaxScore > 0 ? Number(((totalFinalScore / totalMaxScore) * 100).toFixed(2)) : 0;
+    const prePercentage =
+      totalMaxScore > 0 ? Number(((totalPreAssessmentScore / totalMaxScore) * 100).toFixed(2)) : 0;
+    const extrapolatedMax = totalMaxScore > 0 ? totalMaxScore : 0;
+    const extrapolatedPre =
+      totalMaxScore > 0
+        ? Number(((totalPreAssessmentScore / totalMaxScore) * extrapolatedMax).toFixed(2))
+        : 0;
+    const extrapolatedFinal =
+      totalMaxScore > 0
+        ? Number(((totalFinalScore / totalMaxScore) * extrapolatedMax).toFixed(2))
+        : 0;
+    const tentativePre = this.calculateTentativeLevel(prePercentage);
+    const tentativeFinal = this.calculateTentativeLevel(percentage);
+    const certificateTypePreliminary = getCertificationType(prePercentage);
+    const certificateTypeFinal = getCertificationType(percentage);
+
+    return {
+      status: 'success',
+      message: 'Summary sheet loaded',
+      data: {
+        project_id: String((project as any)._id),
+        // Always overall summary mode (combined across criteria).
+        criteria_id: null,
+        totals: {
+          total_max_score: totalMaxScore,
+          total_pre_assessment_score: totalPreAssessmentScore,
+          total_final_score: totalFinalScore,
+          percentage_score: percentage,
+          pre_percentage_score: prePercentage,
+          extrapolated: {
+            max_score: extrapolatedMax,
+            pre_assessment_score: extrapolatedPre,
+            final_score: extrapolatedFinal,
+          },
+        },
+        ratings: {
+          tentative_pre_rating: tentativePre,
+          tentative_final_rating: tentativeFinal,
+          // Backward-compatible key (final/actual performance based).
+          certificate_type: certificateTypeFinal,
+          // Explicit keys for frontend clarity.
+          certificate_type_preliminary: certificateTypePreliminary,
+          certificate_type_final: certificateTypeFinal,
+        },
+        criteria_rows: rows.map((r: any) => ({
+          criteria_id: r?.criteria_id || '',
+          criteria_name: criteriaNameMap.get(String(r?.criteria_id || ''))?.name || '',
+          criteria_short_name: criteriaNameMap.get(String(r?.criteria_id || ''))?.short_name || '',
+          total_max_score: Number(r?.total_max_score || 0),
+          total_pre_assessment_score: Number(r?.total_pre_assessment_score || 0),
+          total_final_score: Number(r?.total_final_score || 0),
+          final_submitted: !!r?.final_submitted,
+          updated_at: r?.updated_at || null,
+        })),
+      },
+    };
+  }
+
+  async downloadFinalScoringForAdmin(projectId: string): Promise<{ filename: string; content: string }> {
+    const summary = await this.getAssessmentSummarySheetForAdmin(projectId);
+    const rows = (summary?.data?.criteria_rows || []) as Array<Record<string, any>>;
+    const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const csvLines = [
+      [
+        'criteria_id',
+        'total_max_score',
+        'total_pre_assessment_score',
+        'total_final_score',
+        'final_submitted',
+        'updated_at',
+      ]
+        .map(esc)
+        .join(','),
+      ...rows.map((r) =>
+        [
+          r.criteria_id,
+          r.total_max_score,
+          r.total_pre_assessment_score,
+          r.total_final_score,
+          r.final_submitted ? 'yes' : 'no',
+          r.updated_at || '',
+        ]
+          .map(esc)
+          .join(','),
+      ),
+    ];
+    return {
+      filename: `final-scoring-${Date.now()}.csv`,
+      content: csvLines.join('\n'),
     };
   }
 
@@ -2954,7 +3885,12 @@ export class CompanyProjectsService {
     const assessorsData = (companyAssessors as any[]).map((ca: any) => {
       const assessor = assessorMap.get(ca.assessor_id?.toString?.());
       return assessor
-        ? { Assessor_Detail: { name: assessor.name, email: assessor.email }, visit_dates: ca.visit_dates || [] }
+        ? {
+            assignment_id: String(ca._id),
+            assessor_id: String(ca.assessor_id),
+            Assessor_Detail: { name: assessor.name, email: assessor.email },
+            visit_dates: ca.visit_dates || [],
+          }
         : null;
     }).filter(Boolean);
 
@@ -3437,6 +4373,43 @@ export class CompanyProjectsService {
         },
       },
     };
+  }
+
+  async getQuickviewDataForAssessor(
+    assessorId: string,
+    projectId: string,
+  ): Promise<{ status: 'success'; message: string; data: any }> {
+    const assignment = await this.companyAssessorModel.findOne({
+      assessor_id: assessorId,
+      project_id: projectId,
+    });
+    if (!assignment) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Project not assigned to assessor.',
+      });
+    }
+    const project = await this.projectModel.findById(projectId).select('company_id').lean();
+    if (!project?.company_id) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Project not found or quickview not available.',
+      });
+    }
+    return this.getQuickviewData(String((project as any).company_id), projectId);
+  }
+
+  async getQuickviewDataPublicByProject(
+    projectId: string,
+  ): Promise<{ status: 'success'; message: string; data: any }> {
+    const project = await this.projectModel.findById(projectId).select('company_id').lean();
+    if (!project?.company_id) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Project not found or quickview not available.',
+      });
+    }
+    return this.getQuickviewData(String((project as any).company_id), projectId);
   }
 
   /**
@@ -8333,6 +9306,11 @@ export class CompanyProjectsService {
     return this.removeFacilitatorAssignment(companyId, projectId);
   }
 
+  async removeAssessorAssignmentByProjectId(projectId: string, assessorOrAssignmentId: string) {
+    const companyId = await this.resolveCompanyIdFromProjectId(projectId);
+    return this.removeAssessorAssignment(companyId, projectId, assessorOrAssignmentId);
+  }
+
   async assignFacilitatorByProjectId(
     projectId: string,
     facilitatorId: string,
@@ -8434,6 +9412,18 @@ export class CompanyProjectsService {
     );
   }
 
+  async removeAssessorAssignmentForAdmin(projectOrCompanyId: string, assessorOrAssignmentId: string) {
+    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.removeAssessorAssignment(
+      String(resolved.company_id),
+      String(resolved._id),
+      assessorOrAssignmentId,
+    );
+  }
+
   async removeFacilitatorAssignment(companyId: string, projectId: string) {
     const project = await this.projectModel.findOne({
       _id: projectId,
@@ -8456,6 +9446,57 @@ export class CompanyProjectsService {
       status: 'success',
       message: 'Facilitator assignment removed',
       data: { removed: true },
+    };
+  }
+
+  async removeAssessorAssignment(
+    companyId: string,
+    projectId: string,
+    assessorOrAssignmentId: string,
+  ) {
+    const key = String(assessorOrAssignmentId || '').trim();
+    if (!key || !Types.ObjectId.isValid(key)) {
+      throw new BadRequestException({ status: 'error', message: 'Invalid assessor/assignment id' });
+    }
+
+    const project = await this.projectModel.findOne({
+      _id: projectId,
+      company_id: companyId,
+    });
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    // Support both frontend variants:
+    // 1) pass company_assessor assignment id
+    // 2) pass assessor profile id
+    const rowsByAssignmentId = await this.companyAssessorModel.find({
+      _id: key,
+      company_id: companyId,
+      project_id: projectId,
+    });
+
+    const rowsByAssessorId = await this.companyAssessorModel.find({
+      assessor_id: key,
+      company_id: companyId,
+      project_id: projectId,
+    });
+
+    const rows = rowsByAssignmentId.length ? rowsByAssignmentId : rowsByAssessorId;
+    if (!rows.length) {
+      throw new NotFoundException({ status: 'error', message: 'Assessor assignment not found' });
+    }
+
+    const assignmentIds = rows.map((row: any) => row._id);
+    await this.companyAssessorModel.deleteMany({ _id: { $in: assignmentIds } });
+
+    return {
+      status: 'success',
+      message: 'Assessor assignment removed',
+      data: {
+        removed: true,
+        assignment_ids: assignmentIds.map((id: any) => String(id)),
+      },
     };
   }
 
@@ -8561,6 +9602,27 @@ export class CompanyProjectsService {
         visit_dates: dates,
       },
     };
+  }
+
+  /**
+   * Admin compatibility helper for frontend calls using
+   * POST /api/company/projects/:projectId/assign-assessor.
+   */
+  async assignAssessorForAdmin(
+    projectId: string,
+    assessorId: string,
+    visitDates?: string[],
+  ) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.assignAssessor(
+      String(resolved.company_id),
+      String(resolved._id),
+      assessorId,
+      visitDates,
+    );
   }
 
   /**

@@ -4,6 +4,7 @@ import {
   Controller,
   Delete,
   Get,
+  Header,
   HttpException,
   Param,
   Patch,
@@ -19,7 +20,7 @@ import {
   UsePipes,
   ValidationPipe,
 } from '@nestjs/common';
-import { FileFieldsInterceptor, FileInterceptor } from '@nestjs/platform-express';
+import { AnyFilesInterceptor, FileFieldsInterceptor, FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { extname, join } from 'path';
 import * as fs from 'fs';
@@ -136,6 +137,53 @@ export class AdminCompanyFlowController {
     return this.companyProjectsService.removeCoordinatorAssignmentForAdmin(projectId, assignmentId);
   }
 
+  /**
+   * Admin compatibility for legacy/new UI that posts to
+   * /api/company/projects/:projectId/assign-assessor from admin panel.
+   */
+  @Post('api/company/projects/:projectId/assign-assessor')
+  @Post('company/projects/:projectId/assign-assessor')
+  @UseGuards(AdminJwtAuthGuard)
+  async assignAssessorViaCompanyPathForAdmin(
+    @Param('projectId') projectId: string,
+    @Body() body: Record<string, unknown>,
+  ): Promise<any> {
+    const assessorId = String(body?.assessor_id ?? body?.selectassessor ?? '').trim();
+    if (!assessorId) {
+      throw new BadRequestException({
+        status: 'validations',
+        errors: { assessor_id: ['assessor_id is required.'] },
+      });
+    }
+
+    const rawDates = body?.visit_dates ?? body?.assessor_date;
+    let visitDates: string[] | undefined;
+    if (Array.isArray(rawDates)) {
+      visitDates = rawDates.map((v) => String(v).trim()).filter(Boolean);
+    } else if (typeof rawDates === 'string' && rawDates.trim()) {
+      visitDates = rawDates
+        .split(',')
+        .map((v) => v.trim())
+        .filter(Boolean);
+    }
+
+    return this.companyProjectsService.assignAssessorForAdmin(projectId, assessorId, visitDates);
+  }
+
+  @Delete('api/company/projects/:projectId/assessors/:assessorId')
+  @Delete('company/projects/:projectId/assessors/:assessorId')
+  @Delete('api/company/projects/:projectId/remove-assessor/:assessorId')
+  @Delete('company/projects/:projectId/remove-assessor/:assessorId')
+  @Post('api/company/projects/:projectId/remove-assessor/:assessorId')
+  @Post('company/projects/:projectId/remove-assessor/:assessorId')
+  @UseGuards(AdminJwtAuthGuard)
+  async removeAssessorViaCompanyPathForAdmin(
+    @Param('projectId') projectId: string,
+    @Param('assessorId') assessorId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.removeAssessorAssignmentForAdmin(projectId, assessorId);
+  }
+
   @Post('api/admin/projects/:projectId/assign-facilitator')
   @Post('admin/projects/:projectId/assign-facilitator')
   @UseInterceptors(
@@ -237,6 +285,82 @@ export class AdminCompanyFlowController {
     );
   }
 
+  /**
+   * Assessment scoring compatibility endpoints (legacy admin UI).
+   */
+  @Get('api/admin/assesment_scoring/:projectId')
+  @Get('admin/assesment_scoring/:projectId')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+  @Header('Pragma', 'no-cache')
+  @Header('Expires', '0')
+  async getAssessmentScoring(
+    @Param('projectId') projectId: string,
+    @Query('criteria_id') criteriaId?: string,
+    @Query('crt') criteriaIdAlias?: string,
+  ): Promise<any> {
+    const resolvedCriteriaId = String(criteriaId ?? criteriaIdAlias ?? '').trim();
+    return this.companyProjectsService.getAssessmentScoringForAdmin(
+      projectId,
+      resolvedCriteriaId || undefined,
+    );
+  }
+
+  @Post('api/admin/store_assessment_scores/:projectId')
+  @Post('admin/store_assessment_scores/:projectId')
+  @UseInterceptors(AnyFilesInterceptor())
+  async storeAssessmentScores(
+    @Param('projectId') projectId: string,
+    @Body() body: Record<string, unknown>,
+  ): Promise<any> {
+    return this.companyProjectsService.storeAssessmentScoresForAdmin(
+      projectId,
+      body as Record<string, any>,
+      false,
+    );
+  }
+
+  @Post('api/admin/finalsubmit_assessment_scores/:projectId')
+  @Post('admin/finalsubmit_assessment_scores/:projectId')
+  @UseInterceptors(AnyFilesInterceptor())
+  async finalSubmitAssessmentScores(
+    @Param('projectId') projectId: string,
+    @Body() body: Record<string, unknown>,
+  ): Promise<any> {
+    return this.companyProjectsService.storeAssessmentScoresForAdmin(
+      projectId,
+      body as Record<string, any>,
+      true,
+    );
+  }
+
+  @Get('api/admin/summary_sheet/:projectId')
+  @Get('api/admin/company/summary_sheet/:projectId')
+  @Get('admin/summary_sheet/:projectId')
+  @Get('admin/company/summary_sheet/:projectId')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+  @Header('Pragma', 'no-cache')
+  @Header('Expires', '0')
+  async getSummarySheet(
+    @Param('projectId') projectId: string,
+    @Query('criteria_id') criteriaId?: string,
+  ): Promise<any> {
+    return this.companyProjectsService.getAssessmentSummarySheetForAdmin(projectId, criteriaId);
+  }
+
+  @Get('api/admin/download_final_scoring/:projectId')
+  @Get('api/admin/company/download_final_scoring/:projectId')
+  @Get('admin/download_final_scoring/:projectId')
+  @Get('admin/company/download_final_scoring/:projectId')
+  async downloadFinalScoring(
+    @Param('projectId') projectId: string,
+    @Res() res: Response,
+  ): Promise<void> {
+    const exported = await this.companyProjectsService.downloadFinalScoringForAdmin(projectId);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${exported.filename}"`);
+    res.status(200).send(exported.content);
+  }
+
   @Post('api/admin/assessors')
   @Post('admin/assessors')
   @UsePipes(
@@ -276,10 +400,6 @@ export class AdminCompanyFlowController {
 
   @Post('api/admin/assessors/:assessorId/approval-status')
   @Post('admin/assessors/:assessorId/approval-status')
-  @Post('api/admin/assessors/:assessorId/approve')
-  @Post('admin/assessors/:assessorId/approve')
-  @Post('api/admin/assessors/:assessorId/reject')
-  @Post('admin/assessors/:assessorId/reject')
   @Post('api/admin/assessor_status/:assessorId')
   @Post('admin/assessor_status/:assessorId')
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
@@ -297,6 +417,34 @@ export class AdminCompanyFlowController {
     return this.companyProjectsService.updateAssessorApprovalStatusAdminFlow(
       assessorId,
       status,
+      dto.remarks,
+    );
+  }
+
+  @Post('api/admin/assessors/:assessorId/approve')
+  @Post('admin/assessors/:assessorId/approve')
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
+  async approveAssessor(
+    @Param('assessorId') assessorId: string,
+    @Body() dto: UpdateAssessorApprovalDto,
+  ): Promise<any> {
+    return this.companyProjectsService.updateAssessorApprovalStatusAdminFlow(
+      assessorId,
+      'approved',
+      dto.remarks,
+    );
+  }
+
+  @Post('api/admin/assessors/:assessorId/reject')
+  @Post('admin/assessors/:assessorId/reject')
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
+  async rejectAssessor(
+    @Param('assessorId') assessorId: string,
+    @Body() dto: UpdateAssessorApprovalDto,
+  ): Promise<any> {
+    return this.companyProjectsService.updateAssessorApprovalStatusAdminFlow(
+      assessorId,
+      'rejected',
       dto.remarks,
     );
   }
@@ -633,16 +781,87 @@ export class AdminCompanyFlowController {
    */
   @Post('api/admin/assign_assessor/:companyProjectId')
   @Post('admin/assign_assessor/:companyProjectId')
-  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
   async assignAssessor(
     @Param('companyProjectId') companyProjectId: string,
-    @Body() dto: AdminAssignAssessorDto,
+    @Body() body: Record<string, unknown>,
   ): Promise<any> {
-    return this.companyProjectsService.assignAssessorAdminFlow(
+    const assessorId = String(body?.selectassessor ?? body?.assessor_id ?? '').trim();
+    const legacyDate = String(body?.assessor_date ?? '').trim();
+    const rawVisitDates = body?.visit_dates;
+    const assessorAmount = Number(body?.assessor_amount ?? 0);
+
+    if (!assessorId) {
+      throw new BadRequestException({
+        status: 'validations',
+        errors: { assessor_id: ['assessor_id is required.'] },
+      });
+    }
+
+    // Legacy payload path: requires assessor_date (dd/mm/yyyy,dd/mm/yyyy) + assessor_amount
+    if (legacyDate) {
+      return this.companyProjectsService.assignAssessorAdminFlow(
+        companyProjectId,
+        assessorId,
+        legacyDate,
+        Number.isFinite(assessorAmount) ? assessorAmount : 0,
+      );
+    }
+
+    // New payload path: assessor_id + optional visit_dates[]
+    let visitDates: string[] | undefined;
+    if (Array.isArray(rawVisitDates)) {
+      visitDates = rawVisitDates.map((v) => String(v).trim()).filter(Boolean);
+    } else if (typeof rawVisitDates === 'string' && rawVisitDates.trim()) {
+      visitDates = rawVisitDates
+        .split(',')
+        .map((v) => v.trim())
+        .filter(Boolean);
+    }
+    return this.companyProjectsService.assignAssessorForAdmin(
       companyProjectId,
-      dto.selectassessor,
-      dto.assessor_date,
-      dto.assessor_amount,
+      assessorId,
+      visitDates,
+    );
+  }
+
+  @Delete('api/admin/projects/:companyProjectId/assessors/:assessorId')
+  @Delete('admin/projects/:companyProjectId/assessors/:assessorId')
+  @Delete('api/admin/remove_assessor/:companyProjectId/:assessorId')
+  @Delete('admin/remove_assessor/:companyProjectId/:assessorId')
+  @Post('api/admin/remove_assessor/:companyProjectId/:assessorId')
+  @Post('admin/remove_assessor/:companyProjectId/:assessorId')
+  async removeAssessor(
+    @Param('companyProjectId') companyProjectId: string,
+    @Param('assessorId') assessorId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.removeAssessorAssignmentForAdmin(
+      companyProjectId,
+      assessorId,
+    );
+  }
+
+  // Legacy UI compatibility where assessor id is sent in body instead of URL param.
+  @Post('api/admin/remove_assessor/:companyProjectId')
+  @Post('admin/remove_assessor/:companyProjectId')
+  @Post('api/company/projects/:projectId/remove-assessor')
+  @Post('company/projects/:projectId/remove-assessor')
+  @UseGuards(AdminJwtAuthGuard)
+  async removeAssessorByBody(
+    @Param('companyProjectId') companyProjectId?: string,
+    @Param('projectId') projectId?: string,
+    @Body() body?: Record<string, unknown>,
+  ): Promise<any> {
+    const resolvedProjectId = String(companyProjectId ?? projectId ?? '').trim();
+    const assessorId = String(body?.assessor_id ?? body?.selectassessor ?? body?.assessorId ?? '').trim();
+    if (!resolvedProjectId || !assessorId) {
+      throw new BadRequestException({
+        status: 'validations',
+        errors: { assessor_id: ['assessor_id is required.'] },
+      });
+    }
+    return this.companyProjectsService.removeAssessorAssignmentForAdmin(
+      resolvedProjectId,
+      assessorId,
     );
   }
 

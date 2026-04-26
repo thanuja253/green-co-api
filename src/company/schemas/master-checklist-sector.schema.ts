@@ -9,6 +9,10 @@ export class MasterChecklistSector {
   @Prop({ required: true, index: true })
   criterian_id: string;
 
+  // Optional sector-specific mapping. When present, criteria fetch should prefer this over group mapping.
+  @Prop({ required: false, index: true })
+  sector_id?: string;
+
   @Prop({ required: true, index: true })
   group_id: string;
 

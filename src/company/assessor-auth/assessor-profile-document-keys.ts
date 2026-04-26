@@ -10,6 +10,17 @@ export const ASSESSOR_PROFILE_DOCUMENT_KEYS = [
   'cancelled_cheque',
 ] as const;
 
+/** Profile image is upload-required but excluded from approval-completion checks. */
+export const ASSESSOR_REVIEW_REQUIRED_DOCUMENT_KEYS = [
+  'biodata',
+  'vendor_registration_form',
+  'non_disclosure_agreement',
+  'health_declaration',
+  'gst_declaration',
+  'pan_card',
+  'cancelled_cheque',
+] as const;
+
 export type AssessorProfileDocumentKey = (typeof ASSESSOR_PROFILE_DOCUMENT_KEYS)[number];
 
 export type AssessorDocumentApprovalStatus = 'Pending' | 'Approved' | 'Rejected';

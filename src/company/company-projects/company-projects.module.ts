@@ -3,6 +3,7 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { CompanyProjectsController } from './company-projects.controller';
 import { AdminCompanyFlowController } from './admin-company-flow.controller';
 import { AdminLaunchTrainingController } from './admin-launch-training.controller';
+import { AssessorCompanyProjectsController } from './assessor-company-projects.controller';
 import { CompanyProjectsService } from './company-projects.service';
 import {
   CompanyProject,
@@ -55,6 +56,18 @@ import {
   MasterPrimaryDataChecklist,
   MasterPrimaryDataChecklistSchema,
 } from '../schemas/master-primary-data-checklist.schema';
+import {
+  CreditManagement,
+  CreditManagementSchema,
+} from '../schemas/credit-management.schema';
+import {
+  ParameterManagement,
+  ParameterManagementSchema,
+} from '../schemas/parameter-management.schema';
+import {
+  MasterChecklistSector,
+  MasterChecklistSectorSchema,
+} from '../schemas/master-checklist-sector.schema';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { MailModule } from '../../mail/mail.module';
 
@@ -78,12 +91,16 @@ import { MailModule } from '../../mail/mail.module';
       { name: Assessor.name, schema: AssessorSchema },
       { name: PrimaryDataForm.name, schema: PrimaryDataFormSchema },
       { name: MasterPrimaryDataChecklist.name, schema: MasterPrimaryDataChecklistSchema },
+      { name: CreditManagement.name, schema: CreditManagementSchema },
+      { name: ParameterManagement.name, schema: ParameterManagementSchema },
+      { name: MasterChecklistSector.name, schema: MasterChecklistSectorSchema },
     ]),
   ],
   controllers: [
     CompanyProjectsController,
     AdminCompanyFlowController,
     AdminLaunchTrainingController,
+    AssessorCompanyProjectsController,
   ],
   providers: [CompanyProjectsService],
   exports: [CompanyProjectsService],

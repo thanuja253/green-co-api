@@ -71,7 +71,6 @@ export class CompanyProjectsController {
    * GET /api/company/projects/coordinators
    */
   @Get('coordinators')
-  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   async listCoordinators(): Promise<any> {
     return this.companyProjectsService.listCoordinators();
   }
@@ -359,15 +358,15 @@ export class CompanyProjectsController {
   }
 
   @Get(':projectId/quickview')
-  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   async getQuickview(
     @Request() req,
     @Param('projectId') projectId: string,
   ): Promise<any> {
-    return this.companyProjectsService.getQuickviewData(
-      req.user.userId,
-      projectId,
-    );
+    const companyId = String(req?.user?.userId || '').trim();
+    if (companyId) {
+      return this.companyProjectsService.getQuickviewData(companyId, projectId);
+    }
+    return this.companyProjectsService.getQuickviewDataPublicByProject(projectId);
   }
 
   @Post(':projectId/milestones')
@@ -2052,6 +2051,24 @@ export class CompanyProjectsController {
       projectId,
       dto.assessor_id,
       dto.visit_dates,
+    );
+  }
+
+  /**
+   * Remove Assessor assignment by assessor id or assignment id.
+   * DELETE /api/company/projects/:projectId/assessors/:assessorId
+   */
+  @Delete(':projectId/assessors/:assessorId')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
+  async removeAssessorAssignment(
+    @Request() req,
+    @Param('projectId') projectId: string,
+    @Param('assessorId') assessorId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.removeAssessorAssignment(
+      req.user.userId,
+      projectId,
+      assessorId,
     );
   }
 

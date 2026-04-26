@@ -108,6 +108,20 @@ async function bootstrap() {
     next();
   });
 
+  // Legacy admin assessor assignment alias:
+  // admin UI may post /api/company/projects/:projectId/assign-assessor
+  // but admin backend route is /api/admin/assign_assessor/:projectId.
+  app.use((req, _res, next) => {
+    const original = req.url || '';
+    const [pathOnly, query = ''] = original.split('?');
+    const suffix = query ? `?${query}` : '';
+    const m = pathOnly.match(/^\/api\/company\/projects\/([^/]+)\/assign-assessor$/);
+    if (req.method === 'POST' && m) {
+      req.url = `/api/admin/assign_assessor/${m[1]}${suffix}`;
+    }
+    next();
+  });
+
   // Response time logging (skip static and health)
   app.use((req, res, next) => {
     const start = Date.now();

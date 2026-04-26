@@ -297,10 +297,21 @@ export class ParameterManagementService {
       throw new BadRequestException({ status: 'error', message: 'Sector does not have a group mapping' });
     }
 
-    const mappings = await this.checklistSectorModel
-      .find({ group_id: groupId })
+    const normalizedSectorId = String((sector as any)._id || '').trim();
+
+    // Prefer sector-specific mappings when available.
+    // Fallback to group-level mappings to keep backward compatibility with old data.
+    const sectorScopedMappings = await this.checklistSectorModel
+      .find({ sector_id: normalizedSectorId } as any)
       .select('criterian_id from_date')
       .lean();
+    const mappings =
+      sectorScopedMappings.length > 0
+        ? sectorScopedMappings
+        : await this.checklistSectorModel
+            .find({ group_id: groupId })
+            .select('criterian_id from_date')
+            .lean();
     const criteriaIds = [...new Set(mappings.map((m: any) => String(m.criterian_id || '').trim()).filter(Boolean))];
     if (!criteriaIds.length) {
       return {
