@@ -110,6 +110,21 @@ export class AdminCompanyFlowController {
     return this.companyProjectsService.getQuickviewDataForAdmin(projectId);
   }
 
+  /**
+   * Legacy admin certificate summary compatibility endpoints.
+   */
+  @Get([
+    'api/admin/projects/:projectId/certificate',
+    'admin/projects/:projectId/certificate',
+    'api/admin/upload_certificate/:projectId',
+    'admin/upload_certificate/:projectId',
+  ])
+  async getCertificateSummaryForAdmin(
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.getCertificateSummaryByProjectId(projectId);
+  }
+
   @Get('api/admin/projects/:projectId/assignments')
   @Get('admin/projects/:projectId/assignments')
   async getProjectAssignmentsForAdmin(
@@ -1081,6 +1096,49 @@ export class AdminCompanyFlowController {
         'EE spreadsheet import is not implemented in this API. Use POST /company/primary_data/:projectId with form_type=ee payload.',
       data: { project_id: projectid },
     };
+  }
+
+  /**
+   * Legacy admin certificate upload compatibility endpoint.
+   * POST /api/admin/certificate_upload/:projectId
+   * multipart field: certificate_upload (PDF)
+   */
+  @Post('api/admin/certificate_upload/:projectId')
+  @Post('admin/certificate_upload/:projectId')
+  @UseInterceptors(
+    FileInterceptor('certificate_upload', {
+      storage: diskStorage({
+        destination: (req, _file, cb) => {
+          const projectId = req.params.projectId;
+          const uploadPath = join(process.cwd(), 'uploads', 'company_certificate', projectId);
+          if (!fs.existsSync(uploadPath)) {
+            fs.mkdirSync(uploadPath, { recursive: true });
+          }
+          cb(null, uploadPath);
+        },
+        filename: (_req, file, cb) => {
+          const ext = extname(file.originalname) || '.pdf';
+          cb(null, `${Date.now()}${ext}`);
+        },
+      }),
+      limits: { fileSize: 10 * 1024 * 1024 },
+      fileFilter: (_req, file, cb) => {
+        if (file.mimetype === 'application/pdf') cb(null, true);
+        else cb(new BadRequestException('Only PDF is allowed for certificate.'), false);
+      },
+    }),
+  )
+  async uploadCertificateLegacy(
+    @Param('projectId') projectId: string,
+    @UploadedFile() certificateUpload?: Express.Multer.File,
+  ): Promise<any> {
+    if (!certificateUpload) {
+      throw new BadRequestException({ status: 'error', message: 'No file uploaded' });
+    }
+    return this.companyProjectsService.uploadCertificateDocumentByProjectId(
+      projectId,
+      certificateUpload,
+    );
   }
 
   @Get('company/energy_export')

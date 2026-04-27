@@ -4,7 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { Model, Types } from 'mongoose';
 import { basename, join } from 'path';
 import * as fs from 'fs';
 import {
@@ -194,7 +194,10 @@ export class AssessmentChecklistDocumentsService {
       });
     }
 
-    let sector = await this.sectorModel.findById(resolvedSectorId).select('group_id group_name').lean();
+    const isObjectId = Types.ObjectId.isValid(resolvedSectorId);
+    let sector = isObjectId
+      ? await this.sectorModel.findById(resolvedSectorId).select('group_id group_name').lean()
+      : null;
     if (!sector) {
       // Backward compatibility: some UIs pass sector name in sector_id query.
       sector = await this.sectorModel

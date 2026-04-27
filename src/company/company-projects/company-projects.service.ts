@@ -1627,6 +1627,40 @@ export class CompanyProjectsService {
     };
   }
 
+  /**
+   * Admin compatibility helper:
+   * fetch certificate summary by project id only (legacy endpoint shape).
+   */
+  async getCertificateSummaryByProjectId(projectId: string): Promise<{
+    status: 'success';
+    message: string;
+    data: {
+      profile: {
+        id: string;
+        name: string | undefined;
+        certificate_document: string | null;
+        feedback_document: string | null;
+        score_band_status: 0 | 1;
+      };
+      percentage_score: number;
+      total_score?: number;
+      max_points?: number;
+      criteria_projectscore: any[];
+      high_projectscore: any[];
+      max_score: any[];
+      certification_level: string;
+    };
+  }> {
+    const project = await this.projectModel.findById(projectId).select('_id company_id').lean();
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.getCertificateSummary(
+      String((project as any).company_id || ''),
+      String((project as any)._id || projectId),
+    );
+  }
+
   async getProject(companyId: string, projectId: string) {
     const project = await this.projectModel.findOne({ _id: projectId, company_id: companyId }).lean();
     if (!project) {
@@ -1727,6 +1761,28 @@ export class CompanyProjectsService {
         certificate_document_filename: project.certificate_document_filename,
       },
     };
+  }
+
+  /**
+   * Admin compatibility helper:
+   * upload certificate by project id only (legacy endpoint shape).
+   */
+  async uploadCertificateDocumentByProjectId(
+    projectId: string,
+    file: Express.Multer.File,
+  ): Promise<{ status: string; message: string; data?: any }> {
+    const project = await this.projectModel
+      .findById(projectId)
+      .select('_id company_id')
+      .lean();
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.uploadCertificateDocument(
+      String((project as any).company_id || ''),
+      String((project as any)._id || projectId),
+      file,
+    );
   }
 
   /**
