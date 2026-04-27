@@ -1684,6 +1684,44 @@ export class CompanyProjectsService {
     return project;
   }
 
+  /**
+   * Admin compatibility helper:
+   * get certificate document file path by project id only.
+   */
+  async getCertificateDocumentDownloadByProjectId(projectId: string): Promise<{
+    absolutePath: string;
+    filename: string;
+  }> {
+    const project = await this.projectModel.findById(projectId).lean();
+    if (!project) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Project not found',
+      });
+    }
+
+    const relativePath = String((project as any).certificate_document_url || '').trim();
+    if (!relativePath) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Certificate document not found',
+      });
+    }
+
+    const absolutePath = join(process.cwd(), relativePath);
+    if (!fs.existsSync(absolutePath)) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Certificate file not found on server',
+      });
+    }
+
+    return {
+      absolutePath,
+      filename: String((project as any).certificate_document_filename || 'certificate.pdf'),
+    };
+  }
+
   async getScoreBandPdfPath(companyId: string, projectId: string): Promise<string> {
     const project = await this.projectModel.findOne({
       _id: projectId,
@@ -3682,6 +3720,21 @@ export class CompanyProjectsService {
     const companyPatch = payload?.company || {};
     const projectPatch = payload?.project || {};
     const registrationPatch = payload?.registration_info || {};
+    const quickviewFinancePatch: Record<string, any> = {};
+    const quickviewFinanceKeys = [
+      'pr_no',
+      'p_no',
+      'gt_no',
+      'pr_amount',
+      'p_amount',
+      'pr_date',
+      'p_date',
+    ];
+    for (const key of quickviewFinanceKeys) {
+      if (Object.prototype.hasOwnProperty.call(payload || {}, key)) {
+        quickviewFinancePatch[key] = payload?.[key];
+      }
+    }
 
     const mergedCompanyPatch = {
       ...companyPatch,
@@ -3724,6 +3777,7 @@ export class CompanyProjectsService {
     project.registration_info = {
       ...(project.registration_info || {}),
       ...(registrationPatch || {}),
+      ...quickviewFinancePatch,
     };
 
     await company.save();
@@ -4183,6 +4237,7 @@ export class CompanyProjectsService {
       (project as any).project_id != null && String((project as any).project_id).trim() !== ''
         ? String((project as any).project_id).trim()
         : null;
+    const regInfo = ((project as any).registration_info || {}) as Record<string, any>;
     const profile = {
       id: project._id.toString(),
       name: company.name,
@@ -4219,6 +4274,13 @@ export class CompanyProjectsService {
       next_activity: nextStepDisplayName,
       next_activity_status: nextStepDisplayStatus,
       next_responsibility: nextStepDisplayResponsibility,
+      pr_no: regInfo.pr_no ?? '',
+      p_no: regInfo.p_no ?? '',
+      gt_no: regInfo.gt_no ?? '',
+      pr_amount: regInfo.pr_amount ?? '',
+      p_amount: regInfo.p_amount ?? '',
+      pr_date: regInfo.pr_date ?? '',
+      p_date: regInfo.p_date ?? '',
     };
 
     // Build current activity data (Latest Step Completed)

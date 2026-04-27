@@ -157,40 +157,19 @@ export class CompanyProjectsController {
   }
 
   @Get(':projectId/certificate-document')
-  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   async getCertificateDocument(
-    @Request() req,
     @Param('projectId') projectId: string,
     @Res() res: Response,
   ) {
-    const project = await this.companyProjectsService.getProject(
-      req.user.userId,
-      projectId,
-    );
-
-    if (!project.certificate_document_url) {
-      throw new NotFoundException({
-        status: 'error',
-        message: 'Certificate document not found',
-      });
-    }
-
-    const filePath = join(process.cwd(), project.certificate_document_url);
-
-    if (!fs.existsSync(filePath)) {
-      throw new NotFoundException({
-        status: 'error',
-        message: 'Certificate file not found on server',
-      });
-    }
+    const file = await this.companyProjectsService.getCertificateDocumentDownloadByProjectId(projectId);
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader(
       'Content-Disposition',
-      `inline; filename="${project.certificate_document_filename || 'certificate.pdf'}"`,
+      `inline; filename="${file.filename}"`,
     );
 
-    return res.sendFile(filePath);
+    return res.sendFile(file.absolutePath);
   }
 
   @Get(':projectId/feedback-document')

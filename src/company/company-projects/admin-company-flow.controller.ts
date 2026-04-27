@@ -102,8 +102,14 @@ export class AdminCompanyFlowController {
     return this.companyProjectsService.updateRegistrationInfoForAdmin(projectId, dto, mergedFiles);
   }
 
-  @Get('api/admin/projects/:projectId/quickview')
-  @Get('admin/projects/:projectId/quickview')
+  @Get([
+    'api/admin/projects/:projectId/quickview',
+    'admin/projects/:projectId/quickview',
+    'api/admin/projects/:projectId/p-details',
+    'admin/projects/:projectId/p-details',
+    'api/admin/projects/:projectId/p_details',
+    'admin/projects/:projectId/p_details',
+  ])
   async getQuickviewForAdmin(
     @Param('projectId') projectId: string,
   ): Promise<any> {
@@ -123,6 +129,25 @@ export class AdminCompanyFlowController {
     @Param('projectId') projectId: string,
   ): Promise<any> {
     return this.companyProjectsService.getCertificateSummaryByProjectId(projectId);
+  }
+
+  /**
+   * Legacy/new admin certificate document download compatibility.
+   */
+  @Get([
+    'api/admin/projects/:projectId/certificate-document',
+    'admin/projects/:projectId/certificate-document',
+    'api/admin/upload_certificate/:projectId/document',
+    'admin/upload_certificate/:projectId/document',
+  ])
+  async getCertificateDocumentForAdmin(
+    @Param('projectId') projectId: string,
+    @Res() res: Response,
+  ): Promise<void> {
+    const file = await this.companyProjectsService.getCertificateDocumentDownloadByProjectId(projectId);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${file.filename}"`);
+    res.sendFile(file.absolutePath);
   }
 
   @Get('api/admin/projects/:projectId/assignments')
@@ -291,6 +316,30 @@ export class AdminCompanyFlowController {
   @Patch('api/admin/projects/:projectId/quickview-data')
   @Patch('admin/projects/:projectId/quickview-data')
   async updateQuickviewDataForAdmin(
+    @Param('projectId') projectId: string,
+    @Body() payload: any,
+  ): Promise<any> {
+    return this.companyProjectsService.updateQuickviewDataForAdmin(
+      projectId,
+      payload,
+    );
+  }
+
+  /**
+   * Legacy admin compatibility: some UIs call POST /pr-details.
+   * Route aliases are mapped to the same quickview update service.
+   */
+  @Post([
+    'api/admin/projects/:projectId/pr-details',
+    'admin/projects/:projectId/pr-details',
+    'api/admin/projects/:projectId/pr_details',
+    'admin/projects/:projectId/pr_details',
+    'api/admin/projects/:projectId/p-details',
+    'admin/projects/:projectId/p-details',
+    'api/admin/projects/:projectId/p_details',
+    'admin/projects/:projectId/p_details',
+  ])
+  async updatePrDetailsForAdmin(
     @Param('projectId') projectId: string,
     @Body() payload: any,
   ): Promise<any> {
