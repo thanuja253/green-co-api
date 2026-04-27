@@ -4,6 +4,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { MongooseModule } from '@nestjs/mongoose';
 import { CompanyAuthController } from './company-auth.controller';
+import { CompanyAuthLegacyCompatController } from './company-auth-legacy-compat.controller';
 import { AdminAuthCompatController } from './admin-auth-compat.controller';
 import { AdminProfileCompatController } from './admin-profile-compat.controller';
 import { CompanyAuthService } from './company-auth.service';
@@ -50,7 +51,12 @@ import { RegistrationMastersModule } from '../registration-masters/registration-
     NotificationsModule,
     RegistrationMastersModule,
   ],
-  controllers: [CompanyAuthController, AdminAuthCompatController, AdminProfileCompatController],
+  controllers: [
+    CompanyAuthController,
+    CompanyAuthLegacyCompatController,
+    AdminAuthCompatController,
+    AdminProfileCompatController,
+  ],
   providers: [CompanyAuthService, JwtStrategy],
   exports: [CompanyAuthService],
 })

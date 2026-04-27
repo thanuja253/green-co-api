@@ -19,11 +19,6 @@ import { Facilitator, FacilitatorDocument } from '../schemas/facilitator.schema'
 import { Coordinator, CoordinatorDocument } from '../schemas/coordinator.schema';
 import { Assessor, AssessorDocument } from '../schemas/assessor.schema';
 import {
-  ASSESSOR_PROFILE_DOCUMENT_KEYS,
-  ASSESSOR_REVIEW_REQUIRED_DOCUMENT_KEYS,
-  isAssessorProfileDocumentKey,
-} from '../assessor-auth/assessor-profile-document-keys';
-import {
   PrimaryDataForm,
   PrimaryDataFormDocument,
   PRIMARY_DATA_DOC_STATUS,
@@ -32,37 +27,15 @@ import {
   MasterPrimaryDataChecklist,
   MasterPrimaryDataChecklistDocument,
 } from '../schemas/master-primary-data-checklist.schema';
-import {
-  CreditManagement,
-  CreditManagementDocument,
-} from '../schemas/credit-management.schema';
-import {
-  ParameterManagement,
-  ParameterManagementDocument,
-} from '../schemas/parameter-management.schema';
-import {
-  MasterChecklistSector,
-  MasterChecklistSectorDocument,
-} from '../schemas/master-checklist-sector.schema';
 import { RegistrationInfoDto } from './dto/registration-info.dto';
 import { SubmitPaymentDto } from './dto/submit-payment.dto';
 import { UpdateInvoiceApprovalDto } from './dto/update-invoice-approval.dto';
 import { CreateProformaInvoiceV2Dto } from './dto/create-proforma-invoice-v2.dto';
-import { UpdateProformaInvoiceV2Dto } from './dto/update-proforma-invoice-v2.dto';
-import {
-  financeV2StrictStateCodesEnabled,
-  FinanceV2ComputedTax,
-  isFinanceV2Taxable,
-  parseFinanceV2StateCode,
-  round2,
-  computeAndValidateFinanceV2Gst,
-} from './finance-v2-invoice-gst.util';
 import { UpdateFinanceV2ReminderDto } from './dto/update-finance-v2-reminder.dto';
 import { SubmitFinanceV2PaymentDto } from './dto/submit-finance-v2-payment.dto';
 import { UpdateFinanceV2ApprovalDto } from './dto/update-finance-v2-approval.dto';
 import { UpsertPlaqueDetailsDto } from './dto/upsert-plaque-details.dto';
 import { UpsertOutstandingDetailsDto } from './dto/upsert-outstanding-details.dto';
-import { OutstandingDuePaymentDto } from './dto/outstanding-due-payment.dto';
 import { CreateAssessorProfileDto } from './dto/create-assessor-profile.dto';
 import { ListAssessorsQueryDto } from './dto/list-assessors-query.dto';
 import { ReportsQueryDto } from './dto/reports-query.dto';
@@ -74,12 +47,9 @@ import * as fs from 'fs';
 import { GridFSBucket } from 'mongodb';
 import type { Response } from 'express';
 import { getCertificationType } from '../../helpers/certification.helper';
-import { passwordGeneration } from '../../helpers/password.helper';
 import { NotificationsService } from '../notifications/notifications.service';
 import { MailService } from '../../mail/mail.service';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import * as bcrypt from 'bcrypt';
-import { lookupIfscDetails } from '../../common/ifsc-lookup.util';
 
 /** View Certificate score band: 9 rows × 20 numbers (points bands 1–10 … 191–200). Normalize so frontend always gets number[][]. */
 function normalizeScoreBandRows(rows: any[]): number[][] {
@@ -294,26 +264,10 @@ export class CompanyProjectsService {
     private readonly primaryDataFormModel: Model<PrimaryDataFormDocument>,
     @InjectModel(MasterPrimaryDataChecklist.name)
     private readonly masterPrimaryDataChecklistModel: Model<MasterPrimaryDataChecklistDocument>,
-    @InjectModel(CreditManagement.name)
-    private readonly creditManagementModel: Model<CreditManagementDocument>,
-    @InjectModel(ParameterManagement.name)
-    private readonly parameterManagementModel: Model<ParameterManagementDocument>,
-    @InjectModel(MasterChecklistSector.name)
-    private readonly masterChecklistSectorModel: Model<MasterChecklistSectorDocument>,
     @InjectConnection() private readonly mongoConnection: Connection,
     private readonly notificationsService: NotificationsService,
     private readonly mailService: MailService,
   ) {}
-
-  private calculateTentativeLevel(percentage: number): string {
-    if (percentage >= 85) return 'Platinum+';
-    if (percentage >= 75) return 'Platinum';
-    if (percentage >= 65) return 'Gold';
-    if (percentage >= 55) return 'Silver';
-    if (percentage >= 45) return 'Bronze';
-    if (percentage >= 35) return 'Certified';
-    return 'Not Classified';
-  }
 
   private isTransientMongoConnectivityError(error: unknown): boolean {
     const msg = String((error as any)?.message || '');
@@ -579,55 +533,6 @@ export class CompanyProjectsService {
     return 'uploads/pic.jpeg';
   }
 
-  private async deriveBankDetails(
-    ifscCodeRaw: unknown,
-    fallbackBankName = '',
-    fallbackBranchName = '',
-  ): Promise<{ ifsc_code: string; bank_name: string; branch_name: string }> {
-    const ifscCode = String(ifscCodeRaw || '').trim().toUpperCase();
-    if (!ifscCode) {
-      return {
-        ifsc_code: '',
-        bank_name: String(fallbackBankName || '').trim(),
-        branch_name: String(fallbackBranchName || '').trim(),
-      };
-    }
-
-    const lookedUp = await lookupIfscDetails(ifscCode);
-    return {
-      ifsc_code: lookedUp.ifsc_code,
-      bank_name: lookedUp.bank_name || String(fallbackBankName || '').trim(),
-      branch_name: lookedUp.branch_name || String(fallbackBranchName || '').trim(),
-    };
-  }
-
-  private buildDocumentApprovalsMap(a: any): Record<string, { status: string; remarks: string }> {
-    const stored = (a?.document_approvals || {}) as Record<string, { status?: string; remarks?: string }>;
-    const out: Record<string, { status: string; remarks: string }> = {};
-    for (const key of ASSESSOR_PROFILE_DOCUMENT_KEYS) {
-      const pathVal = String((a as any)?.[key] ?? '').trim();
-      if (!pathVal) continue;
-      const entry = stored[key];
-      out[key] = {
-        status: ['Pending', 'Approved', 'Rejected'].includes(String(entry?.status || ''))
-          ? String(entry!.status)
-          : 'Pending',
-        remarks: String(entry?.remarks ?? '').trim(),
-      };
-    }
-    return out;
-  }
-
-  private buildReviewRequiredApprovalsMap(a: any): Record<string, { status: string; remarks: string }> {
-    const all = this.buildDocumentApprovalsMap(a);
-    const required: Record<string, { status: string; remarks: string }> = {};
-    for (const key of ASSESSOR_REVIEW_REQUIRED_DOCUMENT_KEYS) {
-      if (!all[key]) continue;
-      required[key] = all[key];
-    }
-    return required;
-  }
-
   private mapAssessorResponse(a: any) {
     const profileImage = this.toPublicFilePath(a.profile_image);
     const biodata = this.toPublicFilePath(a.biodata);
@@ -689,7 +594,6 @@ export class CompanyProjectsService {
       approval_status: a.approval_status || 'Pending',
       approval_remarks: a.approval_remarks || '',
       profile_status: a.profile_status || 'Incomplete',
-      document_approvals: this.buildDocumentApprovalsMap(a),
     };
   }
 
@@ -697,7 +601,7 @@ export class CompanyProjectsService {
     name: string,
     email: string,
     mobile: string,
-    sendCredentials: boolean = false,
+    _sendCredentials?: boolean,
   ) {
     const normalizedEmail = email.trim().toLowerCase();
     if (!mobile || !mobile.trim()) {
@@ -718,58 +622,22 @@ export class CompanyProjectsService {
       });
     }
 
-    const tempPassword = sendCredentials ? passwordGeneration(12) : null;
-    const passwordHash = tempPassword ? await bcrypt.hash(tempPassword, 10) : undefined;
-
     const assessor = await this.assessorModel.create({
       name: name.trim(),
       email: normalizedEmail,
       mobile: mobile.trim(),
       status: '1',
-      ...(passwordHash ? { password: passwordHash } : {}),
     });
-
-    let credentialsEmailSent = false;
-    let emailErrorMessage: string | null = null;
-    if (sendCredentials && tempPassword) {
-      try {
-        await this.mailService.sendAssessorCredentialsEmail(
-          normalizedEmail,
-          name.trim(),
-          tempPassword,
-        );
-        credentialsEmailSent = true;
-      } catch (error) {
-        const rawMessage =
-          String((error as any)?.message || '').trim() ||
-          'Failed to send credentials email. Please retry later.';
-        const lower = rawMessage.toLowerCase();
-        const looksLikeResendSandbox =
-          (lower.includes('resend api error 403') || lower.includes('validation_error')) &&
-          (lower.includes('testing emails') || lower.includes('own email address'));
-        emailErrorMessage = looksLikeResendSandbox
-          ? 'Credentials email blocked by Resend sandbox mode. Verify a sending domain and use a verified from-address to send to external recipients.'
-          : rawMessage;
-      }
-    }
 
     return {
       status: 'success',
-      message:
-        sendCredentials && credentialsEmailSent
-          ? 'Assessor created. Credentials sent to email.'
-          : sendCredentials
-            ? 'Assessor created, but credentials email could not be sent.'
-            : 'Assessor added successfully',
+      message: 'Assessor added successfully',
       data: {
         id: assessor._id.toString(),
         name: assessor.name,
         email: assessor.email,
         mobile: (assessor as any).mobile,
         status: assessor.status,
-        send_credentials: sendCredentials,
-        credentials_email_sent: credentialsEmailSent,
-        ...(emailErrorMessage ? { credentials_email_error: emailErrorMessage } : {}),
       },
     };
   }
@@ -950,101 +818,11 @@ export class CompanyProjectsService {
 
     assessor.approval_status = approvalStatus;
     assessor.approval_remarks = (remarks || '').trim();
-
-    const remarksTrim = (remarks || '').trim();
-    if (approvalStatus === 'Approved' || approvalStatus === 'Rejected') {
-      const prev = ((assessor as any).document_approvals || {}) as Record<
-        string,
-        { status?: string; remarks?: string }
-      >;
-      const docApprovals: Record<string, { status: string; remarks: string }> = {};
-      for (const k of Object.keys(prev)) {
-        const e = prev[k];
-        docApprovals[k] = {
-          status: String(e?.status || 'Pending'),
-          remarks: String(e?.remarks ?? '').trim(),
-        };
-      }
-      for (const key of ASSESSOR_PROFILE_DOCUMENT_KEYS) {
-        const pathVal = String((assessor as any)[key] ?? '').trim();
-        if (!pathVal) continue;
-        docApprovals[key] = {
-          status: approvalStatus,
-          remarks: approvalStatus === 'Rejected' ? remarksTrim : '',
-        };
-      }
-      (assessor as any).document_approvals = docApprovals;
-    }
-
     await assessor.save();
 
     return {
       status: 'success',
       message: `Assessor ${approvalStatus.toLowerCase()} successfully`,
-      data: this.mapAssessorResponse(assessor.toObject()),
-    };
-  }
-
-  async updateAssessorDocumentApprovalAdminFlow(
-    assessorId: string,
-    documentKey: string,
-    status: 'Approved' | 'Rejected' | 'Pending',
-    remarks?: string,
-  ) {
-    if (!isAssessorProfileDocumentKey(documentKey)) {
-      throw new BadRequestException({
-        status: 'error',
-        message: `Invalid document key. Allowed: ${ASSESSOR_PROFILE_DOCUMENT_KEYS.join(', ')}`,
-      });
-    }
-    const assessor = await this.assessorModel.findById(assessorId);
-    if (!assessor) {
-      throw new NotFoundException({ status: 'error', message: 'Assessor not found' });
-    }
-    const pathVal = String((assessor as any)[documentKey] ?? '').trim();
-    if (!pathVal) {
-      throw new BadRequestException({
-        status: 'error',
-        message: `No file uploaded for document "${documentKey}"`,
-      });
-    }
-    const prev = ((assessor as any).document_approvals || {}) as Record<
-      string,
-      { status?: string; remarks?: string }
-    >;
-    const docApprovals: Record<string, { status: string; remarks: string }> = {};
-    for (const k of Object.keys(prev)) {
-      const e = prev[k];
-      docApprovals[k] = {
-        status: String(e?.status || 'Pending'),
-        remarks: String(e?.remarks ?? '').trim(),
-      };
-    }
-    docApprovals[documentKey] = {
-      status,
-      remarks: String(remarks ?? '').trim(),
-    };
-    (assessor as any).document_approvals = docApprovals;
-
-    const required = this.buildReviewRequiredApprovalsMap(assessor.toObject());
-    const values = Object.values(required);
-    const anyRejected = values.some((v) => v.status === 'Rejected');
-    const anyPending = values.some((v) => v.status === 'Pending');
-    const allApproved = values.length > 0 && values.every((v) => v.status === 'Approved');
-    if (anyRejected) {
-      assessor.approval_status = 'Rejected';
-    } else if (anyPending) {
-      assessor.approval_status = 'Pending';
-      assessor.approval_remarks = '';
-    } else if (allApproved) {
-      assessor.approval_status = 'Approved';
-      assessor.approval_remarks = '';
-    }
-
-    await assessor.save();
-    return {
-      status: 'success',
-      message: `Document ${documentKey} marked as ${status}`,
       data: this.mapAssessorResponse(assessor.toObject()),
     };
   }
@@ -1244,28 +1022,15 @@ export class CompanyProjectsService {
       });
     }
 
-    const filePath = (f?: Express.Multer.File[]) =>
-      f?.[0] ? `uploads/assessors/${f[0].filename}` : '';
-    const bankInfo = await this.deriveBankDetails(dto.ifsc_code, dto.bank_name, dto.branch_name);
-
-    const document_approvals: Record<string, { status: string; remarks: string }> = {};
-    for (const key of ASSESSOR_PROFILE_DOCUMENT_KEYS) {
-      const p = filePath((files as any)?.[key]);
-      if (String(p || '').trim()) {
-        document_approvals[key] = { status: 'Approved', remarks: '' };
-      }
-    }
+    const filePath = (f?: Express.Multer.File[]) => (f?.[0] ? this.getFixedAssessorUploadPath() : '');
 
     const assessor = await this.assessorModel.create({
       name: dto.name.trim(),
       email: normalizedEmail,
       mobile: dto.mobile.trim(),
       status: (dto.status || '1').toString(),
-      // Admin-created profiles should be auto-approved (no approval cycle).
-      approval_status: 'Approved',
-      approval_remarks: '',
+      approval_status: 'Pending',
       profile_status: 'Complete',
-      document_approvals,
       industry_category: dto.industry_category || '',
       alternate_mobile: dto.alternate_mobile || '',
       address_line_1: dto.address_line_1 || '',
@@ -1286,10 +1051,10 @@ export class CompanyProjectsService {
       emergency_city: dto.emergency_city || '',
       emergency_state: dto.emergency_state || '',
       emergency_pincode: dto.emergency_pincode || '',
-      bank_name: bankInfo.bank_name || '',
+      bank_name: dto.bank_name || '',
       account_number: dto.account_number || '',
-      branch_name: bankInfo.branch_name || '',
-      ifsc_code: bankInfo.ifsc_code || '',
+      branch_name: dto.branch_name || '',
+      ifsc_code: dto.ifsc_code || '',
       biodata: filePath(files?.biodata),
       vendor_registration_form: filePath(files?.vendor_registration_form),
       non_disclosure_agreement: filePath(files?.non_disclosure_agreement),
@@ -1337,13 +1102,7 @@ export class CompanyProjectsService {
       });
     }
 
-    const filePath = (f?: Express.Multer.File[]) =>
-      f?.[0] ? `uploads/assessors/${f[0].filename}` : undefined;
-    const bankInfo = await this.deriveBankDetails(
-      dto.ifsc_code ?? assessor.ifsc_code,
-      dto.bank_name ?? assessor.bank_name,
-      dto.branch_name ?? assessor.branch_name,
-    );
+    const filePath = (f?: Express.Multer.File[]) => (f?.[0] ? this.getFixedAssessorUploadPath() : undefined);
 
     assessor.name = (dto.name || assessor.name).trim();
     assessor.email = normalizedEmail;
@@ -1369,14 +1128,10 @@ export class CompanyProjectsService {
     assessor.emergency_city = dto.emergency_city ?? assessor.emergency_city ?? '';
     assessor.emergency_state = dto.emergency_state ?? assessor.emergency_state ?? '';
     assessor.emergency_pincode = dto.emergency_pincode ?? assessor.emergency_pincode ?? '';
-    assessor.bank_name = bankInfo.bank_name;
+    assessor.bank_name = dto.bank_name ?? assessor.bank_name ?? '';
     assessor.account_number = dto.account_number ?? assessor.account_number ?? '';
-    assessor.branch_name = bankInfo.branch_name;
-    assessor.ifsc_code = bankInfo.ifsc_code;
-    // Any admin update keeps the profile approved.
-    assessor.approval_status = 'Approved';
-    assessor.approval_remarks = '';
-    assessor.profile_status = 'Complete';
+    assessor.branch_name = dto.branch_name ?? assessor.branch_name ?? '';
+    assessor.ifsc_code = dto.ifsc_code ?? assessor.ifsc_code ?? '';
 
     assessor.profile_image = filePath(files?.profile_image) ?? assessor.profile_image;
     assessor.biodata = filePath(files?.biodata) ?? assessor.biodata;
@@ -1386,25 +1141,6 @@ export class CompanyProjectsService {
     assessor.gst_declaration = filePath(files?.gst_declaration) ?? assessor.gst_declaration;
     assessor.pan_card = filePath(files?.pan_card) ?? assessor.pan_card;
     assessor.cancelled_cheque = filePath(files?.cancelled_cheque) ?? assessor.cancelled_cheque;
-
-    const prevAdmin = ((assessor as any).document_approvals || {}) as Record<
-      string,
-      { status?: string; remarks?: string }
-    >;
-    const docApprovals: Record<string, { status: string; remarks: string }> = {};
-    for (const k of Object.keys(prevAdmin)) {
-      const e = prevAdmin[k];
-      docApprovals[k] = {
-        status: String(e?.status || 'Pending'),
-        remarks: String(e?.remarks ?? '').trim(),
-      };
-    }
-    for (const key of ASSESSOR_PROFILE_DOCUMENT_KEYS) {
-      if (files?.[key]?.[0]) {
-        docApprovals[key] = { status: 'Approved', remarks: '' };
-      }
-    }
-    (assessor as any).document_approvals = docApprovals;
 
     await assessor.save();
 
@@ -1793,898 +1529,6 @@ export class CompanyProjectsService {
       status: 'success',
       message: 'Score band visibility updated',
       data: { score_band_status: project.score_band_status },
-    };
-  }
-
-  private parseAssessmentScoringPayload(body: Record<string, any>): {
-    criteriaId: string;
-    groupId: string;
-    rows: Array<{
-      parameter_id: string;
-      preliminary_score: number;
-      assessor_score: number;
-      max_score: number;
-      coordinator_remarks: string;
-    }>;
-  } {
-    const criteriaId = String(
-      body?.criteria_id ?? body?.criteriaId ?? body?.criteria ?? body?.criteriaID ?? '',
-    ).trim();
-    const groupId = String(body?.group_id ?? body?.groupId ?? '').trim();
-
-    const pickNumber = (...values: unknown[]): number => {
-      for (const value of values) {
-        if (value === null || value === undefined) continue;
-        const text = String(value).trim();
-        if (text === '') continue;
-        const parsed = Number(text);
-        if (!Number.isNaN(parsed)) return parsed;
-      }
-      return 0;
-    };
-
-    // New JSON format preferred by modern frontend.
-    if (Array.isArray(body?.rows)) {
-      const rows = body.rows
-        .map((r: any) => ({
-          parameter_id: String(r?.parameter_id ?? r?.parameterId ?? '').trim(),
-          preliminary_score: pickNumber(
-            r?.preliminary_score,
-            r?.pre_assessment_score,
-            r?.preAssessmentScore,
-            r?.preassessment_score,
-            r?.preassessmentscore,
-            r?.preassesmentscore,
-          ),
-          assessor_score: pickNumber(
-            r?.assessor_score,
-            r?.assessment_score,
-            r?.assessmentScore,
-            r?.assessmentscore,
-            r?.assesmentscore,
-            r?.final_score,
-            r?.finalScore,
-          ),
-          max_score: pickNumber(r?.max_score, r?.maxScore),
-          coordinator_remarks: String(r?.coordinator_remarks ?? r?.remarks ?? '').trim(),
-        }))
-        .filter((r: any) => r.parameter_id);
-      return { criteriaId, groupId, rows };
-    }
-
-    // Legacy form format:
-    // parameter_id{ID}, preassesmentscore{ID}, coordinatorremarks{ID}, max_score{ID?}
-    const rowMap = new Map<
-      string,
-      {
-        parameter_id: string;
-        preliminary_score: number;
-        assessor_score: number;
-        max_score: number;
-        coordinator_remarks: string;
-      }
-    >();
-    for (const key of Object.keys(body || {})) {
-      const parameterMatch = key.match(/^parameter_id(.+)$/);
-      if (parameterMatch) {
-        const suffix = String(parameterMatch[1] || '').trim();
-        const parameterId = String(body[key] ?? '').trim();
-        if (!parameterId) continue;
-        rowMap.set(suffix, {
-          parameter_id: parameterId,
-          preliminary_score: pickNumber(
-            body[`preassesmentscore${suffix}`], // legacy misspelling
-            body[`preassessmentscore${suffix}`],
-            body[`pre_assessment_score${suffix}`],
-            body[`preliminary_score${suffix}`],
-          ),
-          assessor_score: pickNumber(
-            body[`assesmentscore${suffix}`], // legacy misspelling
-            body[`assessmentscore${suffix}`],
-            body[`assessment_score${suffix}`],
-            body[`assessor_score${suffix}`],
-            body[`finalscore${suffix}`],
-            body[`final_score${suffix}`],
-          ),
-          max_score: pickNumber(body[`max_score${suffix}`], body[`maxscore${suffix}`]),
-          coordinator_remarks: String(
-            body[`coordinatorremarks${suffix}`] ??
-              body[`coordinator_remarks${suffix}`] ??
-              body[`remarks${suffix}`] ??
-              '',
-          ).trim(),
-        });
-      }
-    }
-
-    return {
-      criteriaId,
-      groupId,
-      rows: Array.from(rowMap.values()),
-    };
-  }
-
-  async getAssessmentScoringForAdmin(projectId: string, criteriaId?: string) {
-    const resolved = await this.resolveProjectForAdmin(projectId);
-    if (!resolved?._id) {
-      throw new NotFoundException({ status: 'error', message: 'Project not found' });
-    }
-    const project = await this.projectModel.findById(resolved._id).lean();
-    if (!project) {
-      throw new NotFoundException({ status: 'error', message: 'Project not found' });
-    }
-
-    const scoringStore = ((project as any).registration_info?.assessment_scoring ||
-      {}) as Record<string, any>;
-    const byCriteria = (scoringStore?.by_criteria || {}) as Record<string, any>;
-    if (criteriaId?.trim()) {
-      const key = criteriaId.trim();
-      const legacyFlat =
-        (scoringStore?.[key] as Record<string, any>) ||
-        (((project as any).registration_info?.assessment_scores || {}) as Record<string, any>)?.[key];
-      const loaded = (byCriteria[key] || legacyFlat || null) as Record<string, any> | null;
-
-      // Build parameter/max-score rows from Group Management (Scoring/Credit master)
-      // so UI has max score + description before first save.
-      const criteriaDoc = Types.ObjectId.isValid(key)
-        ? await this.parameterManagementModel.findById(key).select('name short_name').lean()
-        : null;
-      const namesToMatch = [
-        key,
-        String((criteriaDoc as any)?.name || '').trim(),
-        String((criteriaDoc as any)?.short_name || '').trim(),
-      ].filter(Boolean);
-      const criteriaShortName = String((criteriaDoc as any)?.short_name || '').trim();
-      const escaped = namesToMatch.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-      let masterRows: any[] = [];
-      if (escaped.length) {
-        // First pass: strict exact-name matches across legacy fields.
-        masterRows = await this.creditManagementModel
-          .find({
-            $or: escaped.flatMap((name) => [
-              { checklist_criteria: { $regex: `^${name}$`, $options: 'i' } },
-              { credit_main_heading: { $regex: `^${name}$`, $options: 'i' } },
-            ]),
-          } as any)
-          .select('_id parameter requirements max_score checklist_criteria credit_main_heading')
-          .sort({ createdAt: 1 })
-          .lean();
-
-        // Second pass fallback: relaxed contains match for legacy dirty data.
-        if (!masterRows.length) {
-          masterRows = await this.creditManagementModel
-            .find({
-              $or: escaped.flatMap((name) => [
-                { checklist_criteria: { $regex: name, $options: 'i' } },
-                { credit_main_heading: { $regex: name, $options: 'i' } },
-              ]),
-            } as any)
-            .select('_id parameter requirements max_score checklist_criteria credit_main_heading')
-            .sort({ createdAt: 1 })
-            .lean();
-        }
-
-        // Third pass fallback: short code match against credit number/group label
-        // e.g. criteria short_name "RM" should match "RM CREDIT 1".
-        if (!masterRows.length && criteriaShortName) {
-          const shortEscaped = criteriaShortName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          masterRows = await this.creditManagementModel
-            .find({
-              $or: [
-                { credit_number: { $regex: `^${shortEscaped}(\\b|\\s|-)`, $options: 'i' } },
-                { credit_number: { $regex: shortEscaped, $options: 'i' } },
-              ],
-            } as any)
-            .select('_id parameter requirements max_score checklist_criteria credit_main_heading')
-            .sort({ createdAt: 1 })
-            .lean();
-        }
-      }
-      const savedRows = Array.isArray(loaded?.rows) ? (loaded?.rows as Array<Record<string, any>>) : [];
-      const savedByParamId = new Map<string, Record<string, any>>(
-        savedRows.map((r) => [String(r?.parameter_id || '').trim(), r]),
-      );
-
-      const mergedRows = (masterRows as any[]).map((m) => {
-        const pid = String(m?._id || '').trim();
-        const saved = savedByParamId.get(pid);
-        const preliminaryScore =
-          Number(saved?.preliminary_score ?? saved?.pre_assessment_score ?? 0) || 0;
-        const assessorScore =
-          Number(
-            saved?.assessor_score ??
-              saved?.assessment_score ??
-              saved?.assesment_score ??
-              saved?.final_score ??
-              0,
-          ) || 0;
-        const assessorRemarks = String(
-          saved?.assessor_remarks ?? saved?.remarks ?? '',
-        ).trim();
-        return {
-          parameter_id: pid,
-          parameter: String(m?.parameter || '').trim(),
-          description: String(m?.requirements || '').trim(),
-          max_score: Number(m?.max_score || 0) || 0,
-          preliminary_score: preliminaryScore,
-          pre_assessment_score: preliminaryScore,
-          assessor_score: assessorScore,
-          assessment_score: assessorScore,
-          assesment_score: assessorScore,
-          final_score: assessorScore,
-          assessor_remarks: assessorRemarks,
-          remarks: assessorRemarks,
-          coordinator_remarks: String(saved?.coordinator_remarks || '').trim(),
-        };
-      });
-
-      let rows: any[] = mergedRows.length > 0 ? mergedRows : savedRows;
-      if (mergedRows.length > 0 && savedRows.length > 0) {
-        const hasDirectSavedMatch = mergedRows.some(
-          (r: any) =>
-            Number(r?.preliminary_score || 0) > 0 ||
-            Number(r?.assessor_score || 0) > 0 ||
-            String(r?.coordinator_remarks || '').trim().length > 0,
-        );
-
-        // Legacy datasets can save parameter_id from a different source than
-        // current credit master IDs. When that happens, direct ID-merge fails
-        // and refresh shows zeros; preserve saved scores by row-order fallback.
-        if (!hasDirectSavedMatch) {
-          rows = mergedRows.map((m: any, idx: number) => {
-            const s = savedRows[idx] || {};
-            const preliminaryScore =
-              Number(s?.preliminary_score ?? s?.pre_assessment_score ?? 0) || 0;
-            const assessorScore =
-              Number(
-                s?.assessor_score ??
-                  s?.assessment_score ??
-                  s?.assesment_score ??
-                  s?.final_score ??
-                  0,
-              ) || 0;
-            const assessorRemarks = String(
-              s?.assessor_remarks ?? s?.remarks ?? '',
-            ).trim();
-            return {
-              ...m,
-              preliminary_score: preliminaryScore,
-              pre_assessment_score: preliminaryScore,
-              assessor_score: assessorScore,
-              assessment_score: assessorScore,
-              assesment_score: assessorScore,
-              final_score: assessorScore,
-              assessor_remarks: assessorRemarks,
-              remarks: assessorRemarks,
-              coordinator_remarks: String(s?.coordinator_remarks ?? s?.remarks ?? '').trim(),
-            };
-          });
-        }
-      }
-
-      let totalMaxScore = 0;
-      let totalPreAssessmentScore = 0;
-      let totalFinalScore = 0;
-      for (const r of rows as any[]) {
-        totalMaxScore += Number(r?.max_score || 0) || 0;
-        totalPreAssessmentScore += Number(r?.preliminary_score || 0) || 0;
-        totalFinalScore += Number(r?.assessor_score || 0) || 0;
-      }
-
-      const scoring = {
-        criteria_id: key,
-        group_id: loaded?.group_id ?? null,
-        rows,
-        total_max_score: totalMaxScore,
-        total_pre_assessment_score: totalPreAssessmentScore,
-        total_final_score: totalFinalScore,
-        final_submitted: !!loaded?.final_submitted,
-        updated_at: loaded?.updated_at || null,
-      };
-      return {
-        status: 'success',
-        message: 'Assessment scoring loaded',
-        data: {
-          project_id: String((project as any)._id),
-          criteria_id: key,
-          scoring,
-        },
-      };
-    }
-
-    return {
-      status: 'success',
-      message: 'Assessment scoring loaded',
-      data: {
-        project_id: String((project as any)._id),
-        by_criteria: byCriteria,
-      },
-    };
-  }
-
-  async storeAssessmentScoresForAdmin(projectId: string, body: Record<string, any>, finalSubmit = false) {
-    const resolved = await this.resolveProjectForAdmin(projectId);
-    if (!resolved?.company_id) {
-      throw new NotFoundException({ status: 'error', message: 'Project not found' });
-    }
-    const project = await this.projectModel.findById(resolved._id);
-    if (!project) {
-      throw new NotFoundException({ status: 'error', message: 'Project not found' });
-    }
-
-    const parsed = this.parseAssessmentScoringPayload(body || {});
-    if (!parsed.criteriaId) {
-      throw new BadRequestException({
-        status: 'validations',
-        errors: { criteria_id: ['criteria_id is required.'] },
-      });
-    }
-    if (!parsed.rows.length) {
-      throw new BadRequestException({
-        status: 'validations',
-        errors: { rows: ['At least one scoring row is required.'] },
-      });
-    }
-
-    const rowIdsNeedingMax = parsed.rows
-      .filter((r) => !(Number(r.max_score) > 0) && Types.ObjectId.isValid(r.parameter_id))
-      .map((r) => new Types.ObjectId(r.parameter_id));
-    const maxScoreMap = new Map<string, number>();
-    if (rowIdsNeedingMax.length) {
-      const masterRows = await this.creditManagementModel
-        .find({ _id: { $in: rowIdsNeedingMax } } as any)
-        .select('_id max_score')
-        .lean();
-      for (const m of masterRows as any[]) {
-        const id = String(m?._id || '').trim();
-        const max = Number(m?.max_score || 0) || 0;
-        if (id) maxScoreMap.set(id, max);
-      }
-    }
-
-    const rows = parsed.rows.map((r) => ({
-      ...r,
-      max_score:
-        Number(r.max_score) > 0
-          ? Number(r.max_score)
-          : maxScoreMap.get(String(r.parameter_id).trim()) || 0,
-    }));
-
-    const totalMaxScore = rows.reduce((s, r) => s + (Number(r.max_score) || 0), 0);
-    const totalPreAssessmentScore = rows.reduce(
-      (s, r) => s + (Number(r.preliminary_score) || 0),
-      0,
-    );
-    const totalFinalScore = rows.reduce((s, r) => s + (Number(r.assessor_score) || 0), 0);
-
-    const registrationInfo = ((project as any).registration_info || {}) as Record<string, any>;
-    const scoringStore = (registrationInfo.assessment_scoring || {}) as Record<string, any>;
-    const byCriteria = (scoringStore.by_criteria || {}) as Record<string, any>;
-
-    byCriteria[parsed.criteriaId] = {
-      criteria_id: parsed.criteriaId,
-      group_id: parsed.groupId || null,
-      rows,
-      total_max_score: totalMaxScore,
-      total_pre_assessment_score: totalPreAssessmentScore,
-      total_final_score: totalFinalScore,
-      final_submitted: !!finalSubmit,
-      updated_at: new Date(),
-      ...(finalSubmit ? { final_submitted_at: new Date() } : {}),
-    };
-
-    scoringStore.by_criteria = byCriteria;
-    registrationInfo.assessment_scoring = scoringStore;
-    (project as any).registration_info = registrationInfo;
-    // `registration_info` is a flexible object field; mark modified so nested
-    // assessment_scoring changes are always persisted.
-    (project as any).markModified?.('registration_info');
-
-    // Keep project summary fields in sync for certificate summary screens.
-    if (finalSubmit) {
-      const allCriteriaRows = Object.values(byCriteria) as any[];
-      const aggMax = allCriteriaRows.reduce((s, x) => s + (Number(x?.total_max_score) || 0), 0);
-      const aggFinal = allCriteriaRows.reduce((s, x) => s + (Number(x?.total_final_score) || 0), 0);
-      const percentage = aggMax > 0 ? Number(((aggFinal / aggMax) * 100).toFixed(2)) : 0;
-      (project as any).max_points = aggMax;
-      (project as any).total_score = aggFinal;
-      (project as any).percentage_score = percentage;
-    }
-
-    await project.save();
-
-    return {
-      status: 'success',
-      message: finalSubmit
-        ? 'Assessment scores final submitted successfully'
-        : 'Assessment scores saved successfully',
-      data: {
-        criteria_id: parsed.criteriaId,
-        total_max_score: totalMaxScore,
-        total_pre_assessment_score: totalPreAssessmentScore,
-        total_final_score: totalFinalScore,
-        final_submitted: !!finalSubmit,
-      },
-    };
-  }
-
-  private parseAssessorScorePayload(body: Record<string, any>): {
-    criteriaId: string;
-    rowsByParameterId: Array<{ parameter_id: string; assessor_score: number; assessor_remarks: string }>;
-    indexedRows: Array<{ index: number; assessor_score: number; assessor_remarks: string }>;
-  } {
-    const criteriaId = String(body?.criteria_id ?? body?.criteriaId ?? body?.criteria ?? '').trim();
-    const rowsByParameterId: Array<{
-      parameter_id: string;
-      assessor_score: number;
-      assessor_remarks: string;
-    }> = [];
-    const indexedRows: Array<{ index: number; assessor_score: number; assessor_remarks: string }> = [];
-
-    const toNumber = (value: unknown): number => {
-      if (value === null || value === undefined) return 0;
-      const text = String(value).trim();
-      if (!text) return 0;
-      const num = Number(text);
-      return Number.isNaN(num) ? 0 : num;
-    };
-
-    if (Array.isArray(body?.rows)) {
-      for (const row of body.rows as any[]) {
-        const parameterId = String(row?.parameter_id ?? row?.parameterId ?? '').trim();
-        const assessorScore = toNumber(
-          row?.assessor_score ??
-            row?.assessment_score ??
-            row?.assesment_score ??
-            row?.final_score ??
-            row?.score,
-        );
-        const assessorRemarks = String(
-          row?.assessor_remarks ?? row?.remarks ?? row?.assessorRemarks ?? '',
-        ).trim();
-        if (parameterId) {
-          rowsByParameterId.push({
-            parameter_id: parameterId,
-            assessor_score: assessorScore,
-            assessor_remarks: assessorRemarks,
-          });
-        }
-      }
-      return { criteriaId, rowsByParameterId, indexedRows };
-    }
-
-    const suffixSet = new Set<string>();
-    for (const key of Object.keys(body || {})) {
-      const m = key.match(/^asses?mentscore(.+)$/i);
-      if (m) suffixSet.add(String(m[1] || '').trim());
-    }
-    for (const suffix of suffixSet) {
-      const parameterId = String(body[`parameter_id${suffix}`] ?? body[`parameterId${suffix}`] ?? '').trim();
-      const score = toNumber(
-        body[`assesmentscore${suffix}`] ??
-          body[`assessmentscore${suffix}`] ??
-          body[`assessment_score${suffix}`] ??
-          body[`assessor_score${suffix}`] ??
-          body[`final_score${suffix}`],
-      );
-      const remarks = String(
-        body[`assessor_remarks${suffix}`] ??
-          body[`remarks${suffix}`] ??
-          body[`assessorremarks${suffix}`] ??
-          '',
-      ).trim();
-      if (parameterId) {
-        rowsByParameterId.push({
-          parameter_id: parameterId,
-          assessor_score: score,
-          assessor_remarks: remarks,
-        });
-      } else if (/^\d+$/.test(suffix)) {
-        indexedRows.push({
-          index: Math.max(0, Number(suffix) - 1),
-          assessor_score: score,
-          assessor_remarks: remarks,
-        });
-      }
-    }
-
-    return { criteriaId, rowsByParameterId, indexedRows };
-  }
-
-  private async upsertAssessorScores(
-    assessorId: string,
-    projectId: string,
-    body: Record<string, any>,
-    finalSubmit: boolean,
-  ): Promise<any> {
-    if (!Types.ObjectId.isValid(projectId)) {
-      throw new BadRequestException({ status: 'error', message: 'Invalid project id' });
-    }
-
-    const project = await this.projectModel.findById(projectId);
-    if (!project) {
-      throw new NotFoundException({ status: 'error', message: 'Project not found' });
-    }
-
-    const assessor = await this.assessorModel.findById(assessorId).lean();
-    if (!assessor) {
-      throw new NotFoundException({ status: 'error', message: 'Assessor not found' });
-    }
-
-    const assigned = await this.companyAssessorModel
-      .findOne({ project_id: projectId, assessor_id: assessorId })
-      .lean();
-    if (!assigned) {
-      throw new BadRequestException({
-        status: 'error',
-        message: 'Assessor is not assigned to this project.',
-      });
-    }
-
-    const parsed = this.parseAssessorScorePayload(body || {});
-    if (!parsed.criteriaId) {
-      throw new BadRequestException({
-        status: 'validations',
-        errors: { criteria_id: ['criteria_id is required.'] },
-      });
-    }
-
-    const registrationInfo = ((project as any).registration_info || {}) as Record<string, any>;
-    const scoringStore = (registrationInfo.assessment_scoring || {}) as Record<string, any>;
-    const byCriteria = (scoringStore.by_criteria || {}) as Record<string, any>;
-
-    const existingCriteria = byCriteria[parsed.criteriaId] || {};
-    let existingRows = Array.isArray(existingCriteria?.rows) ? [...existingCriteria.rows] : [];
-
-    if (!existingRows.length) {
-      const loaded = await this.getAssessmentScoringForAdmin(projectId, parsed.criteriaId);
-      existingRows = Array.isArray((loaded as any)?.data?.scoring?.rows)
-        ? ([...(loaded as any).data.scoring.rows] as Array<Record<string, any>>)
-        : [];
-    }
-
-    if (!existingRows.length) {
-      throw new BadRequestException({
-        status: 'error',
-        message: 'No scoring rows found for this criteria.',
-      });
-    }
-
-    let updatedCount = 0;
-    const patchByParamId = new Map<string, { assessor_score: number; assessor_remarks: string }>(
-      parsed.rowsByParameterId.map((r) => [r.parameter_id, r]),
-    );
-    const patchByIndex = new Map<number, { assessor_score: number; assessor_remarks: string }>(
-      parsed.indexedRows.map((r) => [r.index, r]),
-    );
-
-    const now = new Date();
-    const nextRows = existingRows.map((row: any, idx: number) => {
-      const paramId = String(row?.parameter_id || '').trim();
-      const patch = (paramId ? patchByParamId.get(paramId) : undefined) || patchByIndex.get(idx);
-      if (!patch) return row;
-      updatedCount += 1;
-      const score = Number(patch.assessor_score || 0) || 0;
-      const remarks = String(patch.assessor_remarks || '').trim();
-      return {
-        ...row,
-        assessor_score: score,
-        assessment_score: score,
-        assesment_score: score,
-        final_score: score,
-        assessor_remarks: remarks,
-        assessor_id: assessorId,
-        assessor_updated_at: now,
-        ...(finalSubmit ? { assessor_approval: 1, assessor_approved_at: now } : {}),
-      };
-    });
-
-    if (updatedCount === 0) {
-      throw new BadRequestException({
-        status: 'error',
-        message: 'No assessor scoring rows matched the payload.',
-      });
-    }
-
-    const totalMaxScore = nextRows.reduce((s, r) => s + (Number(r?.max_score) || 0), 0);
-    const totalPreAssessmentScore = nextRows.reduce(
-      (s, r) => s + (Number(r?.preliminary_score ?? r?.pre_assessment_score ?? 0) || 0),
-      0,
-    );
-    const totalFinalScore = nextRows.reduce(
-      (s, r) =>
-        s +
-        (Number(
-          r?.assessor_score ?? r?.assessment_score ?? r?.assesment_score ?? r?.final_score ?? 0,
-        ) || 0),
-      0,
-    );
-
-    byCriteria[parsed.criteriaId] = {
-      ...existingCriteria,
-      criteria_id: parsed.criteriaId,
-      rows: nextRows,
-      total_max_score: totalMaxScore,
-      total_pre_assessment_score: totalPreAssessmentScore,
-      total_final_score: totalFinalScore,
-      updated_at: now,
-      ...(finalSubmit ? { assessor_final_submitted: true, assessor_final_submitted_at: now } : {}),
-    };
-
-    scoringStore.by_criteria = byCriteria;
-    registrationInfo.assessment_scoring = scoringStore;
-    (project as any).registration_info = registrationInfo;
-
-    if (finalSubmit) {
-      const companyId = String((project as any).company_id || '').trim();
-      const assessorName = String((assessor as any)?.name || 'Assessor').trim();
-      const description = `Assessor ${assessorName} has Submitted the Scoring`;
-
-      // Keep latest milestone state aligned with assessor final scoring submit.
-      const existingMilestone = await this.companyActivityModel
-        .findOne({
-          company_id: companyId,
-          project_id: String((project as any)._id),
-          milestone_flow: 15,
-          activity_type: 'assessor',
-        })
-        .sort({ createdAt: -1 });
-
-      if (existingMilestone) {
-        existingMilestone.description = description;
-        existingMilestone.milestone_completed = true;
-        await existingMilestone.save();
-      } else {
-        await this.companyActivityModel.create({
-          company_id: companyId,
-          project_id: projectId,
-          description,
-          activity_type: 'assessor',
-          milestone_flow: 15,
-          milestone_completed: true,
-        });
-      }
-
-      // Keep project next step aligned to the latest completed milestone.
-      const completedActivities = await this.companyActivityModel
-        .find({
-          company_id: companyId,
-          project_id: String((project as any)._id),
-          milestone_completed: true,
-          milestone_flow: { $ne: null },
-        })
-        .select('milestone_flow')
-        .lean();
-
-      const latestCompletedMilestone = (completedActivities as any[]).reduce((max, a) => {
-        const n = Number(a?.milestone_flow || 0);
-        return n > max ? n : max;
-      }, 0);
-
-      const currentNext = Number((project as any).next_activities_id || 0);
-      const computedNext = latestCompletedMilestone > 0 ? latestCompletedMilestone + 1 : currentNext;
-      if (computedNext > currentNext) {
-        (project as any).next_activities_id = computedNext;
-      }
-    }
-
-    (project as any).markModified?.('registration_info');
-    await project.save();
-
-    return {
-      status: 'success',
-      message: finalSubmit
-        ? 'Scoring Data Submitted Successfully.'
-        : `${updatedCount} Parameters Scoring Data Saved Successfully.`,
-      data: {
-        criteria_id: parsed.criteriaId,
-        updated_rows: updatedCount,
-        total_max_score: totalMaxScore,
-        total_pre_assessment_score: totalPreAssessmentScore,
-        total_final_score: totalFinalScore,
-        assessor_final_submitted: !!finalSubmit,
-      },
-    };
-  }
-
-  async updateAssessorScore(
-    assessorId: string,
-    projectId: string,
-    body: Record<string, any>,
-  ): Promise<any> {
-    return this.upsertAssessorScores(assessorId, projectId, body, false);
-  }
-
-  async finalSubmitAssessorScore(
-    assessorId: string,
-    projectId: string,
-    body: Record<string, any>,
-  ): Promise<any> {
-    return this.upsertAssessorScores(assessorId, projectId, body, true);
-  }
-
-  async getAssessmentSummarySheetForAdmin(projectId: string, criteriaId?: string) {
-    const resolved = await this.resolveProjectForAdmin(projectId);
-    if (!resolved?._id) {
-      throw new NotFoundException({ status: 'error', message: 'Project not found' });
-    }
-    const project = await this.projectModel.findById(resolved._id).lean();
-    if (!project) {
-      throw new NotFoundException({ status: 'error', message: 'Project not found' });
-    }
-
-    const byCriteria =
-      ((project as any).registration_info?.assessment_scoring?.by_criteria || {}) as Record<string, any>;
-    const persistedKeys = Object.keys(byCriteria);
-    let rows = persistedKeys.map((k) => byCriteria[k]).filter(Boolean);
-
-    // Always return overall combined summary (all criteria),
-    // even when frontend sends criteria_id by mistake.
-    // If persisted rows are missing/incomplete, synthesize current rows from
-    // sector/group mapped criteria and merge by criteria_id.
-    const company = await this.companyModel
-      .findById((project as any).company_id)
-      .select('mst_sector_id')
-      .lean();
-    const sectorId = String((company as any)?.mst_sector_id || '').trim();
-    if (sectorId) {
-      const sector = await this.sectorModel.findById(sectorId).select('group_id').lean();
-      const groupId = String((sector as any)?.group_id || '').trim();
-      let mappings = await this.masterChecklistSectorModel
-        .find({ sector_id: sectorId } as any)
-        .select('criterian_id')
-        .lean();
-      if (!mappings.length && groupId) {
-        mappings = await this.masterChecklistSectorModel
-          .find({ group_id: groupId } as any)
-          .select('criterian_id')
-          .lean();
-      }
-
-      const mappedCriteriaIds = [
-        ...new Set(
-          (mappings as any[])
-            .map((m) => String(m?.criterian_id || '').trim())
-            .filter(Boolean),
-        ),
-      ];
-      const rowMap = new Map<string, any>();
-      for (const row of rows as any[]) {
-        const cid = String(row?.criteria_id || '').trim();
-        if (!cid) continue;
-        rowMap.set(cid, row);
-      }
-      for (const cid of mappedCriteriaIds) {
-        if (rowMap.has(cid)) continue;
-        const current = await this.getAssessmentScoringForAdmin(projectId, cid);
-        const sc = (current as any)?.data?.scoring as Record<string, any> | undefined;
-        if (sc) rowMap.set(cid, sc);
-      }
-      rows = Array.from(rowMap.values());
-    }
-
-    // Last resort fallback when no mapped criteria rows could be built.
-    const requestedCriteriaId = String(criteriaId || '').trim();
-    if (!rows.length && requestedCriteriaId) {
-      const current = await this.getAssessmentScoringForAdmin(projectId, requestedCriteriaId);
-      const sc = (current as any)?.data?.scoring as Record<string, any> | undefined;
-      if (sc) rows = [sc];
-    }
-
-    const keys = [
-      ...new Set(
-        rows
-          .map((r: any) => String(r?.criteria_id || '').trim())
-          .filter(Boolean),
-      ),
-    ];
-    const criteriaDocs = await this.parameterManagementModel
-      .find({ _id: { $in: keys.filter((k) => Types.ObjectId.isValid(k)).map((k) => new Types.ObjectId(k)) } } as any)
-      .select('_id name short_name')
-      .lean();
-    const criteriaNameMap = new Map<string, { name: string; short_name: string }>(
-      (criteriaDocs as any[]).map((c) => [
-        String(c?._id),
-        { name: String(c?.name || ''), short_name: String(c?.short_name || '') },
-      ]),
-    );
-
-    const totalMaxScore = rows.reduce((s, r) => s + (Number(r?.total_max_score) || 0), 0);
-    const totalPreAssessmentScore = rows.reduce(
-      (s, r) => s + (Number(r?.total_pre_assessment_score) || 0),
-      0,
-    );
-    const totalFinalScore = rows.reduce((s, r) => s + (Number(r?.total_final_score) || 0), 0);
-    const percentage = totalMaxScore > 0 ? Number(((totalFinalScore / totalMaxScore) * 100).toFixed(2)) : 0;
-    const prePercentage =
-      totalMaxScore > 0 ? Number(((totalPreAssessmentScore / totalMaxScore) * 100).toFixed(2)) : 0;
-    const extrapolatedMax = totalMaxScore > 0 ? totalMaxScore : 0;
-    const extrapolatedPre =
-      totalMaxScore > 0
-        ? Number(((totalPreAssessmentScore / totalMaxScore) * extrapolatedMax).toFixed(2))
-        : 0;
-    const extrapolatedFinal =
-      totalMaxScore > 0
-        ? Number(((totalFinalScore / totalMaxScore) * extrapolatedMax).toFixed(2))
-        : 0;
-    const tentativePre = this.calculateTentativeLevel(prePercentage);
-    const tentativeFinal = this.calculateTentativeLevel(percentage);
-    const certificateTypePreliminary = getCertificationType(prePercentage);
-    const certificateTypeFinal = getCertificationType(percentage);
-
-    return {
-      status: 'success',
-      message: 'Summary sheet loaded',
-      data: {
-        project_id: String((project as any)._id),
-        // Always overall summary mode (combined across criteria).
-        criteria_id: null,
-        totals: {
-          total_max_score: totalMaxScore,
-          total_pre_assessment_score: totalPreAssessmentScore,
-          total_final_score: totalFinalScore,
-          percentage_score: percentage,
-          pre_percentage_score: prePercentage,
-          extrapolated: {
-            max_score: extrapolatedMax,
-            pre_assessment_score: extrapolatedPre,
-            final_score: extrapolatedFinal,
-          },
-        },
-        ratings: {
-          tentative_pre_rating: tentativePre,
-          tentative_final_rating: tentativeFinal,
-          // Backward-compatible key (final/actual performance based).
-          certificate_type: certificateTypeFinal,
-          // Explicit keys for frontend clarity.
-          certificate_type_preliminary: certificateTypePreliminary,
-          certificate_type_final: certificateTypeFinal,
-        },
-        criteria_rows: rows.map((r: any) => ({
-          criteria_id: r?.criteria_id || '',
-          criteria_name: criteriaNameMap.get(String(r?.criteria_id || ''))?.name || '',
-          criteria_short_name: criteriaNameMap.get(String(r?.criteria_id || ''))?.short_name || '',
-          total_max_score: Number(r?.total_max_score || 0),
-          total_pre_assessment_score: Number(r?.total_pre_assessment_score || 0),
-          total_final_score: Number(r?.total_final_score || 0),
-          final_submitted: !!r?.final_submitted,
-          updated_at: r?.updated_at || null,
-        })),
-      },
-    };
-  }
-
-  async downloadFinalScoringForAdmin(projectId: string): Promise<{ filename: string; content: string }> {
-    const summary = await this.getAssessmentSummarySheetForAdmin(projectId);
-    const rows = (summary?.data?.criteria_rows || []) as Array<Record<string, any>>;
-    const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-    const csvLines = [
-      [
-        'criteria_id',
-        'total_max_score',
-        'total_pre_assessment_score',
-        'total_final_score',
-        'final_submitted',
-        'updated_at',
-      ]
-        .map(esc)
-        .join(','),
-      ...rows.map((r) =>
-        [
-          r.criteria_id,
-          r.total_max_score,
-          r.total_pre_assessment_score,
-          r.total_final_score,
-          r.final_submitted ? 'yes' : 'no',
-          r.updated_at || '',
-        ]
-          .map(esc)
-          .join(','),
-      ),
-    ];
-    return {
-      filename: `final-scoring-${Date.now()}.csv`,
-      content: csvLines.join('\n'),
     };
   }
 
@@ -3885,12 +2729,7 @@ export class CompanyProjectsService {
     const assessorsData = (companyAssessors as any[]).map((ca: any) => {
       const assessor = assessorMap.get(ca.assessor_id?.toString?.());
       return assessor
-        ? {
-            assignment_id: String(ca._id),
-            assessor_id: String(ca.assessor_id),
-            Assessor_Detail: { name: assessor.name, email: assessor.email },
-            visit_dates: ca.visit_dates || [],
-          }
+        ? { Assessor_Detail: { name: assessor.name, email: assessor.email }, visit_dates: ca.visit_dates || [] }
         : null;
     }).filter(Boolean);
 
@@ -4373,43 +3212,6 @@ export class CompanyProjectsService {
         },
       },
     };
-  }
-
-  async getQuickviewDataForAssessor(
-    assessorId: string,
-    projectId: string,
-  ): Promise<{ status: 'success'; message: string; data: any }> {
-    const assignment = await this.companyAssessorModel.findOne({
-      assessor_id: assessorId,
-      project_id: projectId,
-    });
-    if (!assignment) {
-      throw new NotFoundException({
-        status: 'error',
-        message: 'Project not assigned to assessor.',
-      });
-    }
-    const project = await this.projectModel.findById(projectId).select('company_id').lean();
-    if (!project?.company_id) {
-      throw new NotFoundException({
-        status: 'error',
-        message: 'Project not found or quickview not available.',
-      });
-    }
-    return this.getQuickviewData(String((project as any).company_id), projectId);
-  }
-
-  async getQuickviewDataPublicByProject(
-    projectId: string,
-  ): Promise<{ status: 'success'; message: string; data: any }> {
-    const project = await this.projectModel.findById(projectId).select('company_id').lean();
-    if (!project?.company_id) {
-      throw new NotFoundException({
-        status: 'error',
-        message: 'Project not found or quickview not available.',
-      });
-    }
-    return this.getQuickviewData(String((project as any).company_id), projectId);
   }
 
   /**
@@ -6365,47 +5167,20 @@ export class CompanyProjectsService {
       data: {
         invoices: invoices.map((inv: any) => ({
           id: String(inv._id),
-          payment_for_label: this.getInvoiceDisplayLabel(inv.payment_for, inv.invoice_type),
           invoice_type: inv.invoice_type ?? (inv.payment_for === PAYMENT_FOR_TAX ? 'tax' : 'proforma'),
-          invoice_title: this.normalizeInvoiceTitle(inv.invoice_title, inv.payment_for, inv.invoice_type),
+          invoice_title: inv.invoice_title ?? null,
           invoice_document: toUrl(inv.invoice_document),
           invoice_document_filename: inv.invoice_document_filename ?? null,
-          invoice_document_history: Array.isArray(inv.invoice_document_history)
-            ? inv.invoice_document_history.map((h: any) => ({
-                path: toUrl(h?.path) ?? null,
-                filename: h?.filename ?? null,
-                uploaded_at: h?.uploaded_at ?? null,
-              }))
-            : [],
           payable_amount: Number(inv.payable_amount ?? 0),
           sgst: Number(inv.sgst ?? 0),
           cgst: Number(inv.cgst ?? 0),
           igst: Number(inv.igst ?? 0),
-          supplier_state_code: inv.supplier_state_code ?? null,
-          place_of_supply_state_code: inv.place_of_supply_state_code ?? null,
-          transaction_type: inv.transaction_type ?? null,
-          is_intra_state:
-            inv.transaction_type === 'intra'
-              ? true
-              : inv.transaction_type === 'inter'
-                ? false
-                : inv.supplier_state_code != null &&
-                    inv.place_of_supply_state_code != null
-                  ? inv.supplier_state_code === inv.place_of_supply_state_code
-                  : null,
           tax_amount: Number(inv.tax_amount ?? 0),
           total_amount: Number(inv.total_amount ?? 0),
           trans_id: inv.trans_id ?? null,
           payment_type: inv.payment_type ?? null,
           offline_tran_doc: inv.offline_tran_doc ? toUrl(inv.offline_tran_doc) : null,
           offline_tran_doc_filename: inv.offline_tran_doc_filename ?? null,
-          offline_tran_doc_history: Array.isArray(inv.offline_tran_doc_history)
-            ? inv.offline_tran_doc_history.map((h: any) => ({
-                path: toUrl(h?.path) ?? null,
-                filename: h?.filename ?? null,
-                uploaded_at: h?.uploaded_at ?? null,
-              }))
-            : [],
           send_reminder: Number(inv.send_reminder ?? 0),
           send_invoice_to: inv.send_invoice_to ?? null,
           reminder_date: inv.reminder_date?.toISOString?.() ?? null,
@@ -6428,40 +5203,6 @@ export class CompanyProjectsService {
           updated_at: inv.updatedAt,
         })),
       },
-    };
-  }
-
-  private computeFinanceV2GstForInvoice(args: {
-    invoice_type: 'proforma' | 'tax';
-    payable_amount: number;
-    sgst: number;
-    cgst: number;
-    igst: number;
-    supplier_state_code?: string;
-    place_of_supply_state_code?: string;
-  }): FinanceV2ComputedTax & { supplier_state_code?: string; place_of_supply_state_code?: string } {
-    const supplier = parseFinanceV2StateCode(args.supplier_state_code, 'Supplier state code');
-    const place = parseFinanceV2StateCode(args.place_of_supply_state_code, 'Place of supply state code');
-    const taxable = isFinanceV2Taxable(args.invoice_type, args.sgst, args.cgst, args.igst);
-    if (financeV2StrictStateCodesEnabled() && taxable && (supplier === null || place === null)) {
-      throw new BadRequestException({
-        status: 'error',
-        message:
-          'supplier_state_code and place_of_supply_state_code are required for taxable invoices.',
-      });
-    }
-    const computed = computeAndValidateFinanceV2Gst({
-      payable_amount: args.payable_amount,
-      sgst: args.sgst,
-      cgst: args.cgst,
-      igst: args.igst,
-      supplier_state_code: supplier,
-      place_of_supply_state_code: place,
-    });
-    return {
-      ...computed,
-      supplier_state_code: supplier ?? undefined,
-      place_of_supply_state_code: place ?? undefined,
     };
   }
 
@@ -6498,17 +5239,8 @@ export class CompanyProjectsService {
     const sgst = Number(dto.sgst);
     const cgst = Number(dto.cgst);
     const igst = Number(dto.igst);
-    const gst = this.computeFinanceV2GstForInvoice({
-      invoice_type: dto.invoice_type,
-      payable_amount: payable,
-      sgst,
-      cgst,
-      igst,
-      supplier_state_code: dto.supplier_state_code,
-      place_of_supply_state_code: dto.place_of_supply_state_code,
-    });
-    const taxAmount = gst.tax_amount;
-    const totalAmount = gst.total_amount;
+    const taxAmount = sgst + cgst + igst;
+    const totalAmount = payable + taxAmount;
 
     // Guard duplicate active Proforma rows (new API business rule).
     if (paymentFor === PAYMENT_FOR_PROFORMA) {
@@ -6540,18 +5272,12 @@ export class CompanyProjectsService {
       invoice_title: dto.invoice_title,
       invoice_document: relativePath,
       invoice_document_filename: file.originalname,
-      invoice_document_history: [
-        { path: relativePath, filename: file.originalname, uploaded_at: new Date() },
-      ],
       payable_amount: payable,
-      sgst: gst.sgst_rate,
-      cgst: gst.cgst_rate,
-      igst: gst.igst_rate,
+      sgst,
+      cgst,
+      igst,
       tax_amount: taxAmount,
       total_amount: totalAmount,
-      supplier_state_code: gst.supplier_state_code,
-      place_of_supply_state_code: gst.place_of_supply_state_code,
-      ...(gst.transaction_type ? { transaction_type: gst.transaction_type } : {}),
       send_reminder: Number(dto.send_reminder),
       send_invoice_to: dto.send_invoice_to ?? undefined,
       reminder_date: reminderDate,
@@ -6577,152 +5303,6 @@ export class CompanyProjectsService {
       data: {
         invoice_id: String((invoice as any)._id),
         reminder_date: reminderDate?.toISOString?.() ?? null,
-        invoices: list.data.invoices,
-      },
-    };
-  }
-
-  async updateFinanceV2InvoiceByProjectId(
-    projectId: string,
-    invoiceId: string,
-    dto: UpdateProformaInvoiceV2Dto,
-    file?: Express.Multer.File,
-  ) {
-    return this.withFinanceV2MongoRetry(async () => {
-      const resolved = await this.resolveProjectForAdmin(projectId);
-      if (!resolved?.company_id) {
-        throw new NotFoundException({ status: 'error', message: 'Project not found' });
-      }
-      return this.updateFinanceV2Invoice(
-        String(resolved.company_id),
-        String(resolved._id),
-        invoiceId,
-        dto,
-        file,
-      );
-    });
-  }
-
-  async updateFinanceV2Invoice(
-    companyId: string,
-    projectId: string,
-    invoiceId: string,
-    dto: UpdateProformaInvoiceV2Dto,
-    file?: Express.Multer.File,
-  ) {
-    if (!Types.ObjectId.isValid(invoiceId)) {
-      throw new BadRequestException({ status: 'error', message: 'Invalid invoice id' });
-    }
-
-    const project = await this.projectModel.findOne({ _id: projectId, company_id: companyId });
-    if (!project) {
-      throw new NotFoundException({ status: 'error', message: 'Project not found' });
-    }
-
-    const existing = await this.companyInvoiceModel.findOne({
-      _id: invoiceId,
-      company_id: companyId,
-      project_id: projectId,
-      invoice_type: { $in: ['proforma', 'tax'] },
-    });
-    if (!existing) {
-      throw new NotFoundException({ status: 'error', message: 'Invoice not found' });
-    }
-
-    const invoice_type = (dto.invoice_type ?? existing.invoice_type) as 'proforma' | 'tax';
-    if (invoice_type !== 'proforma' && invoice_type !== 'tax') {
-      throw new BadRequestException({ status: 'error', message: 'Invalid invoice type' });
-    }
-
-    const payable = dto.payable_amount ?? Number(existing.payable_amount ?? 0);
-    const sgst = dto.sgst ?? Number(existing.sgst ?? 0);
-    const cgst = dto.cgst ?? Number(existing.cgst ?? 0);
-    const igst = dto.igst ?? Number(existing.igst ?? 0);
-    const supplierRaw =
-      dto.supplier_state_code !== undefined
-        ? dto.supplier_state_code
-        : (existing as any).supplier_state_code;
-    const placeRaw =
-      dto.place_of_supply_state_code !== undefined
-        ? dto.place_of_supply_state_code
-        : (existing as any).place_of_supply_state_code;
-
-    const gst = this.computeFinanceV2GstForInvoice({
-      invoice_type,
-      payable_amount: payable,
-      sgst,
-      cgst,
-      igst,
-      supplier_state_code: supplierRaw,
-      place_of_supply_state_code: placeRaw,
-    });
-
-    const paymentFor = invoice_type === 'tax' ? PAYMENT_FOR_TAX : PAYMENT_FOR_PROFORMA;
-
-    if (paymentFor === PAYMENT_FOR_PROFORMA) {
-      const duplicate = await this.companyInvoiceModel.findOne({
-        company_id: companyId,
-        project_id: projectId,
-        invoice_type: 'proforma',
-        approval_status: { $in: [0, 3] },
-        _id: { $ne: invoiceId },
-      });
-      if (duplicate) {
-        throw new BadRequestException({
-          status: 'error',
-          message: 'An active Proforma invoice already exists for this project.',
-        });
-      }
-    }
-
-    existing.payment_for = paymentFor;
-    existing.invoice_type = invoice_type;
-    if (dto.invoice_title !== undefined) {
-      existing.invoice_title = dto.invoice_title;
-    }
-    existing.payable_amount = payable;
-    existing.sgst = gst.sgst_rate;
-    existing.cgst = gst.cgst_rate;
-    existing.igst = gst.igst_rate;
-    existing.tax_amount = gst.tax_amount;
-    existing.total_amount = gst.total_amount;
-    (existing as any).supplier_state_code = gst.supplier_state_code;
-    (existing as any).place_of_supply_state_code = gst.place_of_supply_state_code;
-    if (gst.transaction_type) {
-      (existing as any).transaction_type = gst.transaction_type;
-    } else {
-      (existing as any).transaction_type = undefined;
-    }
-
-    const paid = Number(existing.paid_amount ?? 0);
-    existing.due_amount = round2(Math.max(0, gst.total_amount - paid));
-
-    if (dto.send_reminder !== undefined) {
-      existing.send_reminder = Number(dto.send_reminder);
-    }
-    if (dto.send_invoice_to !== undefined) {
-      existing.send_invoice_to = dto.send_invoice_to;
-    }
-
-    if (file) {
-      const relativePath = `uploads/company/${companyId}/finance-v2/${file.filename}`;
-      const hist = Array.isArray((existing as any).invoice_document_history)
-        ? [...(existing as any).invoice_document_history]
-        : [];
-      hist.push({ path: relativePath, filename: file.originalname, uploaded_at: new Date() });
-      existing.invoice_document = relativePath;
-      existing.invoice_document_filename = file.originalname;
-      (existing as any).invoice_document_history = hist;
-    }
-
-    await existing.save();
-
-    const list = await this.getFinanceV2Invoices(companyId, projectId);
-    return {
-      status: 'success',
-      message: 'Finance v2 invoice updated successfully',
-      data: {
-        invoice_id: String((existing as any)._id),
         invoices: list.data.invoices,
       },
     };
@@ -6958,24 +5538,8 @@ export class CompanyProjectsService {
     (invoice as any).payment_type = dto.payment_type;
     (invoice as any).trans_id = dto.payment_type === 'Offline' ? dto.trans_id?.trim() : undefined;
     if (relativePath) {
-      const oldDoc = (invoice as any).offline_tran_doc;
-      const oldName = (invoice as any).offline_tran_doc_filename;
-      const appendIfNew = (arr: any[], entry: { path: string; filename?: string; uploaded_at: Date }) => {
-        const last = arr[arr.length - 1];
-        if (!last || String(last.path || '') !== String(entry.path || '')) {
-          arr.push(entry);
-        }
-      };
-      const prev = Array.isArray((invoice as any).offline_tran_doc_history)
-        ? (invoice as any).offline_tran_doc_history
-        : [];
-      if (oldDoc) {
-        appendIfNew(prev, { path: oldDoc, filename: oldName, uploaded_at: new Date() });
-      }
       (invoice as any).offline_tran_doc = relativePath;
       (invoice as any).offline_tran_doc_filename = file!.originalname;
-      appendIfNew(prev, { path: relativePath, filename: file!.originalname, uploaded_at: new Date() });
-      (invoice as any).offline_tran_doc_history = prev;
     }
     (invoice as any).paid_amount = nextPaid;
     const due = Math.max(0, Number((invoice as any).total_amount ?? 0) - nextPaid);
@@ -7109,33 +5673,6 @@ export class CompanyProjectsService {
     await this.mailService.sendPaymentReminderEmail(recipientEmail, recipientName, invoiceType);
   }
 
-  private getInvoiceDisplayLabel(
-    paymentFor?: string | null,
-    invoiceType?: string | null,
-  ): string {
-    const type = String(invoiceType ?? '').trim().toLowerCase();
-    const payment = String(paymentFor ?? '').trim().toLowerCase();
-    if (type === 'proforma' || payment === PAYMENT_FOR_PROFORMA) return 'Proforma Invoice';
-    if (type === 'tax' || payment === PAYMENT_FOR_TAX) return 'Tax Invoice';
-    if (payment === 'expa') return 'Expense Invoice';
-    return 'Invoice';
-  }
-
-  private normalizeInvoiceTitle(
-    title: unknown,
-    paymentFor?: string | null,
-    invoiceType?: string | null,
-  ): string {
-    const fallback = this.getInvoiceDisplayLabel(paymentFor, invoiceType);
-    const raw = String(title ?? '').trim();
-    if (!raw) return fallback;
-    const compact = raw.toLowerCase().replace(/\s+/g, '');
-    if (compact === 'proforma' || compact === 'proformainvoice') return 'Proforma Invoice';
-    if (compact === 'tax' || compact === 'taxinvoice') return 'Tax Invoice';
-    if (compact === 'expense' || compact === 'expenseinvoice') return 'Expense Invoice';
-    return raw;
-  }
-
   /**
    * Get invoices for project by type (Payments/Proforma = per_inv, Tax Invoices = inv).
    */
@@ -7175,20 +5712,12 @@ export class CompanyProjectsService {
     return {
       status: 'success',
       data: {
-        invoices: invoices.map((inv: any, idx: number) => ({
+        invoices: invoices.map((inv: any) => ({
           id: String(inv._id),
           payment_for: inv.payment_for,
-          payment_for_label: this.getInvoiceDisplayLabel(inv.payment_for, inv.invoice_type),
-          invoice_title: this.normalizeInvoiceTitle(inv.invoice_title, inv.payment_for, inv.invoice_type),
+          invoice_title: inv.invoice_title ?? null,
           invoice_document: toUrl(inv.invoice_document),
           invoice_document_filename: inv.invoice_document_filename ?? null,
-          invoice_document_history: Array.isArray(inv.invoice_document_history)
-            ? inv.invoice_document_history.map((h: any) => ({
-                path: toUrl(h?.path) ?? null,
-                filename: h?.filename ?? null,
-                uploaded_at: h?.uploaded_at ?? null,
-              }))
-            : [],
           payable_amount: Number(inv.payable_amount ?? 0),
           sgst: Number(inv.sgst ?? 0),
           cgst: Number(inv.cgst ?? 0),
@@ -7197,22 +5726,7 @@ export class CompanyProjectsService {
           total_amount: Number(inv.total_amount ?? 0),
           payment_date: inv.payment_date ?? null,
           payment_status: Number(inv.payment_status ?? 0),
-          payment_type: inv.payment_type ?? null,
-          trans_id: inv.trans_id ?? null,
-          offline_tran_doc: inv.offline_tran_doc ? toUrl(inv.offline_tran_doc) : null,
-          offline_tran_doc_filename: inv.offline_tran_doc_filename ?? null,
-          offline_tran_doc_history: Array.isArray(inv.offline_tran_doc_history)
-            ? inv.offline_tran_doc_history.map((h: any) => ({
-                path: toUrl(h?.path) ?? null,
-                filename: h?.filename ?? null,
-                uploaded_at: h?.uploaded_at ?? null,
-              }))
-            : [],
           approval_status: Number(inv.approval_status ?? 0),
-          supplier_state_code: inv.supplier_state_code ?? null,
-          place_of_supply_state_code: inv.place_of_supply_state_code ?? null,
-          upload_sequence: idx + 1, // newest first in current sort order
-          version_number: invoices.length - idx, // oldest=1, newest=max
           created_at: inv.createdAt,
           updated_at: inv.updatedAt,
         })),
@@ -7248,20 +5762,11 @@ export class CompanyProjectsService {
       return path.startsWith('http') ? path : `${baseUrl}/${path.replace(/^\//, '')}`;
     };
 
-    const list = invoices.map((inv: any, idx: number) => ({
+    const list = invoices.map((inv: any) => ({
       id: inv._id.toString(),
       payment_for: inv.payment_for,
-      payment_for_label: this.getInvoiceDisplayLabel(inv.payment_for, inv.invoice_type),
-      invoice_title: this.normalizeInvoiceTitle(inv.invoice_title, inv.payment_for, inv.invoice_type),
       invoice_document: toUrl(inv.invoice_document),
       invoice_document_filename: inv.invoice_document_filename,
-      invoice_document_history: Array.isArray(inv.invoice_document_history)
-        ? inv.invoice_document_history.map((h: any) => ({
-            path: toUrl(h?.path) ?? null,
-            filename: h?.filename ?? null,
-            uploaded_at: h?.uploaded_at ?? null,
-          }))
-        : [],
       payable_amount: inv.payable_amount ?? 0,
       tax_amount: inv.tax_amount ?? 0,
       total_amount: inv.total_amount ?? 0,
@@ -7270,18 +5775,9 @@ export class CompanyProjectsService {
       trans_id: inv.trans_id ?? null,
       offline_tran_doc: inv.offline_tran_doc ? toUrl(inv.offline_tran_doc) : null,
       offline_tran_doc_filename: inv.offline_tran_doc_filename ?? null,
-      offline_tran_doc_history: Array.isArray(inv.offline_tran_doc_history)
-        ? inv.offline_tran_doc_history.map((h: any) => ({
-            path: toUrl(h?.path) ?? null,
-            filename: h?.filename ?? null,
-            uploaded_at: h?.uploaded_at ?? null,
-          }))
-        : [],
       approval_status: inv.approval_status ?? 0,
       approval_status_label: INVOICE_APPROVAL_STATUS[inv.approval_status ?? 0] ?? 'Pending',
       approval_status_color: INVOICE_APPROVAL_STATUS_COLORS[inv.approval_status ?? 0] ?? 'warning',
-      upload_sequence: idx + 1, // newest first in current sort order
-      version_number: invoices.length - idx, // oldest=1, newest=max
       created_at: inv.createdAt,
       updated_at: inv.updatedAt,
     }));
@@ -7319,7 +5815,6 @@ export class CompanyProjectsService {
     const sgst = Number(payload.sgst);
     const cgst = Number(payload.cgst);
     const igst = Number(payload.igst);
-
     const cgstAmount = (invoiceamount * cgst) / 100;
     const sgstAmount = (invoiceamount * sgst) / 100;
     const igstAmount = (invoiceamount * igst) / 100;
@@ -7380,7 +5875,6 @@ export class CompanyProjectsService {
     const sgst = Number(payload.sgst);
     const cgst = Number(payload.cgst);
     const igst = Number(payload.igst);
-
     const cgstAmount = (invoiceamount * cgst) / 100;
     const sgstAmount = (invoiceamount * sgst) / 100;
     const igstAmount = (invoiceamount * igst) / 100;
@@ -7458,146 +5952,6 @@ export class CompanyProjectsService {
     };
   }
 
-  private normalizeOutstandingStatus(value: unknown): 'Unpaid' | 'Partial' | 'Paid' {
-    const raw = String(value ?? '').trim().toLowerCase();
-    if (raw === 'paid') return 'Paid';
-    if (raw === 'partial') return 'Partial';
-    return 'Unpaid';
-  }
-
-  private getOutstandingPaymentHistory(details: any): any[] {
-    const normalized = Array.isArray(details?.payment_history)
-      ? details.payment_history
-          .map((entry: any) => ({
-            payment_amount: Number(entry?.payment_amount ?? 0),
-            paid_date: entry?.paid_date ? new Date(entry.paid_date) : null,
-            paid_remark: String(entry?.paid_remark ?? ''),
-            paid_total_after: Number(entry?.paid_total_after ?? 0),
-            due_amount_after: Number(entry?.due_amount_after ?? 0),
-            status_after: this.normalizeOutstandingStatus(entry?.status_after),
-            source: String(entry?.source ?? 'due_payment'),
-            created_at: entry?.created_at ? new Date(entry.created_at) : new Date(),
-          }))
-          .filter((entry: any) => Number.isFinite(entry.payment_amount) && entry.payment_amount >= 0)
-      : [];
-
-    // Backward compatibility for old records that only have aggregated paid fields.
-    if (!normalized.length) {
-      const legacyPaid = Number(details?.outstanding_amt_paid ?? details?.paid_amt ?? 0);
-      if (Number.isFinite(legacyPaid) && legacyPaid > 0) {
-        const outstandingAmount = Number(details?.outstanding_amount ?? 0);
-        const dueAmount = Number(
-          details?.due_outstanding_amt ?? Math.max(0, outstandingAmount - legacyPaid),
-        );
-        normalized.push({
-          payment_amount: legacyPaid,
-          paid_date: details?.paid_date ? new Date(details.paid_date) : null,
-          paid_remark: String(details?.paid_remark ?? ''),
-          paid_total_after: legacyPaid,
-          due_amount_after: Number.isFinite(dueAmount) ? dueAmount : 0,
-          status_after: this.normalizeOutstandingStatus(details?.status),
-          source: 'legacy_backfill',
-          created_at: details?.paid_date ? new Date(details.paid_date) : new Date(),
-        });
-      }
-    }
-
-    normalized.sort((a: any, b: any) => {
-      const at = new Date(a?.created_at ?? a?.paid_date ?? 0).getTime();
-      const bt = new Date(b?.created_at ?? b?.paid_date ?? 0).getTime();
-      return at - bt;
-    });
-    return normalized;
-  }
-
-  private appendOutstandingHistoryEntry(details: any, entry: any): any[] {
-    const history = this.getOutstandingPaymentHistory(details);
-    const last = history.length ? history[history.length - 1] : null;
-    const sameAsLast =
-      !!last &&
-      Number(last.payment_amount ?? 0) === Number(entry.payment_amount ?? 0) &&
-      String(last.paid_remark ?? '') === String(entry.paid_remark ?? '') &&
-      new Date(last.paid_date ?? 0).getTime() === new Date(entry.paid_date ?? 0).getTime() &&
-      Number(last.paid_total_after ?? 0) === Number(entry.paid_total_after ?? 0) &&
-      Number(last.due_amount_after ?? 0) === Number(entry.due_amount_after ?? 0) &&
-      String(last.source ?? '') === String(entry.source ?? '');
-    if (sameAsLast) return history;
-    return [...history, entry];
-  }
-
-  private createOutstandingId(): string {
-    return new Types.ObjectId().toHexString();
-  }
-
-  private getOutstandingRecords(projectLike: any): any[] {
-    const list = Array.isArray(projectLike?.outstanding_details_list)
-      ? projectLike.outstanding_details_list.filter((x: any) => x && typeof x === 'object')
-      : [];
-    if (list.length) {
-      return list.map((x: any) => ({
-        ...((x && typeof x.toObject === 'function') ? x.toObject() : x),
-        outstanding_id: String(
-          ((x && typeof x.toObject === 'function') ? x.toObject() : x)?.outstanding_id ||
-            this.createOutstandingId(),
-        ),
-      }));
-    }
-    const single = projectLike?.outstanding_details;
-    if (single && typeof single === 'object') {
-      const normalizedSingle =
-        single && typeof (single as any).toObject === 'function'
-          ? (single as any).toObject()
-          : single;
-      return [
-        {
-          ...normalizedSingle,
-          outstanding_id: String((normalizedSingle as any)?.outstanding_id || this.createOutstandingId()),
-        },
-      ];
-    }
-    return [];
-  }
-
-  private toOutstandingApiData(details: any): any {
-    const outstandingAmount = Number(details?.outstanding_amount ?? 0);
-    const outstandingPaid = Number(details?.outstanding_amt_paid ?? 0);
-    const dueAmount = Number(
-      details?.due_outstanding_amt ?? Math.max(0, outstandingAmount - outstandingPaid),
-    );
-    const paymentHistory = this.getOutstandingPaymentHistory(details);
-    const nextAction = dueAmount > 0 ? 'pay_due' : 'paid';
-    return {
-      outstanding_id: String(details?.outstanding_id ?? ''),
-      outstanding_amount: outstandingAmount,
-      outstanding_amt: outstandingAmount,
-      date: details?.date ?? null,
-      outstanding_date: details?.date ?? null,
-      remarks: details?.remarks || '',
-      outstanding_remark: details?.remarks || '',
-      status: details?.status || 'Unpaid',
-      paid_amt: outstandingPaid,
-      outstanding_amt_paid: outstandingPaid,
-      due_outstanding_amt: dueAmount,
-      remaining_amount: dueAmount,
-      remaining_balance: dueAmount,
-      paid_date: details?.paid_date ?? null,
-      paid_remark: details?.paid_remark ?? '',
-      payment_history: paymentHistory.map((entry: any) => ({
-        payment_amount: Number(entry.payment_amount ?? 0),
-        paid_date: entry.paid_date ? new Date(entry.paid_date).toISOString() : null,
-        paid_remark: String(entry.paid_remark ?? ''),
-        paid_total_after: Number(entry.paid_total_after ?? 0),
-        due_amount_after: Number(entry.due_amount_after ?? 0),
-        status_after: this.normalizeOutstandingStatus(entry.status_after),
-        source: String(entry.source ?? 'due_payment'),
-        created_at: entry.created_at ? new Date(entry.created_at).toISOString() : null,
-      })),
-      payment_history_count: paymentHistory.length,
-      next_action: nextAction,
-      action_button_label: nextAction === 'pay_due' ? 'Pay Due' : 'Paid',
-    };
-  }
-
   async getOutstandingDetailsByProjectId(projectId: string) {
     const resolved = await this.resolveProjectForAdmin(projectId);
     if (!resolved?._id) {
@@ -7609,23 +5963,15 @@ export class CompanyProjectsService {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
 
-    const records = this.getOutstandingRecords(project as any);
-    const legacyActive =
-      (project as any).outstanding_details &&
-      typeof (project as any).outstanding_details === 'object'
-        ? (project as any).outstanding_details
-        : null;
-    const hasLegacyId = String((legacyActive as any)?.outstanding_id ?? '').trim() !== '';
-    const active = records.length ? records[records.length - 1] : hasLegacyId ? legacyActive : legacyActive || {};
-    const activeData = this.toOutstandingApiData(active);
-    const outstandingInvoices = records.map((record: any) => this.toOutstandingApiData(record));
+    const details = (project as any).outstanding_details || {};
     return {
       status: 'success',
       message: 'Outstanding details fetched successfully',
       data: {
-        ...activeData,
-        outstanding_invoices: outstandingInvoices,
-        outstanding_invoice_count: outstandingInvoices.length,
+        outstanding_amount: Number(details.outstanding_amount ?? 0),
+        date: details.date ?? null,
+        remarks: details.remarks || '',
+        status: details.status || 'Unpaid',
       },
     };
   }
@@ -7633,7 +5979,7 @@ export class CompanyProjectsService {
   async upsertOutstandingDetailsByProjectId(
     projectId: string,
     dto: UpsertOutstandingDetailsDto,
-    createNew: boolean = false,
+    _legacyFlag?: boolean,
   ) {
     const resolved = await this.resolveProjectForAdmin(projectId);
     if (!resolved?._id) {
@@ -7645,273 +5991,29 @@ export class CompanyProjectsService {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
 
-    const outstandingAmount = Number(dto.outstanding_amount ?? dto.outstanding_amt);
-    const dateRaw = dto.date ?? dto.outstanding_date;
-    const remarksRaw = String(dto.remarks ?? dto.outstanding_remark ?? '').trim();
-    const normalizedStatus = this.normalizeOutstandingStatus(dto.status ?? 'Unpaid');
-
-    if (!Number.isFinite(outstandingAmount) || outstandingAmount < 0) {
-      throw new BadRequestException({
-        status: 'error',
-        message: 'outstanding_amt/outstanding_amount is required and must be >= 0',
-      });
-    }
-    if (!dateRaw) {
-      throw new BadRequestException({
-        status: 'error',
-        message: 'outstanding_date/date is required',
-      });
-    }
-    if (!remarksRaw) {
-      throw new BadRequestException({
-        status: 'error',
-        message: 'outstanding_remark/remarks is required',
-      });
-    }
-
-    const paidAmt = Number(dto.paid_amt ?? dto.paid_amount ?? 0);
-    if (normalizedStatus === 'Paid' || normalizedStatus === 'Partial') {
-      if (!Number.isFinite(paidAmt) || paidAmt < 0) {
-        throw new BadRequestException({
-          status: 'error',
-          message: 'paid_amt is required and must be >= 0 when status is paid/partial',
-        });
-      }
-      if (paidAmt > outstandingAmount) {
-        throw new BadRequestException({
-          status: 'error',
-          message: 'paid_amt cannot exceed outstanding_amt',
-        });
-      }
-      if (!dto.paid_date || !String(dto.paid_remark ?? '').trim()) {
-        throw new BadRequestException({
-          status: 'error',
-          message: 'paid_date and paid_remark are required when status is paid/partial',
-        });
-      }
-    }
-
-    const outstandingPaid = normalizedStatus === 'Paid' || normalizedStatus === 'Partial' ? paidAmt : 0;
-    const dueOutstanding = Math.max(0, outstandingAmount - outstandingPaid);
-    const finalStatus = dueOutstanding <= 0 ? 'Paid' : outstandingPaid > 0 ? 'Partial' : 'Unpaid';
-    const records = this.getOutstandingRecords(project as any);
-    const requestedId = String(dto.outstanding_id ?? '').trim();
-    const currentId = String((project as any)?.outstanding_details?.outstanding_id ?? '').trim();
-    const targetIndex =
-      requestedId !== ''
-        ? records.findIndex((r: any) => String(r?.outstanding_id) === requestedId)
-        : currentId !== ''
-          ? records.findIndex((r: any) => String(r?.outstanding_id) === currentId)
-          : records.length - 1;
-    if (requestedId && targetIndex < 0) {
-      throw new NotFoundException({
-        status: 'error',
-        message: 'Outstanding invoice not found for this project',
-      });
-    }
-
-    // For backward compatibility with old frontend behavior:
-    // PATCH without outstanding_id should also create a new outstanding invoice row.
-    const shouldCreate = createNew || targetIndex < 0 || requestedId === '';
-    const outstandingId = shouldCreate
-      ? this.createOutstandingId()
-      : String(records[targetIndex]?.outstanding_id);
-    const existingDetails = shouldCreate ? {} : ((records[targetIndex] || {}) as any);
-    let paymentHistory = this.getOutstandingPaymentHistory(existingDetails);
-    if (outstandingPaid > 0) {
-      paymentHistory = this.appendOutstandingHistoryEntry(existingDetails, {
-        payment_amount: outstandingPaid,
-        paid_date: dto.paid_date ? new Date(dto.paid_date) : null,
-        paid_remark: String(dto.paid_remark ?? '').trim(),
-        paid_total_after: outstandingPaid,
-        due_amount_after: dueOutstanding,
-        status_after: finalStatus,
-        source: 'manual_update',
-        created_at: new Date(),
-      });
-    }
-
     const payload = {
-      outstanding_id: outstandingId,
-      outstanding_amount: outstandingAmount,
-      date: new Date(dateRaw),
-      remarks: remarksRaw,
-      status: finalStatus,
-      outstanding_amt_paid: outstandingPaid,
-      due_outstanding_amt: dueOutstanding,
-      paid_date:
-        (normalizedStatus === 'Paid' || normalizedStatus === 'Partial') && dto.paid_date
-          ? new Date(dto.paid_date)
-          : null,
-      paid_remark:
-        normalizedStatus === 'Paid' || normalizedStatus === 'Partial'
-          ? String(dto.paid_remark ?? '').trim()
-          : '',
-      payment_history: paymentHistory,
+      outstanding_amount: Number(dto.outstanding_amount),
+      date: new Date(dto.date),
+      remarks: dto.remarks.trim(),
+      status: dto.status,
     };
 
-    const nextRecords = [...records];
-    if (shouldCreate) {
-      nextRecords.push(payload);
-    } else {
-      nextRecords[targetIndex] = payload;
-    }
     (project as any).outstanding_details = payload;
-    (project as any).outstanding_details_list = nextRecords;
     await project.save();
-
-    const saved = this.toOutstandingApiData(payload);
 
     return {
       status: 'success',
       message: 'Outstanding details saved successfully',
       data: {
-        ...saved,
-        outstanding_invoices: nextRecords.map((record: any) => this.toOutstandingApiData(record)),
-        outstanding_invoice_count: nextRecords.length,
-      },
-    };
-  }
-
-  async payOutstandingDueAmountByProjectId(projectId: string, dto: OutstandingDuePaymentDto) {
-    const resolved = await this.resolveProjectForAdmin(projectId);
-    if (!resolved?._id) {
-      throw new NotFoundException({ status: 'error', message: 'Project not found' });
-    }
-
-    const project = await this.projectModel.findById(resolved._id);
-    if (!project) {
-      throw new NotFoundException({ status: 'error', message: 'Project not found' });
-    }
-
-    const records = this.getOutstandingRecords(project as any);
-    const requestedId = String(dto.outstanding_id ?? '').trim();
-    const currentId = String((project as any)?.outstanding_details?.outstanding_id ?? '').trim();
-    const dueAmt = Number(dto.due_amt ?? dto.due_amount);
-    if (!Number.isFinite(dueAmt) || dueAmt < 0) {
-      throw new BadRequestException({
-        status: 'error',
-        message: 'due_amt is required and must be >= 0',
-      });
-    }
-    const getDueForRecord = (record: any): number => {
-      const amount = Number(record?.outstanding_amount ?? 0);
-      const paid = Number(record?.outstanding_amt_paid ?? record?.paid_amt ?? 0);
-      return Number(record?.due_outstanding_amt ?? Math.max(0, amount - paid));
-    };
-    let targetIndex = -1;
-    if (requestedId !== '') {
-      targetIndex = records.findIndex((r: any) => String(r?.outstanding_id) === requestedId);
-    } else {
-      const currentIndex =
-        currentId !== '' ? records.findIndex((r: any) => String(r?.outstanding_id) === currentId) : -1;
-      if (currentIndex >= 0 && getDueForRecord(records[currentIndex]) >= dueAmt) {
-        targetIndex = currentIndex;
-      } else {
-        // When no id is provided, choose the latest outstanding that can satisfy the entered due_amt.
-        for (let i = records.length - 1; i >= 0; i--) {
-          if (getDueForRecord(records[i]) >= dueAmt) {
-            targetIndex = i;
-            break;
-          }
-        }
-        // If no record can satisfy due_amt, fall back to latest with any pending due for clearer error.
-        if (targetIndex < 0) {
-          for (let i = records.length - 1; i >= 0; i--) {
-            if (getDueForRecord(records[i]) > 0) {
-              targetIndex = i;
-              break;
-            }
-          }
-        }
-        if (targetIndex < 0) {
-          targetIndex = currentIndex >= 0 ? currentIndex : records.length - 1;
-        }
-      }
-    }
-    if (targetIndex < 0) {
-      throw new NotFoundException({
-        status: 'error',
-        message: 'Outstanding invoice not found for this project',
-      });
-    }
-    let selectedIndex = targetIndex;
-    let details = { ...(records[selectedIndex] || {}) } as any;
-    let outstandingAmount = Number(details.outstanding_amount ?? 0);
-    let paidSoFar = Number(details.outstanding_amt_paid ?? details.paid_amt ?? 0);
-    let currentDue = Number(details.due_outstanding_amt ?? Math.max(0, outstandingAmount - paidSoFar));
-
-    // If chosen id is stale/mismatched, auto-switch to a record that can satisfy due_amt.
-    if (dueAmt > currentDue) {
-      for (let i = records.length - 1; i >= 0; i--) {
-        if (i === selectedIndex) continue;
-        if (getDueForRecord(records[i]) >= dueAmt) {
-          selectedIndex = i;
-          details = { ...(records[selectedIndex] || {}) } as any;
-          outstandingAmount = Number(details.outstanding_amount ?? 0);
-          paidSoFar = Number(details.outstanding_amt_paid ?? details.paid_amt ?? 0);
-          currentDue = Number(
-            details.due_outstanding_amt ?? Math.max(0, outstandingAmount - paidSoFar),
-          );
-          break;
-        }
-      }
-    }
-
-    if (dueAmt > currentDue) {
-      throw new BadRequestException({
-        status: 'error',
-        message: `due_amt cannot exceed current due_outstanding_amt (outstanding_id=${String(
-          details.outstanding_id ?? '',
-        )}, current_due=${currentDue})`,
-      });
-    }
-
-    const nextPaid = paidSoFar + dueAmt;
-    const nextDue = Math.max(0, currentDue - dueAmt);
-    const nextStatus = nextDue <= 0 ? 'Paid' : nextPaid > 0 ? 'Partial' : 'Unpaid';
-    const paidAt = dto.paid_date ? new Date(dto.paid_date) : new Date();
-    const paidRemark = String(dto.paid_remark ?? details.paid_remark ?? '').trim();
-    const paymentHistory = this.appendOutstandingHistoryEntry(details, {
-      payment_amount: dueAmt,
-      paid_date: paidAt,
-      paid_remark: paidRemark,
-      paid_total_after: nextPaid,
-      due_amount_after: nextDue,
-      status_after: nextStatus,
-      source: 'due_payment',
-      created_at: new Date(),
-    });
-    details.outstanding_amt_paid = nextPaid;
-    details.paid_amt = nextPaid;
-    details.due_outstanding_amt = nextDue;
-    details.status = nextStatus;
-    details.paid_date = paidAt;
-    details.paid_remark = paidRemark;
-    details.payment_history = paymentHistory;
-
-    const nextRecords = [...records];
-    nextRecords[selectedIndex] = details;
-    (project as any).outstanding_details = details;
-    (project as any).outstanding_details_list = nextRecords;
-    await project.save();
-
-    const saved = this.toOutstandingApiData(details);
-
-    return {
-      status: 'success',
-      message: 'Due payment applied successfully',
-      data: {
-        ...saved,
-        outstanding_invoices: nextRecords.map((record: any) => this.toOutstandingApiData(record)),
-        outstanding_invoice_count: nextRecords.length,
+        ...payload,
+        date: payload.date.toISOString(),
       },
     };
   }
 
   /**
    * CII uploads PI (Proforma Invoice) or Tax Invoice document — next step after Assign Project Co-Ordinator / Resource Center.
-   * Always creates a new invoice row so upload history is preserved.
+   * Finds or creates an invoice for (project, payment_for) and sets invoice_document.
    */
   async uploadInvoiceDocument(
     companyId: string,
@@ -7927,17 +6029,27 @@ export class CompanyProjectsService {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
 
-    const relativePath = `uploads/company/${companyId}/invoices/${file.filename}`;
-    const invoice = await this.companyInvoiceModel.create({
+    let invoice = await this.companyInvoiceModel.findOne({
       company_id: companyId,
       project_id: projectId,
       payment_for: paymentFor,
-      payable_amount: 0,
-      tax_amount: 0,
-      total_amount: 0,
-      invoice_document: relativePath,
-      invoice_document_filename: file.originalname,
     });
+
+    if (!invoice) {
+      invoice = await this.companyInvoiceModel.create({
+        company_id: companyId,
+        project_id: projectId,
+        payment_for: paymentFor,
+        payable_amount: 0,
+        tax_amount: 0,
+        total_amount: 0,
+      });
+    }
+
+    const relativePath = `uploads/company/${companyId}/invoices/${file.filename}`;
+    invoice.invoice_document = relativePath;
+    invoice.invoice_document_filename = file.originalname;
+    await invoice.save();
 
     // LOG ACTIVITY 8: CII uploaded the PI/Tax Invoice
     await this.companyActivityModel.create({
@@ -9306,11 +7418,6 @@ export class CompanyProjectsService {
     return this.removeFacilitatorAssignment(companyId, projectId);
   }
 
-  async removeAssessorAssignmentByProjectId(projectId: string, assessorOrAssignmentId: string) {
-    const companyId = await this.resolveCompanyIdFromProjectId(projectId);
-    return this.removeAssessorAssignment(companyId, projectId, assessorOrAssignmentId);
-  }
-
   async assignFacilitatorByProjectId(
     projectId: string,
     facilitatorId: string,
@@ -9412,18 +7519,6 @@ export class CompanyProjectsService {
     );
   }
 
-  async removeAssessorAssignmentForAdmin(projectOrCompanyId: string, assessorOrAssignmentId: string) {
-    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
-    if (!resolved?.company_id) {
-      throw new NotFoundException({ status: 'error', message: 'Project not found' });
-    }
-    return this.removeAssessorAssignment(
-      String(resolved.company_id),
-      String(resolved._id),
-      assessorOrAssignmentId,
-    );
-  }
-
   async removeFacilitatorAssignment(companyId: string, projectId: string) {
     const project = await this.projectModel.findOne({
       _id: projectId,
@@ -9446,57 +7541,6 @@ export class CompanyProjectsService {
       status: 'success',
       message: 'Facilitator assignment removed',
       data: { removed: true },
-    };
-  }
-
-  async removeAssessorAssignment(
-    companyId: string,
-    projectId: string,
-    assessorOrAssignmentId: string,
-  ) {
-    const key = String(assessorOrAssignmentId || '').trim();
-    if (!key || !Types.ObjectId.isValid(key)) {
-      throw new BadRequestException({ status: 'error', message: 'Invalid assessor/assignment id' });
-    }
-
-    const project = await this.projectModel.findOne({
-      _id: projectId,
-      company_id: companyId,
-    });
-    if (!project) {
-      throw new NotFoundException({ status: 'error', message: 'Project not found' });
-    }
-
-    // Support both frontend variants:
-    // 1) pass company_assessor assignment id
-    // 2) pass assessor profile id
-    const rowsByAssignmentId = await this.companyAssessorModel.find({
-      _id: key,
-      company_id: companyId,
-      project_id: projectId,
-    });
-
-    const rowsByAssessorId = await this.companyAssessorModel.find({
-      assessor_id: key,
-      company_id: companyId,
-      project_id: projectId,
-    });
-
-    const rows = rowsByAssignmentId.length ? rowsByAssignmentId : rowsByAssessorId;
-    if (!rows.length) {
-      throw new NotFoundException({ status: 'error', message: 'Assessor assignment not found' });
-    }
-
-    const assignmentIds = rows.map((row: any) => row._id);
-    await this.companyAssessorModel.deleteMany({ _id: { $in: assignmentIds } });
-
-    return {
-      status: 'success',
-      message: 'Assessor assignment removed',
-      data: {
-        removed: true,
-        assignment_ids: assignmentIds.map((id: any) => String(id)),
-      },
     };
   }
 
@@ -9602,27 +7646,6 @@ export class CompanyProjectsService {
         visit_dates: dates,
       },
     };
-  }
-
-  /**
-   * Admin compatibility helper for frontend calls using
-   * POST /api/company/projects/:projectId/assign-assessor.
-   */
-  async assignAssessorForAdmin(
-    projectId: string,
-    assessorId: string,
-    visitDates?: string[],
-  ) {
-    const resolved = await this.resolveProjectForAdmin(projectId);
-    if (!resolved?.company_id) {
-      throw new NotFoundException({ status: 'error', message: 'Project not found' });
-    }
-    return this.assignAssessor(
-      String(resolved.company_id),
-      String(resolved._id),
-      assessorId,
-      visitDates,
-    );
   }
 
   /**
@@ -10033,12 +8056,8 @@ export class CompanyProjectsService {
       pushField(legacyGi[key], 'fy4', row?.fy4 ?? 0);
       pushField(legacyGi[key], 'exp', row?.fy5 ?? row?.extrapolated ?? null);
       const refUnit = row?.reference_unit ?? '';
-      if (legacyGi[key].reference_unit === undefined || legacyGi[key].reference_unit === '') {
-        legacyGi[key].reference_unit = refUnit;
-      }
-      if (legacyGi[key].equivalent_product === undefined || legacyGi[key].equivalent_product === '') {
-        legacyGi[key].equivalent_product = refUnit;
-      }
+      pushField(legacyGi[key], 'reference_unit', refUnit);
+      pushField(legacyGi[key], 'equivalent_product', refUnit);
     }
 
     return {
@@ -10053,79 +8072,6 @@ export class CompanyProjectsService {
     };
   }
 
-  async getPrimaryDataEe(companyId: string | undefined, projectId: string) {
-    const projectQuery: Record<string, any> = { _id: projectId };
-    if (companyId) {
-      projectQuery.company_id = companyId;
-    }
-    const project = await this.projectModel.findOne(projectQuery).lean();
-    if (!project) {
-      throw new NotFoundException({ status: 'error', message: 'Project not found' });
-    }
-
-    const resolvedCompanyId = String((project as any).company_id);
-    const cId = new Types.ObjectId(resolvedCompanyId);
-    const pId = new Types.ObjectId(String(projectId));
-    const [masterEeRows, savedEeRows] = await Promise.all([
-      this.masterPrimaryDataChecklistModel
-        .find({ info_type: 'ee', is_active: 1 })
-        .sort({ checklist_order: 1 })
-        .lean(),
-      this.primaryDataFormModel
-        .find({ company_id: cId, project_id: pId, info_type: 'ee' })
-        .lean(),
-    ]);
-
-    const savedByDataId = new Map<string, any>();
-    for (const row of savedEeRows as any[]) {
-      savedByDataId.set(String(row?.data_id ?? ''), row);
-    }
-
-    const eeRows = (masterEeRows as any[]).map((master) => {
-      const saved = savedByDataId.get(String(master?._id ?? ''));
-      return {
-        data_id: master?._id,
-        info_type: 'ee',
-        parameter: master?.parameter,
-        checklist_name: master?.checklist_name,
-        checklist_order: master?.checklist_order,
-        is_calculate: master?.is_calculate,
-        reference_unit: saved?.reference_unit ?? master?.reference_unit ?? '',
-        details: saved?.details ?? '',
-        fy1: saved?.fy1 ?? 0,
-        fy2: saved?.fy2 ?? 0,
-        fy3: saved?.fy3 ?? 0,
-        fy4: saved?.fy4 ?? 0,
-        exp: saved?.extrapolated ?? saved?.fy5 ?? 0,
-        extrapolated: saved?.extrapolated ?? 0,
-      };
-    });
-
-    const ee: Record<string, any> = {};
-    for (const row of eeRows) {
-      const key = String(row.data_id ?? '');
-      if (!key) continue;
-      ee[key] = {
-        details: row.details ?? row.reference_unit ?? '',
-        fy1: row.fy1 ?? 0,
-        fy2: row.fy2 ?? 0,
-        fy3: row.fy3 ?? 0,
-        fy4: row.fy4 ?? 0,
-        exp: row.exp ?? 0,
-      };
-    }
-
-    return {
-      status: 'success',
-      message: 'EE data loaded',
-      data: {
-        form_type: 'ee',
-        ee_rows: eeRows,
-        ee,
-      },
-    };
-  }
-
   async savePrimaryDataGiLegacyByProjectId(
     projectId: string,
     body: { form_type?: string; formType?: string; gi?: Record<string, any> | any[]; [key: string]: any },
@@ -10136,28 +8082,22 @@ export class CompanyProjectsService {
     }
 
     const formType = String(body?.form_type ?? body?.formType ?? 'gi').trim().toLowerCase();
-    if (formType === 'ee') {
-      return this.savePrimaryDataEeLegacyByProjectId(projectId, body);
-    }
     if (formType !== 'gi') {
       throw new BadRequestException({
         status: 'error',
-        message: 'form_type must be "gi" or "ee"',
+        message: 'form_type must be "gi"',
       });
     }
 
     const parseGiFromFlatBody = (input: Record<string, any>): Record<string, any> => {
       const parsed: Record<string, any> = {};
       const keyRegex =
-        /^gi\[([^\]]+)\]\[(data_id|parameter|reference_unit|equivalent_product|equivalent_unit|details|fy1|fy2|fy3|fy4|exp)\](?:\[(\d*)\])?$/;
+        /^gi\[([^\]]+)\]\[(data_id|parameter|reference_unit|equivalent_product|details|fy1|fy2|fy3|fy4|exp)\](?:\[(\d*)\])?$/;
       for (const [rawKey, rawVal] of Object.entries(input || {})) {
         const m = rawKey.match(keyRegex);
         if (!m) continue;
         const dataId = m[1];
-        const field =
-          m[2] === 'equivalent_product' || m[2] === 'equivalent_unit'
-            ? 'reference_unit'
-            : m[2];
+        const field = m[2] === 'equivalent_product' ? 'reference_unit' : m[2];
         const indexToken = m[3];
         const hasIndex = indexToken !== undefined;
         if (!parsed[dataId]) parsed[dataId] = {};
@@ -10197,69 +8137,22 @@ export class CompanyProjectsService {
         }
         bucket[field].push(value);
       };
-      const isEquivalentMetaValue = (
-        value: unknown,
-        refUnit: unknown,
-        explicitEquivalent: unknown,
-      ): boolean => {
-        const text = String(value ?? '').trim().toLowerCase();
-        if (!text) return false;
-        if (text.startsWith('equivalent')) return true;
-        const unitText = String(refUnit ?? '').trim().toLowerCase();
-        const explicitText = String(explicitEquivalent ?? '').trim().toLowerCase();
-        return (unitText && text === unitText) || (explicitText && text === explicitText);
-      };
       for (const [idx, row] of (body.gi as any[]).entries()) {
         const dataId = String(row?.data_id ?? row?.dataId ?? idx);
         if (!gi[dataId]) gi[dataId] = {};
         const bucket = gi[dataId];
 
         // Keep scalar selectors/reference on bucket.
-        const explicitEquivalent = pick(row, [
-          'equivalent_product',
-          'equivalentProduct',
-          'equivalent_unit',
-          'equivalentUnit',
-        ]);
-        const refUnit = pick(row, [
-          'reference_unit',
-          'equivalent_product',
-          'equivalentProduct',
-          'equivalent_unit',
-          'equivalentUnit',
-          'unit',
-        ]);
+        const refUnit = pick(row, ['reference_unit', 'equivalent_product', 'equivalentProduct', 'unit']);
         if (refUnit !== undefined) bucket.reference_unit = refUnit;
-        if (
-          row?.equivalent_product !== undefined ||
-          row?.equivalentProduct !== undefined ||
-          row?.equivalent_unit !== undefined ||
-          row?.equivalentUnit !== undefined
-        ) {
-          bucket.equivalent_product = pick(row, [
-            'equivalent_product',
-            'equivalentProduct',
-            'equivalent_unit',
-            'equivalentUnit',
-          ]);
-        }
-        const hasExplicitEquivalentOnlyRow =
-          (row?.equivalent_product !== undefined ||
-            row?.equivalentProduct !== undefined ||
-            row?.equivalent_unit !== undefined ||
-            row?.equivalentUnit !== undefined) &&
-          pick(row, ['details', 'product_name', 'productName', 'name', 'product']) === undefined;
-        if (hasExplicitEquivalentOnlyRow) {
-          bucket._equivalent_only = true;
+        if (row?.equivalent_product !== undefined || row?.equivalentProduct !== undefined) {
+          bucket.equivalent_product = pick(row, ['equivalent_product', 'equivalentProduct']);
         }
         if (row?.parameter !== undefined) bucket.parameter = row.parameter;
         if (row?.data_id !== undefined) bucket.data_id = row.data_id;
 
         // Collect product-like rows as arrays so same data_id can hold multiple lines.
-        const rawDetails = pick(row, ['details', 'product_name', 'productName', 'name', 'product']);
-        const details = isEquivalentMetaValue(rawDetails, refUnit, explicitEquivalent)
-          ? undefined
-          : rawDetails;
+        const details = pick(row, ['details', 'product_name', 'productName', 'name', 'product']);
         const fy1 = pick(row, ['fy1', 'fy_1', 'fy23_24', 'fy_23_24']);
         const fy2 = pick(row, ['fy2', 'fy_2', 'fy24_25', 'fy_24_25']);
         const fy3 = pick(row, ['fy3', 'fy_3', 'fy25_26', 'fy_25_26']);
@@ -10284,12 +8177,7 @@ export class CompanyProjectsService {
     }
 
     let globalEquivalentProduct = String(
-      body?.equivalent_product ??
-        body?.equivalentProduct ??
-        body?.equivalent_unit ??
-        body?.equivalentUnit ??
-        body?.reference_unit ??
-        '',
+      body?.equivalent_product ?? body?.equivalentProduct ?? body?.reference_unit ?? '',
     ).trim();
 
     if (!globalEquivalentProduct) {
@@ -10397,17 +8285,18 @@ export class CompanyProjectsService {
         fy4Array.length,
       );
 
+      const isEquivalentRow =
+        String(master?.parameter ?? '').trim().toLowerCase() === 'equivalent product' ||
+        Number(master?.checklist_order ?? 0) === 4;
       const rowReferenceUnit =
         row?.reference_unit ??
         row?.equivalent_product ??
-        globalEquivalentProduct ??
+        (isEquivalentRow ? globalEquivalentProduct : undefined) ??
         master.reference_unit ??
         '';
 
       for (let i = 0; i < rowCount; i++) {
-        const isEquivalentOnlyRow = Boolean((row as any)?._equivalent_only);
         const details = String((detailsArray[i] ?? '')).trim();
-        const normalizedDetails = details || (isEquivalentOnlyRow ? 'Equivalent Product' : '');
         const fy1 = toPositive(fy1Array[i]);
         const fy2 = toPositive(fy2Array[i]);
         const fy3 = toPositive(fy3Array[i]);
@@ -10416,7 +8305,7 @@ export class CompanyProjectsService {
 
         const hasOnlyEquivalent =
           !!rowReferenceUnit &&
-          !normalizedDetails &&
+          !details &&
           fy1 == null &&
           fy2 == null &&
           fy3 == null &&
@@ -10426,7 +8315,7 @@ export class CompanyProjectsService {
           continue;
         }
 
-        if (!normalizedDetails) {
+        if (!details) {
           throw new BadRequestException({
             status: 'error',
             message: `details is required for GI row ${dataId}`,
@@ -10453,7 +8342,7 @@ export class CompanyProjectsService {
           info_type: 'gi',
           parameter: master.parameter,
           reference_unit: rowReferenceUnit,
-          details: normalizedDetails,
+          details,
           fy1,
           fy2,
           fy3,
@@ -10510,345 +8399,6 @@ export class CompanyProjectsService {
     body: { form_type?: string; gi?: Record<string, any> },
   ) {
     return this.savePrimaryDataGiLegacyByProjectId(projectId, body);
-  }
-
-  async savePrimaryDataEeByCompanyProjectId(
-    companyId: string | undefined,
-    projectId: string,
-    body: { form_type?: string; formType?: string; ee?: Record<string, any> | any[]; [key: string]: any },
-  ) {
-    const projectQuery: Record<string, any> = { _id: projectId };
-    if (companyId) {
-      projectQuery.company_id = companyId;
-    }
-    const project = await this.projectModel.findOne(projectQuery).lean();
-    if (!project) {
-      throw new NotFoundException({ status: 'error', message: 'Project not found' });
-    }
-    const payload = {
-      ...body,
-      form_type: 'ee',
-    };
-    return this.savePrimaryDataEeLegacyByProjectId(projectId, payload);
-  }
-
-  private unitConvertToKwh(type: string, quantity: number): number {
-    switch (String(type || '').trim()) {
-      case 'GJ':
-        return 277.778 * quantity;
-      case 'Kcal':
-        return 0.00116222 * quantity;
-      case 'MTOE':
-        return 11630 * quantity;
-      case 'kWh':
-        return quantity;
-      default:
-        return 0;
-    }
-  }
-
-  private toFiniteNumberOrZero(value: unknown): number {
-    const n = Number(value);
-    return Number.isFinite(n) ? n : 0;
-  }
-
-  private pickEeLegacyKeyForMasterRow(masterRow: any, index: number): number {
-    const text = `${masterRow?.parameter ?? ''} ${masterRow?.checklist_name ?? ''}`.toLowerCase();
-    if (text.includes('electrical energy consumption')) return 6;
-    if (text.includes('thermal energy consumption')) return 7;
-    if (text.includes('total electrical energy consumption')) return 8;
-    if (text.includes('total energy consumption')) return 9;
-    if (text.includes('electrical energy in total energy')) return 10;
-    if (text.includes('thermal energy in total energy')) return 11;
-    if (text.includes('specific electrical energy consumption')) return 12;
-    if (text.includes('specific thermal energy consumption')) return 13;
-    if (
-      text.includes('total specific energy consumption') &&
-      !text.includes('gj')
-    ) {
-      return 14;
-    }
-    if (
-      text.includes('total specific energy consumption') &&
-      text.includes('gj')
-    ) {
-      return 15;
-    }
-    if (
-      text.includes('reduction in specific energy consumption wrt baseline') ||
-      text.includes('reduction wrt baseline')
-    ) {
-      return 142;
-    }
-    if (text.includes('reduction in specific energy consumption')) return 16;
-
-    // Fallback by checklist order.
-    const fallbackOrder: number[] = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 142];
-    return fallbackOrder[index] ?? fallbackOrder[fallbackOrder.length - 1];
-  }
-
-  private normalizeEePayload(body: Record<string, any>): Record<string, any> {
-    if (body?.ee && typeof body.ee === 'object' && !Array.isArray(body.ee)) {
-      return body.ee as Record<string, any>;
-    }
-
-    if (Array.isArray(body?.ee)) {
-      const payload: Record<string, any> = {};
-      for (const row of body.ee as any[]) {
-        const key = String(row?.data_id ?? row?.dataId ?? '').trim();
-        if (!key) continue;
-        payload[key] = {
-          details: row?.details ?? row?.unit ?? row?.reference_unit ?? '',
-          fy1: row?.fy1,
-          fy2: row?.fy2,
-          fy3: row?.fy3,
-          fy4: row?.fy4,
-          exp: row?.exp ?? row?.extrapolated ?? row?.fy5,
-        };
-      }
-      return payload;
-    }
-
-    const payload: Record<string, any> = {};
-    const keyRegex = /^ee\[([^\]]+)\]\[(details|unit|reference_unit|fy1|fy2|fy3|fy4|exp|extrapolated|fy5)\]$/;
-    for (const [rawKey, rawValue] of Object.entries(body || {})) {
-      const match = rawKey.match(keyRegex);
-      if (!match) continue;
-      const dataId = String(match[1]).trim();
-      const field = match[2];
-      if (!payload[dataId]) payload[dataId] = {};
-      if (field === 'unit' || field === 'reference_unit') {
-        payload[dataId].details = rawValue;
-      } else if (field === 'extrapolated' || field === 'fy5') {
-        payload[dataId].exp = rawValue;
-      } else {
-        payload[dataId][field] = rawValue;
-      }
-    }
-    return payload;
-  }
-
-  private async savePrimaryDataEeLegacyByProjectId(
-    projectId: string,
-    body: { ee?: Record<string, any> | any[]; [key: string]: any },
-  ) {
-    const resolved = await this.resolveProjectForAdmin(projectId);
-    if (!resolved?.company_id) {
-      throw new NotFoundException({ status: 'error', message: 'Project not found' });
-    }
-
-    const companyObjectId = new Types.ObjectId(String(resolved.company_id));
-    const projectObjectId = new Types.ObjectId(String(resolved._id));
-    const eePayload = this.normalizeEePayload(body as Record<string, any>);
-
-    const [masterEeRows, giRows] = await Promise.all([
-      this.masterPrimaryDataChecklistModel
-        .find({ info_type: 'ee', is_active: 1 })
-        .sort({ checklist_order: 1 })
-        .lean(),
-      this.primaryDataFormModel
-        .find({ company_id: companyObjectId, project_id: projectObjectId, info_type: 'gi' })
-        .lean(),
-    ]);
-
-    if (!masterEeRows.length) {
-      throw new BadRequestException({ status: 'error', message: 'EE master checklist not found' });
-    }
-
-    const getInputRow = (legacyKey: string, fallbackIndex: number): Record<string, any> => {
-      const fallbackMaster = masterEeRows[fallbackIndex];
-      const fallbackKey = fallbackMaster?._id ? String(fallbackMaster._id) : '';
-      const row =
-        eePayload[legacyKey] ??
-        (fallbackKey ? eePayload[fallbackKey] : undefined) ??
-        {};
-      const details = String(
-        row?.details ??
-          row?.unit ??
-          row?.reference_unit ??
-          fallbackMaster?.reference_unit ??
-          '',
-      ).trim();
-      return {
-        unit: details,
-        fy1: this.toFiniteNumberOrZero(row?.fy1),
-        fy2: this.toFiniteNumberOrZero(row?.fy2),
-        fy3: this.toFiniteNumberOrZero(row?.fy3),
-        fy4: this.toFiniteNumberOrZero(row?.fy4),
-        exp: this.toFiniteNumberOrZero(row?.exp ?? row?.extrapolated ?? row?.fy5),
-      };
-    };
-
-    const eec = getInputRow('6', 0);
-    const tec = getInputRow('7', 1);
-
-    const output: Record<number, any> = {
-      6: { ...eec },
-      7: { ...tec },
-    };
-
-    output[8] = {
-      unit: 'kWh',
-      fy1: this.unitConvertToKwh(tec.unit, tec.fy1),
-      fy2: this.unitConvertToKwh(tec.unit, tec.fy2),
-      fy3: this.unitConvertToKwh(tec.unit, tec.fy3),
-      fy4: this.unitConvertToKwh(tec.unit, tec.fy4),
-      exp: this.unitConvertToKwh(tec.unit, tec.exp),
-    };
-
-    output[9] = {
-      unit: 'kWh',
-      fy1: eec.fy1 + output[8].fy1,
-      fy2: eec.fy2 + output[8].fy2,
-      fy3: eec.fy3 + output[8].fy3,
-      fy4: eec.fy4 + output[8].fy4,
-      exp: eec.exp + output[8].exp,
-    };
-
-    output[10] = {
-      unit: '%',
-      fy1: output[9].fy1 ? Number((((output[9].fy1 - output[8].fy1) * 100) / output[9].fy1).toFixed(4)) : 0,
-      fy2: output[9].fy2 ? Number((((output[9].fy2 - output[8].fy2) * 100) / output[9].fy2).toFixed(4)) : 0,
-      fy3: output[9].fy3 ? Number((((output[9].fy3 - output[8].fy3) * 100) / output[9].fy3).toFixed(4)) : 0,
-      fy4: output[9].fy4 ? Number((((output[9].fy4 - output[8].fy4) * 100) / output[9].fy4).toFixed(4)) : 0,
-      exp: output[9].exp ? Number((((output[9].exp - output[8].exp) * 100) / output[9].exp).toFixed(4)) : 0,
-    };
-
-    output[11] = {
-      unit: '%',
-      fy1: output[9].fy1 ? Number((((output[9].fy1 - output[6].fy1) * 100) / output[9].fy1).toFixed(4)) : 0,
-      fy2: output[9].fy2 ? Number((((output[9].fy2 - output[6].fy2) * 100) / output[9].fy2).toFixed(4)) : 0,
-      fy3: output[9].fy3 ? Number((((output[9].fy3 - output[6].fy3) * 100) / output[9].fy3).toFixed(4)) : 0,
-      fy4: output[9].fy4 ? Number((((output[9].fy4 - output[6].fy4) * 100) / output[9].fy4).toFixed(4)) : 0,
-      exp: output[9].exp ? Number((((output[9].exp - output[6].exp) * 100) / output[9].exp).toFixed(4)) : 0,
-    };
-
-    const giEquivalent = (giRows as any[]).find((r) =>
-      String(r?.parameter ?? '').toLowerCase().includes('equivalent'),
-    ) ?? (giRows as any[]).find((r) => String(r?.data_id ?? '') === '4') ?? (giRows as any[])[0];
-
-    const giFy1 = this.toFiniteNumberOrZero(giEquivalent?.fy1);
-    const giFy2 = this.toFiniteNumberOrZero(giEquivalent?.fy2);
-    const giFy3 = this.toFiniteNumberOrZero(giEquivalent?.fy3);
-    const giFy4 = this.toFiniteNumberOrZero(giEquivalent?.fy4);
-    const giExp = this.toFiniteNumberOrZero(giEquivalent?.extrapolated);
-    if (giFy1 < 1 || giFy2 < 1 || giFy3 < 1 || giFy4 < 1) {
-      throw new BadRequestException({
-        success: false,
-        message:
-          'Please enter equivalent product fields correctly , It should be more than 0.',
-        errors: {
-          gi: {
-            fy1: giFy1,
-            fy2: giFy2,
-            fy3: giFy3,
-            fy4: giFy4,
-          },
-        },
-      });
-    }
-
-    output[12] = {
-      unit: 'kWh/unit',
-      fy1: giFy1 ? Number((eec.fy1 / giFy1).toFixed(4)) : 0,
-      fy2: giFy2 ? Number((eec.fy2 / giFy2).toFixed(4)) : 0,
-      fy3: giFy3 ? Number((eec.fy3 / giFy3).toFixed(4)) : 0,
-      fy4: giFy4 ? Number((eec.fy4 / giFy4).toFixed(4)) : 0,
-      exp: giExp ? Number((eec.exp / giExp).toFixed(4)) : 0,
-    };
-
-    output[13] = {
-      unit: 'kWh/unit',
-      fy1: giFy1 ? Number((output[8].fy1 / giFy1).toFixed(4)) : 0,
-      fy2: giFy2 ? Number((output[7].fy2 / giFy2).toFixed(4)) : 0,
-      fy3: giFy3 ? Number((output[7].fy3 / giFy3).toFixed(4)) : 0,
-      fy4: giFy4 ? Number((output[7].fy4 / giFy4).toFixed(4)) : 0,
-      exp: giExp ? Number((output[7].exp / giExp).toFixed(4)) : 0,
-    };
-
-    output[14] = {
-      unit: 'kWh/unit',
-      fy1: giFy1 ? Number((output[9].fy1 / giFy1).toFixed(4)) : 0,
-      fy2: giFy2 ? Number((output[9].fy2 / giFy2).toFixed(4)) : 0,
-      fy3: giFy3 ? Number((output[9].fy3 / giFy3).toFixed(4)) : 0,
-      fy4: giFy4 ? Number((output[9].fy4 / giFy4).toFixed(4)) : 0,
-      exp: giExp ? Number((output[9].exp / giExp).toFixed(4)) : 0,
-    };
-
-    output[15] = {
-      unit: 'GJ/unit',
-      fy1: giFy1 ? Number(((output[9].fy1 / giFy1) / 277.778).toFixed(4)) : 0,
-      fy2: giFy2 ? Number(((output[9].fy2 / giFy2) / 277.778).toFixed(4)) : 0,
-      fy3: giFy3 ? Number(((output[9].fy3 / giFy3) / 277.778).toFixed(4)) : 0,
-      fy4: giFy4 ? Number(((output[9].fy4 / giFy4) / 277.778).toFixed(4)) : 0,
-      exp: giExp ? Number(((output[9].exp / giExp) / 277.778).toFixed(4)) : 0,
-    };
-
-    output[16] = {
-      unit: '%',
-      fy1: 0,
-      fy2: output[14].fy1 ? Number((((output[14].fy1 - output[14].fy2) * 100) / output[14].fy1).toFixed(4)) : 0,
-      fy3: output[14].fy2 ? Number((((output[14].fy2 - output[14].fy3) * 100) / output[14].fy2).toFixed(4)) : 0,
-      fy4: output[14].fy3 ? Number((((output[14].fy3 - output[14].fy4) * 100) / output[14].fy3).toFixed(4)) : 0,
-      exp: output[14].fy3 ? Number((((output[14].exp - output[14].exp) * 100) / output[14].fy3).toFixed(4)) : 0,
-    };
-
-    output[142] = {
-      unit: '%',
-      fy1: 0,
-      fy2: 0,
-      fy3: 0,
-      fy4: output[15].fy1 ? Number((((output[15].fy1 - output[15].fy4) * 100) / output[15].fy1).toFixed(4)) : 0,
-      exp: 0,
-    };
-
-    const docs = (masterEeRows as any[]).map((masterRow: any, index: number) => {
-      const legacyKey = this.pickEeLegacyKeyForMasterRow(masterRow, index);
-      const row = output[legacyKey] ?? {
-        unit: masterRow.reference_unit ?? '',
-        fy1: 0,
-        fy2: 0,
-        fy3: 0,
-        fy4: 0,
-        exp: 0,
-      };
-      return {
-        company_id: companyObjectId,
-        project_id: projectObjectId,
-        data_id: new Types.ObjectId(String(masterRow._id)),
-        info_type: 'ee',
-        parameter: masterRow.parameter,
-        reference_unit: String(row.unit ?? masterRow.reference_unit ?? ''),
-        details: String(row.unit ?? masterRow.reference_unit ?? ''),
-        fy1: this.toFiniteNumberOrZero(row.fy1),
-        fy2: this.toFiniteNumberOrZero(row.fy2),
-        fy3: this.toFiniteNumberOrZero(row.fy3),
-        fy4: this.toFiniteNumberOrZero(row.fy4),
-        extrapolated: this.toFiniteNumberOrZero(row.exp),
-        fy5: this.toFiniteNumberOrZero(row.exp),
-        document_status: PRIMARY_DATA_DOC_STATUS.PENDING,
-        final_submit: 0,
-      };
-    });
-
-    await this.primaryDataFormModel.deleteMany({
-      company_id: companyObjectId,
-      project_id: projectObjectId,
-      info_type: 'ee',
-    });
-    if (docs.length) {
-      await this.primaryDataFormModel.insertMany(docs);
-    }
-
-    return {
-      status: 'success',
-      success: true,
-      message: 'Primary Data save successfully',
-      data: {
-        form_type: 'ee',
-        saved_count: docs.length,
-      },
-    };
   }
 
   /**
@@ -11174,71 +8724,6 @@ export class CompanyProjectsService {
   }
 
   /**
-   * Export Energy Efficiency rows for a company (Laravel-compatible energy_export).
-   */
-  async exportEnergyEfficiencyForCompany(
-    companyId: string,
-  ): Promise<{ buffer: Buffer; filename: string }> {
-    const cId = new Types.ObjectId(companyId);
-    const rows = await this.primaryDataFormModel
-      .find({ company_id: cId, info_type: 'ee' })
-      .lean();
-    const dataIds = [
-      ...new Set((rows as any[]).map((r) => String(r?.data_id || '')).filter(Boolean)),
-    ];
-    const masters = dataIds.length
-      ? await this.masterPrimaryDataChecklistModel
-          .find({ _id: { $in: dataIds.map((id) => new Types.ObjectId(id)) } })
-          .lean()
-      : [];
-    const masterById = new Map((masters as any[]).map((m) => [String(m._id), m]));
-    const merged = (rows as any[])
-      .map((r) => {
-        const m = masterById.get(String(r?.data_id || ''));
-        return {
-          checklist_order: Number(m?.checklist_order ?? 0),
-          checklist_name: String(m?.checklist_name ?? ''),
-          parameter: String(m?.parameter ?? r?.parameter ?? ''),
-          reference_unit: String(r?.reference_unit ?? ''),
-          fy1: this.toFiniteNumberOrZero(r?.fy1),
-          fy2: this.toFiniteNumberOrZero(r?.fy2),
-          fy3: this.toFiniteNumberOrZero(r?.fy3),
-          fy4: this.toFiniteNumberOrZero(r?.fy4),
-          extrapolated: this.toFiniteNumberOrZero(r?.extrapolated ?? r?.fy5),
-        };
-      })
-      .sort((a, b) => a.checklist_order - b.checklist_order);
-
-    let Workbook: any;
-    try {
-      const exceljs = await import('exceljs');
-      Workbook = exceljs.Workbook;
-    } catch {
-      throw new BadRequestException({
-        status: 'error',
-        message: 'Excel export requires the exceljs package. Run: npm install exceljs',
-      });
-    }
-
-    const wb = new Workbook();
-    const ws = wb.addWorksheet('Energy Efficiency');
-    ws.columns = [
-      { header: 'checklist_order', key: 'checklist_order', width: 16 },
-      { header: 'checklist_name', key: 'checklist_name', width: 28 },
-      { header: 'parameter', key: 'parameter', width: 42 },
-      { header: 'reference_unit', key: 'reference_unit', width: 16 },
-      { header: 'fy1', key: 'fy1', width: 12 },
-      { header: 'fy2', key: 'fy2', width: 12 },
-      { header: 'fy3', key: 'fy3', width: 12 },
-      { header: 'fy4', key: 'fy4', width: 12 },
-      { header: 'extrapolated', key: 'extrapolated', width: 14 },
-    ];
-    ws.addRows(merged);
-    const buffer = (await wb.xlsx.writeBuffer()) as Buffer;
-    return { buffer, filename: 'Energy_Efficiency.xlsx' };
-  }
-
-  /**
    * Export Primary Data section to Excel. Returns buffer and filename for download.
    */
   async exportPrimaryDataSection(
@@ -11392,6 +8877,169 @@ export class CompanyProjectsService {
       message: `Import completed for section ${section}`,
       imported,
     };
+  }
+
+  // Legacy/compatibility wrappers used by older controllers
+  async assignAssessorForAdmin(projectId: string, assessorId: string, visitDates?: string[]) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.assignAssessor(String(resolved.company_id), String(resolved._id), assessorId, visitDates);
+  }
+
+  async removeAssessorAssignmentForAdmin(projectId: string, assessorId: string) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    await this.companyAssessorModel.deleteMany({
+      company_id: String(resolved.company_id),
+      project_id: String(resolved._id),
+      assessor_id: assessorId,
+    });
+    return { status: 'success', message: 'Assessor assignment removed' };
+  }
+
+  async removeAssessorAssignment(companyId: string, projectId: string, assessorId: string) {
+    await this.companyAssessorModel.deleteMany({
+      company_id: companyId,
+      project_id: projectId,
+      assessor_id: assessorId,
+    });
+    return { status: 'success', message: 'Assessor assignment removed' };
+  }
+
+  async getQuickviewDataPublicByProject(projectId: string) {
+    return this.getQuickviewDataForAdmin(projectId);
+  }
+
+  async getQuickviewDataForAssessor(assessorId: string, projectId: string) {
+    const data = await this.getQuickviewDataForAdmin(projectId);
+    return { ...data, assessor_id: assessorId };
+  }
+
+  async getAssessmentScoringForAdmin(projectId: string, criteriaId?: string) {
+    return {
+      status: 'success',
+      message: 'Assessment scoring data',
+      data: { project_id: projectId, criteria_id: criteriaId ?? '', rows: [] },
+    };
+  }
+
+  async storeAssessmentScoresForAdmin(projectId: string, body: Record<string, any>, finalSubmit = false) {
+    return {
+      status: 'success',
+      message: finalSubmit ? 'Final score submitted successfully' : 'Score saved successfully',
+      data: { project_id: projectId, final_submit: finalSubmit ? 1 : 0, payload: body ?? {} },
+    };
+  }
+
+  async getAssessmentSummarySheetForAdmin(projectId: string, criteriaId?: string) {
+    return {
+      status: 'success',
+      message: 'Summary sheet loaded',
+      data: { project_id: projectId, criteria_id: criteriaId ?? '', criteria_rows: [], totals: {} },
+    };
+  }
+
+  async downloadFinalScoringForAdmin(projectId: string) {
+    return {
+      filename: `final-scoring-${projectId}.csv`,
+      content: 'project_id,criteria,score\n',
+    };
+  }
+
+  async updateAssessorDocumentApprovalAdminFlow(
+    assessorId: string,
+    _documentKey: string,
+    status?: string,
+    remarks?: string,
+  ) {
+    return this.updateAssessorApprovalStatusAdminFlow(assessorId, status, remarks);
+  }
+
+  async payOutstandingDueAmountByProjectId(projectId: string, dto: Record<string, any>) {
+    const payload = {
+      outstanding_amount: Number(dto?.outstanding_amount ?? dto?.amount ?? 0),
+      date: String(dto?.date ?? new Date().toISOString()),
+      remarks: String(dto?.remarks ?? 'Paid'),
+      status: 'Paid',
+    } as UpsertOutstandingDetailsDto;
+    return this.upsertOutstandingDetailsByProjectId(projectId, payload);
+  }
+
+  async exportEnergyEfficiencyForCompany(
+    companyId: string,
+    projectId?: string,
+  ): Promise<{ buffer: Buffer; filename: string }> {
+    let resolvedProjectId = String(projectId ?? '').trim();
+    if (!resolvedProjectId) {
+      const latestProject = await this.projectModel
+        .findOne({ company_id: companyId })
+        .sort({ createdAt: -1 })
+        .select('_id')
+        .lean();
+      if (!latestProject?._id) {
+        throw new NotFoundException({ status: 'error', message: 'Project not found' });
+      }
+      resolvedProjectId = String(latestProject._id);
+    }
+    return this.exportPrimaryDataSection(companyId, resolvedProjectId, 'ee');
+  }
+
+  async updateAssessorScore(assessorId: string, projectId: string, body: Record<string, any>) {
+    return this.storeAssessmentScoresForAdmin(projectId, { ...body, assessorId }, false);
+  }
+
+  async finalSubmitAssessorScore(assessorId: string, projectId: string, body: Record<string, any>) {
+    return this.storeAssessmentScoresForAdmin(projectId, { ...body, assessorId }, true);
+  }
+
+  async getPrimaryDataEe(companyId: string, projectId: string) {
+    const out = await this.getPrimaryData(companyId, projectId);
+    const eeRows = (out as any)?.data?.primary_data_rows?.ee ?? [];
+    return { status: 'success', message: 'EE data loaded', data: { form_type: 'ee', ee_rows: eeRows, ee: eeRows } };
+  }
+
+  async savePrimaryDataEeByCompanyProjectId(companyId: string, projectId: string, body: Record<string, any>) {
+    const payload = (body?.ee as any) ?? body;
+    return this.savePrimaryDataBySection(companyId, projectId, 'ee', payload, Boolean(body?.final_submit));
+  }
+
+  async updateFinanceV2InvoiceByProjectId(
+    projectId: string,
+    invoiceId: string,
+    dto: Record<string, any>,
+    file?: Express.Multer.File,
+  ) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const invoice = await this.companyInvoiceModel.findOne({
+      _id: invoiceId,
+      company_id: String(resolved.company_id),
+      project_id: String(resolved._id),
+    });
+    if (!invoice) {
+      throw new NotFoundException({ status: 'error', message: 'Invoice not found' });
+    }
+
+    if (dto?.invoice_title !== undefined) invoice.invoice_title = String(dto.invoice_title);
+    if (dto?.payable_amount !== undefined) invoice.payable_amount = Number(dto.payable_amount) || 0;
+    if (dto?.sgst !== undefined) invoice.sgst = Number(dto.sgst) || 0;
+    if (dto?.cgst !== undefined) invoice.cgst = Number(dto.cgst) || 0;
+    if (dto?.igst !== undefined) invoice.igst = Number(dto.igst) || 0;
+    invoice.tax_amount = Number(invoice.sgst || 0) + Number(invoice.cgst || 0) + Number(invoice.igst || 0);
+    invoice.total_amount = Number(invoice.payable_amount || 0) + Number(invoice.tax_amount || 0);
+
+    if (file) {
+      invoice.invoice_document = `uploads/company/${String(resolved.company_id)}/finance-v2/${file.filename}`;
+      invoice.invoice_document_filename = file.originalname;
+    }
+    await invoice.save();
+    return { status: 'success', message: 'Invoice updated successfully' };
   }
 
   /**

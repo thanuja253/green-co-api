@@ -411,17 +411,68 @@ export class CompanyAuthService {
     };
   }
 
-  async getCompaniesList(searchTerm?: string) {
+  async getCompaniesList(searchTerm?: string, page?: string, limit?: string) {
     const query: any = {};
-    if (searchTerm) {
-      query.name = { $regex: searchTerm, $options: 'i' };
+    if (searchTerm?.trim()) {
+      query.name = { $regex: searchTerm.trim(), $options: 'i' };
     }
 
-    const companies = await this.companyModel.find(query).select('name').limit(20);
+    // Backward-compatible autocomplete response.
+    if (page == null && limit == null) {
+      const companies = await this.companyModel.find(query).select('name').limit(20);
+      return companies.map((company) => ({
+        value: company.name,
+      }));
+    }
 
-    return companies.map((company) => ({
-      value: company.name,
+    // Legacy admin companies list expects paginated richer payload.
+    const parsedPage = Number.parseInt(String(page ?? '1'), 10);
+    const parsedLimit = Number.parseInt(String(limit ?? '10'), 10);
+    const safePage = Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1;
+    const safeLimit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : 10;
+    const cappedLimit = Math.min(safeLimit, 100);
+    const skip = (safePage - 1) * cappedLimit;
+
+    const [total, companies] = await Promise.all([
+      this.companyModel.countDocuments(query),
+      this.companyModel
+        .find(query)
+        .select('_id name email mobile account_status verified_status createdAt')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(cappedLimit),
+    ]);
+
+    const rows = companies.map((company) => ({
+      id: company._id?.toString?.() ?? String(company._id),
+      company_id: company._id?.toString?.() ?? String(company._id),
+      name: company.name ?? '',
+      company_name: company.name ?? '',
+      email: company.email ?? '',
+      mobile: company.mobile ?? '',
+      account_status: company.account_status ?? '0',
+      verified_status: company.verified_status ?? '0',
+      created_at: (company as any).createdAt ?? null,
     }));
+
+    const pagination = {
+      page: safePage,
+      limit: cappedLimit,
+      total,
+      total_pages: total > 0 ? Math.ceil(total / cappedLimit) : 1,
+    };
+
+    return {
+      status: 'success',
+      data: rows,
+      companies: rows,
+      rows,
+      pagination,
+      meta: pagination,
+      total,
+      page: safePage,
+      limit: cappedLimit,
+    };
   }
 }
 

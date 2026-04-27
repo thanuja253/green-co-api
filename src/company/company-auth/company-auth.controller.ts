@@ -136,11 +136,21 @@ export class CompanyAuthController {
     return this.companyAuthService.getCurrentUser(req.user.userId);
   }
 
-  @Get('companies-list')
-  @Get('submitted-companies')
-  @Get('submitted_companies')
-  async getCompaniesList(@Query('name') name?: string) {
-    return this.companyAuthService.getCompaniesList(name);
+  @Get([
+    'companies-list',
+    'submitted-companies',
+    'submitted_companies',
+    'registered-companies',
+    'registered_companies',
+    'registerd-companies',
+    'registerd_companies',
+  ])
+  async getCompaniesList(
+    @Query('name') name?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.companyAuthService.getCompaniesList(name, page, limit);
   }
 }
 
