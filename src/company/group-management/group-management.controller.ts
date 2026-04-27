@@ -23,12 +23,13 @@ import { CreateGroupDto } from './dto/create-group.dto';
 import { ListGroupsQueryDto } from './dto/list-groups-query.dto';
 
 const normalizeName = (name: string) => String(name || '').replace(/[^a-zA-Z0-9_.-]/g, '_');
-const ALLOWED_CHECKLIST_EXT = new Set(['.xls', '.xlsx', '.csv']);
+const ALLOWED_CHECKLIST_EXT = new Set(['.xls', '.xlsx', '.csv', '.pdf']);
 const ALLOWED_CHECKLIST_MIME = new Set([
   'application/vnd.ms-excel',
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   'text/csv',
   'application/csv',
+  'application/pdf',
 ]);
 
 const validateChecklistFile = (
@@ -43,7 +44,7 @@ const validateChecklistFile = (
   if (!isAllowed) {
     cb(
       new Error(
-        'checklist document must be an Excel/CSV file (.xls, .xlsx, .csv)',
+        'checklist document must be .xls, .xlsx, .csv, or .pdf',
       ),
       false,
     );

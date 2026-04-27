@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   Request,
   Res,
   UploadedFiles,
@@ -88,6 +89,18 @@ export class AssessorCompanyProjectsController {
   @Get('assessors/download_final_scoring/:projectId')
   @Get('api/assessor/download_final_scoring/:projectId')
   @Get('assessor/download_final_scoring/:projectId')
+  @Get('api/assessor/projects/:projectId/export-scoring-document')
+  @Get('api/assessors/projects/:projectId/export-scoring-document')
+  @Get('assessor/projects/:projectId/export-scoring-document')
+  @Get('assessors/projects/:projectId/export-scoring-document')
+  @Get('api/assessor/projects/:projectId/export_scoring_document')
+  @Get('api/assessors/projects/:projectId/export_scoring_document')
+  @Get('assessor/projects/:projectId/export_scoring_document')
+  @Get('assessors/projects/:projectId/export_scoring_document')
+  @Get('api/assessor/auth/export_scoring_document/:projectId')
+  @Get('api/assessors/auth/export_scoring_document/:projectId')
+  @Get('assessor/auth/export_scoring_document/:projectId')
+  @Get('assessors/auth/export_scoring_document/:projectId')
   async downloadFinalScoringForAssessor(
     @Param('projectId') projectId: string,
     @Res() res: Response,
@@ -96,6 +109,32 @@ export class AssessorCompanyProjectsController {
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${exported.filename}"`);
     res.status(200).send(exported.content);
+  }
+
+  /**
+   * Assessor compatibility route for sample checklist document download.
+   * Internally redirects to the company sample-download API.
+   */
+  @Get('api/assessor/projects/:projectId/download-sample-checklist-document')
+  @Get('api/assessor/projects/:projectId/download_sample_checklist_document')
+  @Get('api/assessor/auth/download_sample_checklist_document/:projectId')
+  @Get('api/assessors/projects/:projectId/download-sample-checklist-document')
+  @Get('api/assessors/projects/:projectId/download_sample_checklist_document')
+  @Get('api/assessors/auth/download_sample_checklist_document/:projectId')
+  async downloadSampleChecklistDocumentForAssessor(
+    @Param('projectId') projectId: string,
+    @Query('sector_id') sectorId: string | undefined,
+    @Res() res: Response,
+  ): Promise<void> {
+    const safeProjectId = encodeURIComponent(String(projectId || '').trim());
+    const sectorQuery =
+      String(sectorId || '').trim() !== ''
+        ? `?sector_id=${encodeURIComponent(String(sectorId || '').trim())}`
+        : '';
+    res.redirect(
+      302,
+      `/api/company/projects/${safeProjectId}/assessment-checklist-sample-document${sectorQuery}`,
+    );
   }
 
   /**

@@ -31,6 +31,7 @@ import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
+import { RegistrationMastersService } from '../registration-masters/registration-masters.service';
 
 @Injectable()
 export class CompanyAuthService {
@@ -47,6 +48,7 @@ export class CompanyAuthService {
     private jwtService: JwtService,
     private mailService: MailService,
     private notificationsService: NotificationsService,
+    private registrationMastersService: RegistrationMastersService,
   ) {}
 
   async register(registerDto: RegisterDto) {
@@ -411,50 +413,208 @@ export class CompanyAuthService {
     };
   }
 
-  async getCompaniesList(searchTerm?: string, page?: string, limit?: string) {
-    const query: any = {};
-    if (searchTerm?.trim()) {
-      query.name = { $regex: searchTerm.trim(), $options: 'i' };
-    }
+  async getCompanyListFilters() {
+    const [masters, sectors, allStates] = await Promise.all([
+      this.registrationMastersService.getRegistrationMasters(),
+      this.registrationMastersService.getGroupsAndSectors(),
+      this.registrationMastersService.getAllStatesMaster(),
+    ]);
 
-    // Backward-compatible autocomplete response.
-    if (page == null && limit == null) {
+    const accountStatuses = [
+      { id: '1', value: '1', label: 'Active' },
+      { id: '0', value: '0', label: 'In Active' },
+    ];
+    const verificationStatuses = [
+      { id: '1', value: '1', label: 'Verified' },
+      { id: '0', value: '0', label: 'Not Verified' },
+    ];
+
+    return {
+      status: 'success',
+      message: 'Company filters fetched successfully',
+      data: {
+        industries: masters?.data?.industries ?? [],
+        entities: masters?.data?.entities ?? [],
+        sectors: sectors?.data?.sectors ?? [],
+        states: allStates?.data?.states ?? [],
+        account_statuses: accountStatuses,
+        verification_statuses: verificationStatuses,
+      },
+    };
+  }
+
+  async getCompaniesList(
+    searchTermOrQuery?: string | Record<string, any>,
+    page?: string,
+    limit?: string,
+  ) {
+    const queryInput =
+      typeof searchTermOrQuery === 'string'
+        ? { name: searchTermOrQuery, page, limit }
+        : (searchTermOrQuery ?? {});
+
+    const name = String(queryInput?.name ?? '').trim();
+    const parsedPage = Number.parseInt(String(queryInput?.page ?? '1'), 10);
+    const parsedLimit = Number.parseInt(String(queryInput?.limit ?? '10'), 10);
+    const safePage = Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1;
+    const safeLimit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : 10;
+    const cappedLimit = Math.min(safeLimit, 100);
+    const skip = (safePage - 1) * cappedLimit;
+
+    const hasAdvancedFilters = [
+      'company_id',
+      'reg_id',
+      'project_id',
+      'email',
+      'mobile',
+      'phone',
+      'state',
+      'industry',
+      'sector',
+      'entity',
+      'turnover_min',
+      'turnover_max',
+      'fromturnover',
+      'toturnover',
+      'account_status',
+      'verified_status',
+    ].some((k) => String((queryInput as any)?.[k] ?? '').trim() !== '');
+
+    // Backward-compatible autocomplete response (existing behavior).
+    if (!hasAdvancedFilters && queryInput?.page == null && queryInput?.limit == null) {
+      const query: any = {};
+      if (name) {
+        query.name = { $regex: name, $options: 'i' };
+      }
       const companies = await this.companyModel.find(query).select('name').limit(20);
       return companies.map((company) => ({
         value: company.name,
       }));
     }
 
-    // Legacy admin companies list expects paginated richer payload.
-    const parsedPage = Number.parseInt(String(page ?? '1'), 10);
-    const parsedLimit = Number.parseInt(String(limit ?? '10'), 10);
-    const safePage = Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1;
-    const safeLimit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : 10;
-    const cappedLimit = Math.min(safeLimit, 100);
-    const skip = (safePage - 1) * cappedLimit;
+    const companyFilter: Record<string, any> = {};
+    const phone = String(queryInput?.mobile ?? queryInput?.phone ?? '').trim();
+    const email = String(queryInput?.email ?? '').trim();
+    const companyIdFilter = String(queryInput?.company_id ?? queryInput?.reg_id ?? '').trim();
+    const accountStatus = String(queryInput?.account_status ?? '').trim();
+    const verifiedStatus = String(queryInput?.verified_status ?? '').trim();
 
-    const [total, companies] = await Promise.all([
-      this.companyModel.countDocuments(query),
-      this.companyModel
-        .find(query)
-        .select('_id name email mobile account_status verified_status createdAt')
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(cappedLimit),
-    ]);
+    if (name) companyFilter.name = { $regex: name, $options: 'i' };
+    if (phone) companyFilter.mobile = { $regex: phone, $options: 'i' };
+    if (email) companyFilter.email = { $regex: email, $options: 'i' };
+    if (companyIdFilter) companyFilter.reg_id = { $regex: companyIdFilter, $options: 'i' };
+    if (accountStatus && accountStatus !== 'All') companyFilter.account_status = accountStatus;
+    if (verifiedStatus && verifiedStatus !== 'All') companyFilter.verified_status = verifiedStatus;
 
-    const rows = companies.map((company) => ({
-      id: company._id?.toString?.() ?? String(company._id),
-      company_id: company._id?.toString?.() ?? String(company._id),
-      name: company.name ?? '',
-      company_name: company.name ?? '',
-      email: company.email ?? '',
-      mobile: company.mobile ?? '',
-      account_status: company.account_status ?? '0',
-      verified_status: company.verified_status ?? '0',
-      created_at: (company as any).createdAt ?? null,
-    }));
+    const companies = await this.companyModel
+      .find(companyFilter)
+      .select('_id reg_id name email mobile account_status verified_status createdAt turnover mst_sector_id')
+      .sort({ createdAt: -1 })
+      .lean();
 
+    if (!companies.length) {
+      const emptyPagination = {
+        page: safePage,
+        limit: cappedLimit,
+        total: 0,
+        total_pages: 1,
+      };
+      return {
+        status: 'success',
+        data: [],
+        companies: [],
+        rows: [],
+        pagination: emptyPagination,
+        meta: emptyPagination,
+        total: 0,
+        page: safePage,
+        limit: cappedLimit,
+      };
+    }
+
+    const companyById = new Map(companies.map((c: any) => [String(c._id), c]));
+    const companyIds = companies.map((c: any) => c._id);
+    const projectIdInput = String(queryInput?.project_id ?? '').trim();
+    const projectFilter: Record<string, any> = { company_id: { $in: companyIds } };
+    if (projectIdInput) projectFilter.project_id = { $regex: projectIdInput, $options: 'i' };
+
+    const projects = await this.companyProjectModel
+      .find(projectFilter)
+      .select('_id company_id project_id registration_info createdAt')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const rowsUnfiltered = projects.map((project: any) => {
+      const company = companyById.get(String(project.company_id));
+      const reg = project.registration_info || {};
+      const turnoverRaw = String(company?.turnover || reg.turnover || '').trim();
+      const turnoverNumeric = Number.parseFloat(turnoverRaw.replace(/[^0-9.]/g, ''));
+      return {
+        id: String(project._id),
+        project_object_id: String(project._id),
+        project_id: String(project.project_id || ''),
+        company_object_id: String(company?._id || ''),
+        company_id: String(company?.reg_id || ''),
+        reg_id: String(company?.reg_id || ''),
+        name: String(company?.name || ''),
+        company_name: String(company?.name || ''),
+        email: String(company?.email || ''),
+        mobile: String(company?.mobile || ''),
+        phone: String(company?.mobile || ''),
+        state: String(reg.state || reg.state_name || reg.state_id || ''),
+        industry: String(reg.industry || reg.industry_name || reg.industry_id || ''),
+        sector: String(reg.sector || reg.sector_name || reg.sector_id || company?.mst_sector_id || ''),
+        entity: String(reg.entity || reg.entity_name || reg.entity_id || ''),
+        turnover: turnoverRaw,
+        turnover_numeric: Number.isFinite(turnoverNumeric) ? turnoverNumeric : null,
+        account_status: String(company?.account_status || '0'),
+        account_status_label: String(company?.account_status || '0') === '1' ? 'Active' : 'In Active',
+        verified_status: String(company?.verified_status || '0'),
+        verified_status_label: String(company?.verified_status || '0') === '1' ? 'Verified' : 'Not Verified',
+        created_at: company?.createdAt || project?.createdAt || null,
+      };
+    });
+
+    const strContains = (value: unknown, needle: string): boolean =>
+      String(value ?? '').toLowerCase().includes(needle.toLowerCase());
+
+    const filteredRows = rowsUnfiltered.filter((r) => {
+      if (companyIdFilter && !strContains(r.company_id, companyIdFilter)) return false;
+      if (projectIdInput && !strContains(r.project_id, projectIdInput)) return false;
+      if (name && !strContains(r.name, name)) return false;
+      if (phone && !strContains(r.mobile, phone)) return false;
+      if (email && !strContains(r.email, email)) return false;
+
+      const state = String(queryInput?.state ?? '').trim();
+      const industry = String(queryInput?.industry ?? queryInput?.type_of_industry ?? '').trim();
+      const sector = String(queryInput?.sector ?? queryInput?.type_of_sector ?? '').trim();
+      const entity = String(queryInput?.entity ?? queryInput?.type_of_entity ?? '').trim();
+      if (state && state !== 'All' && !strContains(r.state, state)) return false;
+      if (industry && industry !== 'All' && !strContains(r.industry, industry)) return false;
+      if (sector && sector !== 'All' && !strContains(r.sector, sector)) return false;
+      if (entity && entity !== 'All' && !strContains(r.entity, entity)) return false;
+
+      if (accountStatus && accountStatus !== 'All' && r.account_status !== accountStatus) return false;
+      if (verifiedStatus && verifiedStatus !== 'All' && r.verified_status !== verifiedStatus) return false;
+
+      const minTurn = Number.parseFloat(
+        String(queryInput?.turnover_min ?? queryInput?.fromturnover ?? '').trim(),
+      );
+      if (Number.isFinite(minTurn)) {
+        if (!Number.isFinite(Number(r.turnover_numeric)) || Number(r.turnover_numeric) < minTurn) return false;
+      }
+      const maxTurn = Number.parseFloat(
+        String(queryInput?.turnover_max ?? queryInput?.toturnover ?? '').trim(),
+      );
+      if (Number.isFinite(maxTurn)) {
+        if (!Number.isFinite(Number(r.turnover_numeric)) || Number(r.turnover_numeric) > maxTurn) return false;
+      }
+
+      return true;
+    });
+
+    const pagedRows = filteredRows.slice(skip, skip + cappedLimit);
+    const total = filteredRows.length;
     const pagination = {
       page: safePage,
       limit: cappedLimit,
@@ -464,9 +624,9 @@ export class CompanyAuthService {
 
     return {
       status: 'success',
-      data: rows,
-      companies: rows,
-      rows,
+      data: pagedRows,
+      companies: pagedRows,
+      rows: pagedRows,
       pagination,
       meta: pagination,
       total,

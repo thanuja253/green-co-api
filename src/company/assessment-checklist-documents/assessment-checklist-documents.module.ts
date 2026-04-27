@@ -5,6 +5,7 @@ import {
   AssessmentChecklistDocumentSchema,
 } from '../schemas/assessment-checklist-document.schema';
 import { Sector, SectorSchema } from '../schemas/sector.schema';
+import { GroupManagement, GroupManagementSchema } from '../schemas/group-management.schema';
 import {
   ParameterManagement,
   ParameterManagementSchema,
@@ -19,6 +20,7 @@ import { AccountStatusGuard } from '../company-auth/guards/account-status.guard'
     MongooseModule.forFeature([
       { name: AssessmentChecklistDocument.name, schema: AssessmentChecklistDocumentSchema },
       { name: Sector.name, schema: SectorSchema },
+      { name: GroupManagement.name, schema: GroupManagementSchema },
       { name: ParameterManagement.name, schema: ParameterManagementSchema },
       { name: Company.name, schema: CompanySchema },
     ]),

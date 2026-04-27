@@ -15,10 +15,13 @@ export class CompanyAuthLegacyCompatController {
     'registered_companies',
   ])
   async getLegacyRegisteredCompanies(
-    @Query('name') name?: string,
-    @Query('page') page?: string,
-    @Query('limit') limit?: string,
+    @Query() query?: Record<string, any>,
   ) {
-    return this.companyAuthService.getCompaniesList(name, page, limit);
+    return this.companyAuthService.getCompaniesList(query);
+  }
+
+  @Get('companies-filters')
+  async getLegacyCompanyFilterOptions() {
+    return this.companyAuthService.getCompanyListFilters();
   }
 }

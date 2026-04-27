@@ -5,12 +5,15 @@ import {
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
+import { basename, join } from 'path';
+import * as fs from 'fs';
 import {
   AssessmentChecklistDocument,
   AssessmentChecklistDocumentDocument,
   AssessmentChecklistStatus,
 } from '../schemas/assessment-checklist-document.schema';
 import { Sector, SectorDocument } from '../schemas/sector.schema';
+import { GroupManagement, GroupManagementDocument } from '../schemas/group-management.schema';
 import {
   ParameterManagement,
   ParameterManagementDocument,
@@ -29,6 +32,8 @@ export class AssessmentChecklistDocumentsService {
     private readonly docModel: Model<AssessmentChecklistDocumentDocument>,
     @InjectModel(Sector.name)
     private readonly sectorModel: Model<SectorDocument>,
+    @InjectModel(GroupManagement.name)
+    private readonly groupModel: Model<GroupManagementDocument>,
     @InjectModel(ParameterManagement.name)
     private readonly criteriaModel: Model<ParameterManagementDocument>,
   ) {}
@@ -39,14 +44,24 @@ export class AssessmentChecklistDocumentsService {
     return `${base}${normalized}`;
   }
 
-  async listForProject(projectId: string, criteriaId?: string) {
+  async listForProject(projectId: string, criteriaId?: string, latestPerCriteria = false) {
     const filter: Record<string, any> = { project_id: projectId, is_active: true };
     if (criteriaId?.trim()) filter.criteria_id = criteriaId.trim();
-    const rows = await this.docModel.find(filter).sort({ createdAt: -1 }).lean();
+    const rows = await this.docModel.find(filter).sort({ updatedAt: -1, createdAt: -1 }).lean();
+
+    const finalRows =
+      latestPerCriteria && !criteriaId?.trim()
+        ? rows.filter((row: any, idx: number, arr: any[]) => {
+            const cid = String(row?.criteria_id || '').trim();
+            if (!cid) return true;
+            return arr.findIndex((x: any) => String(x?.criteria_id || '').trim() === cid) === idx;
+          })
+        : rows;
+
     return {
       status: 'success',
       message: 'Checklist documents fetched successfully',
-      data: rows.map((r: any) => ({
+      data: finalRows.map((r: any) => ({
         id: String(r._id),
         project_id: r.project_id,
         sector_id: r.sector_id,
@@ -154,6 +169,62 @@ export class AssessmentChecklistDocumentsService {
       status: 'success',
       message: 'Checklist document updated successfully',
       data: { id: String(row._id), status: row.status, remarks: row.remarks || '' },
+    };
+  }
+
+  async getSampleChecklistDocumentForProject(projectId: string, sectorId?: string) {
+    const resolvedProjectId = String(projectId || '').trim();
+    if (!resolvedProjectId) {
+      throw new BadRequestException({ status: 'error', message: 'projectId is required' });
+    }
+
+    let resolvedSectorId = String(sectorId || '').trim();
+    if (!resolvedSectorId) {
+      const latestDoc = await this.docModel
+        .findOne({ project_id: resolvedProjectId, is_active: true })
+        .sort({ updatedAt: -1, createdAt: -1 })
+        .select('sector_id')
+        .lean();
+      resolvedSectorId = String((latestDoc as any)?.sector_id || '').trim();
+    }
+    if (!resolvedSectorId) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'No sector context found to fetch sample checklist document',
+      });
+    }
+
+    let sector = await this.sectorModel.findById(resolvedSectorId).select('group_id group_name').lean();
+    if (!sector) {
+      // Backward compatibility: some UIs pass sector name in sector_id query.
+      sector = await this.sectorModel
+        .findOne({ name: new RegExp(`^${resolvedSectorId}$`, 'i') })
+        .select('group_id group_name')
+        .lean();
+    }
+    if (!sector) {
+      throw new NotFoundException({ status: 'error', message: 'Sector not found' });
+    }
+
+    const groupId = String((sector as any)?.group_id || '').trim();
+    if (!groupId) {
+      throw new NotFoundException({ status: 'error', message: 'Group mapping not found for sector' });
+    }
+
+    const group = await this.groupModel.findById(groupId).select('sample_document').lean();
+    const relativePath = String((group as any)?.sample_document || '').trim().replace(/^\/+/, '');
+    if (!relativePath) {
+      throw new NotFoundException({ status: 'error', message: 'Sample checklist document not found' });
+    }
+
+    const absolutePath = join(process.cwd(), relativePath);
+    if (!fs.existsSync(absolutePath)) {
+      throw new NotFoundException({ status: 'error', message: 'Sample checklist file missing on server' });
+    }
+
+    return {
+      absolutePath,
+      filename: basename(absolutePath),
     };
   }
 }

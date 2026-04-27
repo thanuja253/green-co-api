@@ -7,6 +7,7 @@ import {
   Post,
   Query,
   Req,
+  Res,
   UploadedFile,
   UseGuards,
   UseInterceptors,
@@ -18,6 +19,7 @@ import { diskStorage } from 'multer';
 import { extname, join } from 'path';
 import * as fs from 'fs';
 import type { Request } from 'express';
+import type { Response } from 'express';
 import { JwtAuthGuard } from '../company-auth/guards/jwt-auth.guard';
 import { AccountStatusGuard } from '../company-auth/guards/account-status.guard';
 import { AdminJwtAuthGuard } from '../company-auth/guards/admin-jwt-auth.guard';
@@ -37,7 +39,8 @@ export class AssessmentChecklistDocumentsController {
     @Param('projectId') projectId: string,
     @Query('criteria_id') criteriaId?: string,
   ) {
-    return this.docsService.listForProject(projectId, criteriaId);
+    // Company list should show current/latest upload per criteria (not full upload history).
+    return this.docsService.listForProject(projectId, criteriaId, true);
   }
 
   @Get('api/companies/projects/:projectId/assessment-checklist-documents')
@@ -45,7 +48,37 @@ export class AssessmentChecklistDocumentsController {
     @Param('projectId') projectId: string,
     @Query('criteria_id') criteriaId?: string,
   ) {
-    return this.docsService.listForProject(projectId, criteriaId);
+    // Company list should show current/latest upload per criteria (not full upload history).
+    return this.docsService.listForProject(projectId, criteriaId, true);
+  }
+
+  /**
+   * Download sample checklist document mapped from project -> sector -> group.sample_document.
+   * Query: ?sector_id=<sectorId> (optional; auto-resolves from latest checklist row if missing)
+   */
+  @Get('api/company/projects/:projectId/assessment-checklist-sample-document')
+  @Get('api/companies/projects/:projectId/assessment-checklist-sample-document')
+  @Get('api/assessor/projects/:projectId/assessment-checklist-sample-document')
+  @Get('api/assessors/projects/:projectId/assessment-checklist-sample-document')
+  @Get('api/assessor/projects/:projectId/download-sample-checklist-document')
+  @Get('api/assessors/projects/:projectId/download-sample-checklist-document')
+  @Get('assessor/projects/:projectId/download-sample-checklist-document')
+  @Get('assessors/projects/:projectId/download-sample-checklist-document')
+  @Get('api/assessor/projects/:projectId/download_sample_checklist_document')
+  @Get('api/assessors/projects/:projectId/download_sample_checklist_document')
+  @Get('assessor/projects/:projectId/download_sample_checklist_document')
+  @Get('assessors/projects/:projectId/download_sample_checklist_document')
+  @Get('api/assessor/auth/download_sample_checklist_document/:projectId')
+  @Get('api/assessors/auth/download_sample_checklist_document/:projectId')
+  @Get('assessor/auth/download_sample_checklist_document/:projectId')
+  @Get('assessors/auth/download_sample_checklist_document/:projectId')
+  async downloadSampleChecklistDocument(
+    @Param('projectId') projectId: string,
+    @Query('sector_id') sectorId: string | undefined,
+    @Res() res: Response,
+  ): Promise<void> {
+    const file = await this.docsService.getSampleChecklistDocumentForProject(projectId, sectorId);
+    res.download(file.absolutePath, file.filename);
   }
 
   /**
