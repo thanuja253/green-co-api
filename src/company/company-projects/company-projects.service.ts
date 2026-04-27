@@ -1867,6 +1867,28 @@ export class CompanyProjectsService {
   }
 
   /**
+   * Admin compatibility helper:
+   * upload feedback by project id only (legacy endpoint shape).
+   */
+  async uploadFeedbackDocumentByProjectId(
+    projectId: string,
+    file: Express.Multer.File,
+  ): Promise<{ status: string; message: string; data?: any }> {
+    const project = await this.projectModel
+      .findById(projectId)
+      .select('_id company_id')
+      .lean();
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.uploadFeedbackDocument(
+      String((project as any).company_id || ''),
+      String((project as any)._id || projectId),
+      file,
+    );
+  }
+
+  /**
    * Toggle Show Score Band to Company (Admin). 0 = hide, 1 = show.
    */
   async updateScoreBandStatus(

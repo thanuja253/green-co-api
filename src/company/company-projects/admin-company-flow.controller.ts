@@ -1190,6 +1190,49 @@ export class AdminCompanyFlowController {
     );
   }
 
+  /**
+   * Legacy admin feedback upload compatibility endpoint.
+   * POST /api/admin/company/feedback_upload/:projectId
+   * multipart field: feedback_upload (PDF)
+   */
+  @Post('api/admin/company/feedback_upload/:projectId')
+  @Post('admin/company/feedback_upload/:projectId')
+  @UseInterceptors(
+    FileInterceptor('feedback_upload', {
+      storage: diskStorage({
+        destination: (req, _file, cb) => {
+          const projectId = req.params.projectId;
+          const uploadPath = join(process.cwd(), 'uploads', 'company_feedback', projectId);
+          if (!fs.existsSync(uploadPath)) {
+            fs.mkdirSync(uploadPath, { recursive: true });
+          }
+          cb(null, uploadPath);
+        },
+        filename: (_req, file, cb) => {
+          const ext = extname(file.originalname) || '.pdf';
+          cb(null, `${Date.now()}${ext}`);
+        },
+      }),
+      limits: { fileSize: 10 * 1024 * 1024 },
+      fileFilter: (_req, file, cb) => {
+        if (file.mimetype === 'application/pdf') cb(null, true);
+        else cb(new BadRequestException('Only PDF is allowed for feedback.'), false);
+      },
+    }),
+  )
+  async uploadFeedbackLegacy(
+    @Param('projectId') projectId: string,
+    @UploadedFile() feedbackUpload?: Express.Multer.File,
+  ): Promise<any> {
+    if (!feedbackUpload) {
+      throw new BadRequestException({ status: 'error', message: 'No file uploaded' });
+    }
+    return this.companyProjectsService.uploadFeedbackDocumentByProjectId(
+      projectId,
+      feedbackUpload,
+    );
+  }
+
   @Get('company/energy_export')
   async exportEnergy(
     @Query('company_id') companyId: string,
