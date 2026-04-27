@@ -1015,7 +1015,13 @@ export class AdminCompanyFlowController {
   ])
   async getPrimaryDataGiLegacy(
     @Param('companyProject') companyProject: string,
+    @Query('form_type') formType?: string,
+    @Query('formType') formTypeAlt?: string,
   ): Promise<any> {
+    const requestedType = String(formType ?? formTypeAlt ?? '').trim().toLowerCase();
+    if (requestedType === 'ee') {
+      return this.companyProjectsService.getPrimaryDataEeLegacyByProjectId(companyProject);
+    }
     return this.companyProjectsService.getPrimaryDataGiLegacyByProjectId(companyProject);
   }
 
@@ -1202,6 +1208,17 @@ export class AdminCompanyFlowController {
       if (error instanceof HttpException) throw error;
       return { status: 'error', message: 'Some Error Occurred...' };
     }
+  }
+
+  @Get('api/admin/upload_inv/:companyProject')
+  @Get('admin/upload_inv/:companyProject')
+  async getExpenseInvoices(
+    @Param('companyProject') companyProject: string,
+  ): Promise<any> {
+    return this.companyProjectsService.getInvoicesByProjectIdAndPaymentFor(
+      companyProject,
+      'expA',
+    );
   }
 
   @Patch('api/admin/upload_inv/:companyProject/:invoiceId')

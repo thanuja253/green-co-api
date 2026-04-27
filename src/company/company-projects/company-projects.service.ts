@@ -7930,9 +7930,17 @@ export class CompanyProjectsService {
     for (const row of savedRows as any[]) {
       const t = row.info_type || 'gi';
       if (!byInfoType[t]) byInfoType[t] = [];
-      byInfoType[t].push(row);
+      byInfoType[t].push({
+        ...row,
+        exp: row?.fy5 ?? 0,
+      });
       const dataIdStr = (row.data_id && row.data_id.toString) ? row.data_id.toString() : String(row.data_id);
-      if (dataIdStr) savedByDataId[dataIdStr] = row;
+      if (dataIdStr) {
+        savedByDataId[dataIdStr] = {
+          ...row,
+          exp: row?.fy5 ?? 0,
+        };
+      }
     }
 
     const finalSubmitCount = (savedRows as any[]).filter((r) => r.final_submit === 1).length;
@@ -7943,9 +7951,14 @@ export class CompanyProjectsService {
     const mergedRowsFlat = (masterList as any[]).map((master) => {
       const mid = master._id?.toString?.() ?? master._id;
       const saved = mid ? savedByDataId[mid] : null;
-      const refUnit = saved?.reference_unit != null && String(saved.reference_unit).trim() !== ''
-        ? String(saved.reference_unit)
-        : (master.reference_unit != null && String(master.reference_unit).trim() !== '' ? String(master.reference_unit) : '-');
+      // Always prefer persisted saved reference_unit so GET mirrors exactly what was posted.
+      // Fallback to master only when the row has never been saved.
+      const hasSavedReferenceUnit = saved && Object.prototype.hasOwnProperty.call(saved, 'reference_unit');
+      const refUnit = hasSavedReferenceUnit
+        ? String(saved?.reference_unit ?? '')
+        : master.reference_unit != null && String(master.reference_unit).trim() !== ''
+          ? String(master.reference_unit)
+          : '-';
       return {
         ...master,
         reference_unit: refUnit,
@@ -7957,6 +7970,7 @@ export class CompanyProjectsService {
         fy3: saved?.fy3 ?? master.fy3 ?? 0,
         fy4: saved?.fy4 ?? master.fy4 ?? 0,
         fy5: saved?.fy5 ?? master.fy5 ?? 0,
+        exp: saved?.fy5 ?? master.fy5 ?? 0,
         extrapolated: saved?.extrapolated ?? master.extrapolated,
         lt_target: saved?.lt_target ?? master.lt_target,
         additional_details: saved?.additional_details ?? master.additional_details,
@@ -7987,6 +8001,14 @@ export class CompanyProjectsService {
         sections,
       },
     };
+  }
+
+  async getPrimaryDataByProjectId(projectId: string) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.getPrimaryData(String(resolved.company_id), String(resolved._id));
   }
 
   async getPrimaryDataGiLegacyByProjectId(projectId: string) {
@@ -8510,15 +8532,44 @@ export class CompanyProjectsService {
       const masterRows = await this.masterPrimaryDataChecklistModel
         .find({ info_type: infoType, is_active: 1 })
         .lean();
+      const legacyGgeKeyToChecklistOrder: Record<string, number> =
+        infoType === 'gge'
+          ? {
+              '50': 111,
+              '51': 112,
+              '52': 113,
+              '53': 114,
+              '54': 121,
+              '55': 122,
+              '56': 125,
+              '57': 126,
+              '58': 127,
+              '59': 139,
+              '60': 116,
+              '61': 117,
+              '62': 118,
+              '63': 119,
+              '64': 120,
+              '65': 123,
+            }
+          : {};
+
       for (const row of masterRows as any[]) {
         const dataId = row._id.toString();
         const checklistOrderKey =
           row?.checklist_order !== undefined && row?.checklist_order !== null
             ? String(row.checklist_order)
             : undefined;
+        const legacyGgeOrderKey = checklistOrderKey
+          ? Object.keys(legacyGgeKeyToChecklistOrder).find(
+              (legacyKey) =>
+                String(legacyGgeKeyToChecklistOrder[legacyKey]) === checklistOrderKey,
+            )
+          : undefined;
         const sectionRow =
           payload[dataId] ??
           (checklistOrderKey ? payload[checklistOrderKey] : undefined) ??
+          (legacyGgeOrderKey ? payload[legacyGgeOrderKey] : undefined) ??
           payload[row.parameter] ??
           payload[row.checklist_name];
         if (sectionRow == null) continue;
@@ -8532,7 +8583,7 @@ export class CompanyProjectsService {
           fy2: sectionRow.fy2 ?? 0,
           fy3: sectionRow.fy3 ?? 0,
           fy4: sectionRow.fy4 ?? 0,
-          fy5: sectionRow.fy5 ?? 0,
+          fy5: sectionRow.exp ?? sectionRow.fy5 ?? 0,
           extrapolated: sectionRow.extrapolated,
           lt_target: sectionRow.lt_target,
           additional_details: sectionRow.additional_details,
@@ -8593,7 +8644,7 @@ export class CompanyProjectsService {
         fy2: toNum(item.fy2) ?? 0,
         fy3: toNum(item.fy3) ?? 0,
         fy4: toNum(item.fy4) ?? 0,
-        fy5: toNum(item.fy5) ?? 0,
+        fy5: toNum(item.fy5 ?? item.exp) ?? 0,
         extrapolated: toNum(item.extrapolated),
         lt_target: toNum(item.lt_target),
         additional_details: item.additional_details,
@@ -9097,6 +9148,14 @@ export class CompanyProjectsService {
     const out = await this.getPrimaryData(companyId, projectId);
     const eeRows = (out as any)?.data?.primary_data_rows?.ee ?? [];
     return { status: 'success', message: 'EE data loaded', data: { form_type: 'ee', ee_rows: eeRows, ee: eeRows } };
+  }
+
+  async getPrimaryDataEeLegacyByProjectId(projectId: string) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.getPrimaryDataEe(String(resolved.company_id), String(resolved._id));
   }
 
   async savePrimaryDataEeByCompanyProjectId(companyId: string, projectId: string, body: Record<string, any>) {
