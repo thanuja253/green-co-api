@@ -8029,8 +8029,13 @@ export class CompanyProjectsService {
       });
     }
 
+    const equivalentGiRow = (giRows as any[]).find((r: any) => {
+      const parameter = String(r?.parameter ?? '').trim().toLowerCase();
+      return parameter === 'equivalent product';
+    });
     const topLevelEquivalent =
-      (giRows as any[]).find((r: any) => String(r?.reference_unit ?? '').trim() !== '')?.reference_unit ?? '';
+      String(equivalentGiRow?.reference_unit ?? '').trim() ||
+      String((giRows as any[]).find((r: any) => String(r?.reference_unit ?? '').trim() !== '')?.reference_unit ?? '').trim();
 
     const legacyGi: Record<string, any> = {};
     const pushField = (obj: Record<string, any>, field: string, value: any) => {
@@ -8055,9 +8060,26 @@ export class CompanyProjectsService {
       pushField(legacyGi[key], 'fy3', row?.fy3 ?? 0);
       pushField(legacyGi[key], 'fy4', row?.fy4 ?? 0);
       pushField(legacyGi[key], 'exp', row?.fy5 ?? row?.extrapolated ?? null);
+      const isEquivalentRow =
+        String(row?.parameter ?? '').trim().toLowerCase() === 'equivalent product';
       const refUnit = row?.reference_unit ?? '';
       pushField(legacyGi[key], 'reference_unit', refUnit);
-      pushField(legacyGi[key], 'equivalent_product', refUnit);
+      pushField(legacyGi[key], 'equivalent_product', isEquivalentRow ? topLevelEquivalent : refUnit);
+    }
+
+    if (equivalentGiRow) {
+      const equivalentRowPayload = {
+        // Legacy clients expect this synthetic row to carry the equivalent product value.
+        details: topLevelEquivalent || equivalentGiRow?.details || '',
+        fy1: equivalentGiRow?.fy1 ?? 0,
+        fy2: equivalentGiRow?.fy2 ?? 0,
+        fy3: equivalentGiRow?.fy3 ?? 0,
+        fy4: equivalentGiRow?.fy4 ?? 0,
+        exp: equivalentGiRow?.fy5 ?? equivalentGiRow?.extrapolated ?? null,
+        reference_unit: topLevelEquivalent || equivalentGiRow?.reference_unit || '',
+        equivalent_product: topLevelEquivalent || equivalentGiRow?.reference_unit || '',
+      };
+      legacyGi.equivalent_row = equivalentRowPayload;
     }
 
     return {
@@ -8068,6 +8090,7 @@ export class CompanyProjectsService {
         equivalent_product: topLevelEquivalent,
         gi_rows: giRows,
         gi: legacyGi,
+        equivalent_row: legacyGi.equivalent_row ?? null,
       },
     };
   }
@@ -8083,10 +8106,14 @@ export class CompanyProjectsService {
 
     const formType = String(body?.form_type ?? body?.formType ?? 'gi').trim().toLowerCase();
     if (formType !== 'gi') {
-      throw new BadRequestException({
-        status: 'error',
-        message: 'form_type must be "gi"',
-      });
+      const sectionPayload = (body as any)?.[formType] ?? body;
+      return this.savePrimaryDataBySection(
+        String(resolved.company_id),
+        String(resolved._id),
+        formType,
+        sectionPayload,
+        Boolean((body as any)?.final_submit),
+      );
     }
 
     const parseGiFromFlatBody = (input: Record<string, any>): Record<string, any> => {
@@ -8181,6 +8208,19 @@ export class CompanyProjectsService {
     ).trim();
 
     if (!globalEquivalentProduct) {
+      const explicitEquivalentRow = (gi as any)?.equivalent_row ?? (gi as any)?.equivalentProduct;
+      const explicitEquivalentValue = String(
+        explicitEquivalentRow?.equivalent_product ??
+          explicitEquivalentRow?.equivalentProduct ??
+          explicitEquivalentRow?.reference_unit ??
+          '',
+      ).trim();
+      if (explicitEquivalentValue) {
+        globalEquivalentProduct = explicitEquivalentValue;
+      }
+    }
+
+    if (!globalEquivalentProduct) {
       for (const row of Object.values(gi)) {
         const nestedEq = String(
           (row as any)?.equivalent_product ??
@@ -8229,6 +8269,14 @@ export class CompanyProjectsService {
         if (idx >= 0 && idx < masterGiRows.length) return (masterGiRows as any[])[idx];
       }
       const byKey = String(candidateKey || '').trim();
+      const byKeyLower = byKey.toLowerCase();
+      if (byKeyLower === 'equivalent_row' || byKeyLower === 'equivalentproduct' || byKeyLower === 'equivalent_product') {
+        const matchedEquivalent = (masterGiRows as any[]).find((m) => {
+          const parameter = String(m?.parameter ?? '').trim().toLowerCase();
+          return parameter === 'equivalent product';
+        });
+        if (matchedEquivalent) return matchedEquivalent;
+      }
       if (byKey && masterById.has(byKey)) return masterById.get(byKey);
       if (byKey && /^\d+$/.test(byKey)) {
         const idx = Number(byKey) - 1;
@@ -8237,7 +8285,7 @@ export class CompanyProjectsService {
       for (const m of masterGiRows as any[]) {
         const p = String(m?.parameter ?? '').trim().toLowerCase();
         const c = String(m?.checklist_name ?? '').trim().toLowerCase();
-        const k = byKey.toLowerCase();
+        const k = byKeyLower;
         if (k && (k === p || k === c)) return m;
       }
       // Legacy JSON arrays sometimes send data_id as row index (1,2,3...)
@@ -8259,9 +8307,46 @@ export class CompanyProjectsService {
       masterById.set(String(m._id), m);
     }
 
-    for (const [dataId, row] of Object.entries(gi)) {
-      const master = resolveMasterRow(String(dataId), row as Record<string, any>);
+    const normalizedByMaster = new Map<
+      string,
+      { master: any; row: Record<string, any>; sourceKey: string }
+    >();
+    for (const [rawKey, rawRow] of Object.entries(gi)) {
+      const row = (rawRow ?? {}) as Record<string, any>;
+      const sourceKey = String(rawKey || '').trim();
+      const sourceKeyLower = sourceKey.toLowerCase();
+      const master = resolveMasterRow(sourceKey, row);
       if (!master) continue;
+      const mid = String(master._id);
+      const isEquivalentAlias =
+        sourceKeyLower === 'equivalent_row' ||
+        sourceKeyLower === 'equivalentproduct' ||
+        sourceKeyLower === 'equivalent_product';
+
+      const existing = normalizedByMaster.get(mid);
+      if (!existing) {
+        normalizedByMaster.set(mid, { master, row, sourceKey });
+        continue;
+      }
+
+      if (isEquivalentAlias) {
+        // Keep existing product row values (details/FYs), only backfill missing fields from alias.
+        normalizedByMaster.set(mid, {
+          master,
+          sourceKey: existing.sourceKey,
+          row: { ...row, ...existing.row },
+        });
+        continue;
+      }
+
+      normalizedByMaster.set(mid, {
+        master,
+        sourceKey: existing.sourceKey,
+        row: { ...existing.row, ...row },
+      });
+    }
+
+    for (const { master, row, sourceKey } of normalizedByMaster.values()) {
       touchedDataIds.push(String(master._id));
       const detailsVal = row?.details ?? row?.product_name ?? row?.productName ?? row?.name ?? row?.product;
       const fy1Val = row?.fy1 ?? row?.fy_1 ?? row?.fy23_24 ?? row?.fy_23_24;
@@ -8288,12 +8373,16 @@ export class CompanyProjectsService {
       const isEquivalentRow =
         String(master?.parameter ?? '').trim().toLowerCase() === 'equivalent product' ||
         Number(master?.checklist_order ?? 0) === 4;
-      const rowReferenceUnit =
-        row?.reference_unit ??
-        row?.equivalent_product ??
-        (isEquivalentRow ? globalEquivalentProduct : undefined) ??
-        master.reference_unit ??
-        '';
+      const rowReferenceUnit = isEquivalentRow
+        ? (globalEquivalentProduct ||
+          row?.equivalent_product ||
+          row?.reference_unit ||
+          master.reference_unit ||
+          '')
+        : (row?.reference_unit ??
+          row?.equivalent_product ??
+          master.reference_unit ??
+          '');
 
       for (let i = 0; i < rowCount; i++) {
         const details = String((detailsArray[i] ?? '')).trim();
@@ -8318,19 +8407,19 @@ export class CompanyProjectsService {
         if (!details) {
           throw new BadRequestException({
             status: 'error',
-            message: `details is required for GI row ${dataId}`,
+            message: `details is required for GI row ${sourceKey}`,
           });
         }
         if (fy1 == null || fy2 == null || fy3 == null || fy4 == null) {
           throw new BadRequestException({
             status: 'error',
-            message: `fy1..fy4 must be numeric and > 0 for GI row ${dataId}`,
+            message: `fy1..fy4 must be numeric and > 0 for GI row ${sourceKey}`,
           });
         }
         if (expArray[i] !== undefined && expArray[i] !== null && expArray[i] !== '' && exp === undefined) {
           throw new BadRequestException({
             status: 'error',
-            message: `exp must be numeric for GI row ${dataId}`,
+            message: `exp must be numeric for GI row ${sourceKey}`,
           });
         }
 
@@ -8423,7 +8512,15 @@ export class CompanyProjectsService {
         .lean();
       for (const row of masterRows as any[]) {
         const dataId = row._id.toString();
-        const sectionRow = payload[dataId] ?? payload[row.parameter] ?? payload[row.checklist_name];
+        const checklistOrderKey =
+          row?.checklist_order !== undefined && row?.checklist_order !== null
+            ? String(row.checklist_order)
+            : undefined;
+        const sectionRow =
+          payload[dataId] ??
+          (checklistOrderKey ? payload[checklistOrderKey] : undefined) ??
+          payload[row.parameter] ??
+          payload[row.checklist_name];
         if (sectionRow == null) continue;
         doc.push({
           data_id: dataId,

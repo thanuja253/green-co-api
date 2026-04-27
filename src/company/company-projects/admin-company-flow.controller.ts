@@ -1007,14 +1007,24 @@ export class AdminCompanyFlowController {
     return this.companyProjectsService.payOutstandingDueAmountByProjectId(projectId, dto);
   }
 
-  @Get('company/primary_data/:companyProject')
+  @Get([
+    'api/company/primary_data/:companyProject',
+    'company/primary_data/:companyProject',
+    'api/companys/primary_data/:companyProject',
+    'companys/primary_data/:companyProject',
+  ])
   async getPrimaryDataGiLegacy(
     @Param('companyProject') companyProject: string,
   ): Promise<any> {
     return this.companyProjectsService.getPrimaryDataGiLegacyByProjectId(companyProject);
   }
 
-  @Post('company/primary_data/:companyProject')
+  @Post([
+    'api/company/primary_data/:companyProject',
+    'company/primary_data/:companyProject',
+    'api/companys/primary_data/:companyProject',
+    'companys/primary_data/:companyProject',
+  ])
   async savePrimaryDataGiLegacy(
     @Param('companyProject') companyProject: string,
     @Body() body: Record<string, any>,
@@ -1025,7 +1035,12 @@ export class AdminCompanyFlowController {
     );
   }
 
-  @Patch('company/primary_data/:companyProject')
+  @Patch([
+    'api/company/primary_data/:companyProject',
+    'company/primary_data/:companyProject',
+    'api/companys/primary_data/:companyProject',
+    'companys/primary_data/:companyProject',
+  ])
   async updatePrimaryDataGiLegacy(
     @Param('companyProject') companyProject: string,
     @Body() body: Record<string, any>,
