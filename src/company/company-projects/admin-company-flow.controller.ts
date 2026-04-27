@@ -1007,30 +1007,14 @@ export class AdminCompanyFlowController {
     return this.companyProjectsService.payOutstandingDueAmountByProjectId(projectId, dto);
   }
 
-  @Get([
-    'api/company/primary_data/:companyProject',
-    'company/primary_data/:companyProject',
-    'api/companys/primary_data/:companyProject',
-    'companys/primary_data/:companyProject',
-  ])
+  @Get('company/primary_data/:companyProject')
   async getPrimaryDataGiLegacy(
     @Param('companyProject') companyProject: string,
-    @Query('form_type') formType?: string,
-    @Query('formType') formTypeAlt?: string,
   ): Promise<any> {
-    const requestedType = String(formType ?? formTypeAlt ?? '').trim().toLowerCase();
-    if (requestedType === 'ee') {
-      return this.companyProjectsService.getPrimaryDataEeLegacyByProjectId(companyProject);
-    }
     return this.companyProjectsService.getPrimaryDataGiLegacyByProjectId(companyProject);
   }
 
-  @Post([
-    'api/company/primary_data/:companyProject',
-    'company/primary_data/:companyProject',
-    'api/companys/primary_data/:companyProject',
-    'companys/primary_data/:companyProject',
-  ])
+  @Post('company/primary_data/:companyProject')
   async savePrimaryDataGiLegacy(
     @Param('companyProject') companyProject: string,
     @Body() body: Record<string, any>,
@@ -1041,12 +1025,7 @@ export class AdminCompanyFlowController {
     );
   }
 
-  @Patch([
-    'api/company/primary_data/:companyProject',
-    'company/primary_data/:companyProject',
-    'api/companys/primary_data/:companyProject',
-    'companys/primary_data/:companyProject',
-  ])
+  @Patch('company/primary_data/:companyProject')
   async updatePrimaryDataGiLegacy(
     @Param('companyProject') companyProject: string,
     @Body() body: Record<string, any>,
@@ -1208,17 +1187,6 @@ export class AdminCompanyFlowController {
       if (error instanceof HttpException) throw error;
       return { status: 'error', message: 'Some Error Occurred...' };
     }
-  }
-
-  @Get('api/admin/upload_inv/:companyProject')
-  @Get('admin/upload_inv/:companyProject')
-  async getExpenseInvoices(
-    @Param('companyProject') companyProject: string,
-  ): Promise<any> {
-    return this.companyProjectsService.getInvoicesByProjectIdAndPaymentFor(
-      companyProject,
-      'expA',
-    );
   }
 
   @Patch('api/admin/upload_inv/:companyProject/:invoiceId')
