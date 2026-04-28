@@ -14,6 +14,12 @@ export class Facilitator {
   @Prop({ trim: true })
   mobile?: string;
 
+  @Prop({ trim: true })
+  consultant_id?: string;
+
+  @Prop({ select: false })
+  password?: string;
+
   @Prop({ default: '1' })
   status: string;
 
@@ -112,6 +118,46 @@ export class Facilitator {
 
   @Prop()
   profile_image?: string;
+
+  @Prop()
+  educational_qualification?: string;
+
+  @Prop()
+  additional_professional_qualification?: string;
+
+  @Prop()
+  total_years_professional_experience?: string;
+
+  @Prop()
+  years_env_sustainability?: string;
+
+  @Prop()
+  areas_of_specialization?: string;
+
+  @Prop()
+  company_website?: string;
+
+  @Prop()
+  linkedin_profile?: string;
+
+  @Prop()
+  brief_profile_individual?: string;
+
+  @Prop()
+  brief_profile_organization?: string;
+
+  @Prop()
+  projects_handled?: string;
+
+  @Prop({ default: false })
+  declaration_accepted?: boolean;
+
+  /**
+   * Per uploaded document: admin approve/reject. Keys match multer field names
+   * (e.g. vendor_registration_form, projects_handled). Re-upload resets key to Pending.
+   */
+  @Prop({ type: Object, default: {} })
+  document_approvals?: Record<string, { status?: string; remarks?: string }>;
 
   @Prop({ default: 'Pending' })
   approval_status?: string;

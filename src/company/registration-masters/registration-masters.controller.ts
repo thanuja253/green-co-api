@@ -33,6 +33,17 @@ export class RegistrationMastersController {
   }
 
   /**
+   * GET /api/company/all-states
+   * Returns complete states master list (including inactive).
+   */
+  @Get('all-states')
+  @Get('states-all')
+  @Get('states_all')
+  async getAllStatesUnfiltered() {
+    return this.registrationMastersService.getAllStatesMaster();
+  }
+
+  /**
    * GET /api/company/groups-sectors
    * Returns distinct groups and all sectors (with group_name) for GROUP / SECTOR UI (e.g. Primary Data checklist page).
    */

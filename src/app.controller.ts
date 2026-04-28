@@ -20,6 +20,9 @@ export class AppController {
         assessorChangePassword: '/api/assessor/auth/change-password',
         assessorForgotPassword: '/api/assessor/auth/forgot-password',
         assessorMyProjects: '/api/assessor/auth/myprojects',
+        facilitatorLogin: '/api/facilitator/auth/login',
+        facilitatorChangePassword: '/api/facilitator/auth/change-password',
+        facilitatorForgotPassword: '/api/facilitator/auth/forgot-password',
       },
     };
   }

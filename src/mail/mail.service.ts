@@ -185,6 +185,14 @@ export class MailService {
     );
   }
 
+  private getFacilitatorPortalLoginUrl(): string {
+    const base = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
+    return (
+      (process.env.FACILITATOR_LOGIN_URL || '').trim() ||
+      `${base}/facilitator/login`
+    );
+  }
+
   async sendAssessorCredentialsEmail(
     email: string,
     assessorName: string,
@@ -304,6 +312,95 @@ export class MailService {
           <p><strong>Temporary Password:</strong> ${temporaryPassword}</p>
           <p>Please sign in and change your password after login.</p>
           <p><a href="${loginUrl}" target="_blank">Login to Assessor Portal</a></p>
+          <p>If the button does not open, use this URL: ${loginUrl}</p>
+          <p>Best regards,<br/>GreenCo Team</p>
+        </div>
+      `,
+    };
+    try {
+      await this.transporter.sendMail(mailOptions);
+    } catch (err) {
+      this.logSmtpErrorContext(err, email);
+      throw err;
+    }
+  }
+
+  async sendFacilitatorPasswordResetEmail(
+    email: string,
+    facilitatorName: string,
+    temporaryPassword: string,
+  ): Promise<void> {
+    const loginUrl = this.getFacilitatorPortalLoginUrl();
+    const mailOptions = {
+      from: process.env.MAIL_FROM_ADDRESS || 'noreply@greenco.com',
+      to: email,
+      subject: 'GreenCo - Facilitator password reset',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2>Welcome to GreenCo</h2>
+          <p>Dear ${facilitatorName || 'Facilitator'},</p>
+          <p>Your facilitator password has been reset by your request (or an administrator).</p>
+          <p><strong>Login Email:</strong> ${email}</p>
+          <p><strong>Temporary Password:</strong> ${temporaryPassword}</p>
+          <p>Please sign in and change your password after login.</p>
+          <p><a href="${loginUrl}" target="_blank">Login to Facilitator Portal</a></p>
+          <p>If the button does not open, use this URL: ${loginUrl}</p>
+          <p>Best regards,<br/>GreenCo Team</p>
+        </div>
+      `,
+    };
+    try {
+      await this.transporter.sendMail(mailOptions);
+    } catch (err) {
+      this.logSmtpErrorContext(err, email);
+      throw err;
+    }
+  }
+
+  async sendFacilitatorPasswordUpdateEmail(email: string, facilitatorName: string): Promise<void> {
+    const loginUrl = this.getFacilitatorPortalLoginUrl();
+    const mailOptions = {
+      from: process.env.MAIL_FROM_ADDRESS || 'noreply@greenco.com',
+      to: email,
+      subject: 'GreenCo - Facilitator password updated',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2>Password Updated</h2>
+          <p>Hello ${facilitatorName || 'Facilitator'},</p>
+          <p>Your password has been updated successfully.</p>
+          <p><a href="${loginUrl}" target="_blank">Login to Facilitator Portal</a></p>
+          <p>If this was not done by you, please contact GreenCo support immediately.</p>
+          <p>Best regards,<br/>GreenCo Team</p>
+        </div>
+      `,
+    };
+    try {
+      await this.transporter.sendMail(mailOptions);
+    } catch (err) {
+      this.logSmtpErrorContext(err, email);
+      throw err;
+    }
+  }
+
+  async sendFacilitatorCredentialsEmail(
+    email: string,
+    facilitatorName: string,
+    temporaryPassword: string,
+  ): Promise<void> {
+    const loginUrl = this.getFacilitatorPortalLoginUrl();
+    const mailOptions = {
+      from: process.env.MAIL_FROM_ADDRESS || 'noreply@greenco.com',
+      to: email,
+      subject: 'GreenCo - Facilitator account credentials',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2>Welcome to GreenCo</h2>
+          <p>Dear ${facilitatorName || 'Facilitator'},</p>
+          <p>Your facilitator account has been created by GreenCo Admin.</p>
+          <p><strong>Login Email:</strong> ${email}</p>
+          <p><strong>Temporary Password:</strong> ${temporaryPassword}</p>
+          <p>Please sign in and change your password after first login.</p>
+          <p><a href="${loginUrl}" target="_blank">Login to Facilitator Portal</a></p>
           <p>If the button does not open, use this URL: ${loginUrl}</p>
           <p>Best regards,<br/>GreenCo Team</p>
         </div>

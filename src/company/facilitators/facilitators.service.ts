@@ -5,17 +5,26 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
+import * as bcrypt from 'bcrypt';
 import { Model } from 'mongoose';
 import { Facilitator, FacilitatorDocument } from '../schemas/facilitator.schema';
 import { CreateFacilitatorProfileDto } from './dto/create-facilitator-profile.dto';
 import { ListFacilitatorsQueryDto } from './dto/list-facilitators-query.dto';
 import { lookupIfscDetails } from '../../common/ifsc-lookup.util';
+import { passwordGeneration } from '../../helpers/password.helper';
+import { MailService } from '../../mail/mail.service';
+import {
+  FACILITATOR_PROFILE_DOCUMENT_KEYS,
+  FACILITATOR_REVIEW_REQUIRED_DOCUMENT_KEYS,
+  isFacilitatorProfileDocumentKey,
+} from '../facilitator-auth/facilitator-profile-document-keys';
 
 @Injectable()
 export class FacilitatorsService {
   constructor(
     @InjectModel(Facilitator.name)
     private readonly facilitatorModel: Model<FacilitatorDocument>,
+    private readonly mailService: MailService,
   ) {}
 
   private toBool(value: unknown): boolean {
@@ -42,6 +51,7 @@ export class FacilitatorsService {
   private mapFacilitatorResponse(a: any) {
     return {
       id: a._id?.toString?.() || a._id,
+      consultant_id: a.consultant_id || '',
       name: a.name || '',
       email: a.email || '',
       mobile: a.mobile || '',
@@ -90,7 +100,57 @@ export class FacilitatorsService {
       approval_status: a.approval_status || 'Pending',
       approval_remarks: a.approval_remarks || '',
       profile_status: a.profile_status || 'Incomplete',
+      document_approvals: this.buildDocumentApprovalsMap(a),
     };
+  }
+
+  private getFacilitatorDocumentPath(source: any, key: string): string {
+    if (key === 'brief_profile_individual') {
+      return String(source?.brief_profile_individual || source?.biodata || '').trim();
+    }
+    return String(source?.[key] || '').trim();
+  }
+
+  private buildReviewRequiredApprovalsMap(source: any): Record<string, { status: string; remarks: string }> {
+    const stored = (source?.document_approvals || {}) as Record<string, { status?: string; remarks?: string }>;
+    const result: Record<string, { status: string; remarks: string }> = {};
+    for (const key of FACILITATOR_REVIEW_REQUIRED_DOCUMENT_KEYS) {
+      const pathVal = this.getFacilitatorDocumentPath(source, key);
+      if (!pathVal) continue;
+      const existing = stored[key] || {};
+      result[key] = {
+        status: String(existing.status || 'Pending'),
+        remarks: String(existing.remarks ?? '').trim(),
+      };
+    }
+    return result;
+  }
+
+  private buildDocumentApprovalsMap(source: any): Record<string, { status: string; remarks: string }> {
+    const stored = (source?.document_approvals || {}) as Record<string, { status?: string; remarks?: string }>;
+    const result: Record<string, { status: string; remarks: string }> = {};
+    for (const key of FACILITATOR_PROFILE_DOCUMENT_KEYS) {
+      const pathVal = this.getFacilitatorDocumentPath(source, key);
+      if (!pathVal) continue;
+      const existing = stored[key] || {};
+      result[key] = {
+        status: String(existing.status || 'Pending'),
+        remarks: String(existing.remarks ?? '').trim(),
+      };
+    }
+    return result;
+  }
+
+  private async getNextConsultantId(): Promise<string> {
+    const latest = await this.facilitatorModel
+      .findOne({ consultant_id: { $regex: '^F\\d+$', $options: 'i' } })
+      .sort({ consultant_id: -1 })
+      .select('consultant_id')
+      .lean();
+    const current = String((latest as any)?.consultant_id || '').trim().toUpperCase();
+    const currentNum = Number.parseInt(current.replace(/^F/, ''), 10);
+    const next = Number.isFinite(currentNum) ? currentNum + 1 : 1;
+    return `F${String(next).padStart(5, '0')}`;
   }
 
   private async deriveBankDetails(
@@ -152,23 +212,56 @@ export class FacilitatorsService {
         errors: { email: ['Facilitator with this email already exists.'] },
       });
     }
+    const tempPassword = passwordGeneration(12);
+    const passwordHash = await bcrypt.hash(tempPassword, 10);
+
     const facilitator = await this.facilitatorModel.create({
       name: name.trim(),
       email: normalizedEmail,
       mobile: mobile.trim(),
+      consultant_id: await this.getNextConsultantId(),
       status: '1',
       approval_status: 'Pending',
       profile_status: 'Incomplete',
+      password: passwordHash,
     });
+
+    let credentialsEmailSent = false;
+    let emailErrorMessage: string | null = null;
+    try {
+      await this.mailService.sendFacilitatorCredentialsEmail(
+        normalizedEmail,
+        name.trim(),
+        tempPassword,
+      );
+      credentialsEmailSent = true;
+    } catch (error) {
+      const rawMessage =
+        String((error as any)?.message || '').trim() ||
+        'Failed to send credentials email. Please retry later.';
+      const lower = rawMessage.toLowerCase();
+      const looksLikeResendSandbox =
+        (lower.includes('resend api error 403') || lower.includes('validation_error')) &&
+        (lower.includes('testing emails') || lower.includes('own email address'));
+      emailErrorMessage = looksLikeResendSandbox
+        ? 'Credentials email blocked by Resend sandbox mode. Verify a sending domain and use a verified from-address to send to external recipients.'
+        : rawMessage;
+    }
+
     return {
       status: 'success',
-      message: 'Facilitator added successfully',
+      message: credentialsEmailSent
+        ? 'Facilitator created. Credentials sent to email.'
+        : 'Facilitator created, but credentials email could not be sent.',
       data: {
         id: facilitator._id.toString(),
+        consultant_id: (facilitator as any).consultant_id || '',
         name: facilitator.name,
         email: facilitator.email,
         mobile: (facilitator as any).mobile,
         status: facilitator.status,
+        credentials_email_sent: credentialsEmailSent,
+        ...(emailErrorMessage ? { credentials_email_error: emailErrorMessage } : {}),
       },
     };
   }
@@ -255,6 +348,7 @@ export class FacilitatorsService {
       name: dto.name.trim(),
       email: normalizedEmail,
       mobile: (dto.mobile || '').trim(),
+      consultant_id: await this.getNextConsultantId(),
       industry_category: dto.industry_category || '',
       alternate_mobile: dto.alternate_mobile || '',
       address_line_1: dto.address_line_1 || '',
@@ -288,8 +382,29 @@ export class FacilitatorsService {
       cancelled_cheque: filePath(files?.cancelled_cheque),
       profile_image: filePath(files?.profile_image),
       status: (dto.status || '1').toString(),
-      approval_status: 'Pending',
+      approval_status: 'Approved',
+      approval_remarks: '',
       profile_status: 'Complete',
+      document_approvals: {
+        ...(filePath(files?.profile_image) ? { profile_image: { status: 'Approved', remarks: '' } } : {}),
+        ...(filePath(files?.biodata) ? { biodata: { status: 'Approved', remarks: '' } } : {}),
+        ...(filePath(files?.vendor_registration_form)
+          ? { vendor_registration_form: { status: 'Approved', remarks: '' } }
+          : {}),
+        ...(filePath(files?.non_disclosure_agreement)
+          ? { non_disclosure_agreement: { status: 'Approved', remarks: '' } }
+          : {}),
+        ...(filePath(files?.health_declaration)
+          ? { health_declaration: { status: 'Approved', remarks: '' } }
+          : {}),
+        ...(filePath(files?.gst_declaration)
+          ? { gst_declaration: { status: 'Approved', remarks: '' } }
+          : {}),
+        ...(filePath(files?.pan_card) ? { pan_card: { status: 'Approved', remarks: '' } } : {}),
+        ...(filePath(files?.cancelled_cheque)
+          ? { cancelled_cheque: { status: 'Approved', remarks: '' } }
+          : {}),
+      },
     });
     return {
       status: 'success',
@@ -349,6 +464,8 @@ export class FacilitatorsService {
     row.branch_name = bankInfo.branch_name;
     row.ifsc_code = bankInfo.ifsc_code;
     row.status = (dto.status || row.status || '1').toString();
+    row.approval_status = 'Approved';
+    row.approval_remarks = '';
     row.profile_image = filePath(files?.profile_image) ?? row.profile_image;
     row.biodata = filePath(files?.biodata) ?? row.biodata;
     row.vendor_registration_form = filePath(files?.vendor_registration_form) ?? row.vendor_registration_form;
@@ -357,6 +474,27 @@ export class FacilitatorsService {
     row.gst_declaration = filePath(files?.gst_declaration) ?? row.gst_declaration;
     row.pan_card = filePath(files?.pan_card) ?? row.pan_card;
     row.cancelled_cheque = filePath(files?.cancelled_cheque) ?? row.cancelled_cheque;
+    const prev = ((row as any).document_approvals || {}) as Record<
+      string,
+      { status?: string; remarks?: string }
+    >;
+    const docApprovals: Record<string, { status: string; remarks: string }> = {};
+    for (const k of Object.keys(prev)) {
+      const e = prev[k];
+      docApprovals[k] = {
+        status: String(e?.status || 'Pending'),
+        remarks: String(e?.remarks ?? '').trim(),
+      };
+    }
+    if (files?.profile_image?.[0]) docApprovals.profile_image = { status: 'Approved', remarks: '' };
+    if (files?.biodata?.[0]) docApprovals.biodata = { status: 'Approved', remarks: '' };
+    if (files?.vendor_registration_form?.[0]) docApprovals.vendor_registration_form = { status: 'Approved', remarks: '' };
+    if (files?.non_disclosure_agreement?.[0]) docApprovals.non_disclosure_agreement = { status: 'Approved', remarks: '' };
+    if (files?.health_declaration?.[0]) docApprovals.health_declaration = { status: 'Approved', remarks: '' };
+    if (files?.gst_declaration?.[0]) docApprovals.gst_declaration = { status: 'Approved', remarks: '' };
+    if (files?.pan_card?.[0]) docApprovals.pan_card = { status: 'Approved', remarks: '' };
+    if (files?.cancelled_cheque?.[0]) docApprovals.cancelled_cheque = { status: 'Approved', remarks: '' };
+    (row as any).document_approvals = docApprovals;
     row.profile_status = 'Complete';
     await row.save();
 
@@ -392,11 +530,100 @@ export class FacilitatorsService {
 
     row.approval_status = approvalStatus;
     row.approval_remarks = (remarks || '').trim();
+    const remarksTrim = (remarks || '').trim();
+    if (approvalStatus === 'Approved' || approvalStatus === 'Rejected') {
+      const prev = ((row as any).document_approvals || {}) as Record<
+        string,
+        { status?: string; remarks?: string }
+      >;
+      const docApprovals: Record<string, { status: string; remarks: string }> = {};
+      for (const k of Object.keys(prev)) {
+        const e = prev[k];
+        docApprovals[k] = {
+          status: String(e?.status || 'Pending'),
+          remarks: String(e?.remarks ?? '').trim(),
+        };
+      }
+      for (const key of FACILITATOR_PROFILE_DOCUMENT_KEYS) {
+        const pathVal = this.getFacilitatorDocumentPath(row.toObject(), key);
+        if (!pathVal) continue;
+        docApprovals[key] = {
+          status: approvalStatus,
+          remarks: approvalStatus === 'Rejected' ? remarksTrim : '',
+        };
+      }
+      (row as any).document_approvals = docApprovals;
+    }
     await row.save();
 
     return {
       status: 'success',
       message: `Facilitator ${approvalStatus.toLowerCase()} successfully`,
+      data: this.mapFacilitatorResponse(row.toObject()),
+    };
+  }
+
+  async updateFacilitatorDocumentApprovalAdminFlow(
+    facilitatorId: string,
+    documentKey: string,
+    status: 'Approved' | 'Rejected' | 'Pending',
+    remarks?: string,
+  ) {
+    if (!isFacilitatorProfileDocumentKey(documentKey)) {
+      throw new BadRequestException({
+        status: 'error',
+        message: `Invalid document key. Allowed: ${FACILITATOR_PROFILE_DOCUMENT_KEYS.join(', ')}`,
+      });
+    }
+    const row = await this.facilitatorModel.findById(facilitatorId);
+    if (!row) throw new NotFoundException({ status: 'error', message: 'Facilitator not found' });
+    const pathVal = this.getFacilitatorDocumentPath(row.toObject(), documentKey);
+    if (!pathVal) {
+      throw new BadRequestException({
+        status: 'error',
+        message: `No file uploaded for document "${documentKey}"`,
+      });
+    }
+    const prev = ((row as any).document_approvals || {}) as Record<
+      string,
+      { status?: string; remarks?: string }
+    >;
+    const docApprovals: Record<string, { status: string; remarks: string }> = {};
+    for (const k of Object.keys(prev)) {
+      const e = prev[k];
+      docApprovals[k] = {
+        status: String(e?.status || 'Pending'),
+        remarks: String(e?.remarks ?? '').trim(),
+      };
+    }
+    docApprovals[documentKey] = {
+      status,
+      remarks: String(remarks ?? '').trim(),
+    };
+    (row as any).document_approvals = docApprovals;
+
+    const required = this.buildReviewRequiredApprovalsMap({
+      ...row.toObject(),
+      document_approvals: docApprovals,
+    });
+    const values = Object.values(required);
+    const anyRejected = values.some((v) => v.status === 'Rejected');
+    const anyPending = values.some((v) => v.status === 'Pending');
+    const allApproved = values.length > 0 && values.every((v) => v.status === 'Approved');
+    if (anyRejected) {
+      row.approval_status = 'Rejected';
+    } else if (anyPending) {
+      row.approval_status = 'Pending';
+      row.approval_remarks = '';
+    } else if (allApproved) {
+      row.approval_status = 'Approved';
+      row.approval_remarks = '';
+    }
+
+    await row.save();
+    return {
+      status: 'success',
+      message: `Document ${documentKey} marked as ${status}`,
       data: this.mapFacilitatorResponse(row.toObject()),
     };
   }

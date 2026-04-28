@@ -8,6 +8,7 @@ import { CreateFacilitatorDto } from './dto/create-facilitator.dto';
 import { CreateFacilitatorProfileDto } from './dto/create-facilitator-profile.dto';
 import { ListFacilitatorsQueryDto } from './dto/list-facilitators-query.dto';
 import { UpdateFacilitatorApprovalDto } from './dto/update-facilitator-approval.dto';
+import { UpdateFacilitatorDocumentApprovalDto } from './dto/update-facilitator-document-approval.dto';
 import { Request } from 'express';
 
 @Controller()
@@ -114,6 +115,26 @@ export class FacilitatorsController {
     return this.facilitatorsService.updateFacilitatorApprovalStatusAdminFlow(
       facilitatorId,
       'rejected',
+      dto.remarks,
+    );
+  }
+
+  /**
+   * Admin: approve/reject/pending one facilitator-uploaded document.
+   * Re-upload by facilitator resets that document to Pending.
+   */
+  @Post('api/admin/facilitators/:facilitatorId/documents/:documentKey/approval-status')
+  @Post('admin/facilitators/:facilitatorId/documents/:documentKey/approval-status')
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
+  async updateFacilitatorDocumentApproval(
+    @Param('facilitatorId') facilitatorId: string,
+    @Param('documentKey') documentKey: string,
+    @Body() dto: UpdateFacilitatorDocumentApprovalDto,
+  ): Promise<any> {
+    return this.facilitatorsService.updateFacilitatorDocumentApprovalAdminFlow(
+      facilitatorId,
+      documentKey,
+      dto.status,
       dto.remarks,
     );
   }

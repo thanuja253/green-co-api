@@ -3,6 +3,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
 import { CompanyAuthModule } from './company/company-auth/company-auth.module';
 import { AssessorAuthModule } from './company/assessor-auth/assessor-auth.module';
+import { FacilitatorAuthModule } from './company/facilitator-auth/facilitator-auth.module';
 import { CompanyProjectsModule } from './company/company-projects/company-projects.module';
 import { NotificationsModule } from './company/notifications/notifications.module';
 import { FacilitatorsModule } from './company/facilitators/facilitators.module';
@@ -38,6 +39,7 @@ import { ScheduleModule } from '@nestjs/schedule';
     }),
     CompanyAuthModule,
     AssessorAuthModule,
+    FacilitatorAuthModule,
     ScheduleModule.forRoot(),
     CompanyProjectsModule,
     NotificationsModule,
