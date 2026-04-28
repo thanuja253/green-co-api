@@ -3,6 +3,7 @@ import {
   Body,
   Controller,
   Get,
+  Header,
   Post,
   Query,
   Request,
@@ -140,20 +141,68 @@ export class CompanyAuthController {
     'companies-list',
     'submitted-companies',
     'submitted_companies',
+    'submitted-company',
+    'submitted_company',
     'registered-companies',
     'registered_companies',
+    'registered-company',
+    'registered_company',
     'registerd-companies',
     'registerd_companies',
+    'registerd-company',
+    'registerd_company',
   ])
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+  @Header('Pragma', 'no-cache')
+  @Header('Expires', '0')
   async getCompaniesList(
     @Query() query?: Record<string, any>,
   ) {
     return this.companyAuthService.getCompaniesList(query);
   }
 
+  @Post([
+    'companies-list',
+    'submitted-companies',
+    'submitted_companies',
+    'submitted-company',
+    'submitted_company',
+    'registered-companies',
+    'registered_companies',
+    'registered-company',
+    'registered_company',
+    'registerd-companies',
+    'registerd_companies',
+    'registerd-company',
+    'registerd_company',
+  ])
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+  @Header('Pragma', 'no-cache')
+  @Header('Expires', '0')
+  async postCompaniesList(
+    @Body() body?: Record<string, any>,
+  ) {
+    return this.companyAuthService.getCompaniesList(body || {});
+  }
+
   @Get('companies-filters')
   async getCompanyFilterOptions() {
     return this.companyAuthService.getCompanyListFilters();
+  }
+
+  @Post('companies-filters')
+  async postCompanyFilterOptions() {
+    return this.companyAuthService.getCompanyListFilters();
+  }
+
+  @Get(['status_change', 'company-status', 'update-status', 'account-status'])
+  async getLegacyStatusChange(@Query() query?: Record<string, any>) {
+    return this.companyAuthService.updateCompanyStatus(query || {});
+  }
+
+  @Post(['status_change', 'company-status', 'update-status', 'account-status'])
+  async postLegacyStatusChange(@Body() body?: Record<string, any>) {
+    return this.companyAuthService.updateCompanyStatus(body || {});
   }
 }
 

@@ -204,7 +204,6 @@ export class AssessorCompanyProjectsController {
   /**
    * Assessor portal expense list (Finance -> Expenses tab).
    */
-  @UseGuards(AssessorJwtAuthGuard, AssessorAccountStatusGuard)
   @Get([
     'api/assessor/projects/:projectId/expenses',
     'assessor/projects/:projectId/expenses',

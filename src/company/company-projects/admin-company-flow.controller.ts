@@ -462,6 +462,66 @@ export class AdminCompanyFlowController {
     res.status(200).send(exported.content);
   }
 
+  @Get('api/admin/company_bulk_export')
+  @Get('admin/company_bulk_export')
+  async exportCompaniesBulk(
+    @Query() query: Record<string, any>,
+    @Res() res: Response,
+  ): Promise<void> {
+    const exported = await this.companyProjectsService.exportCompaniesBulk(query || {});
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${exported.filename}"`);
+    res.status(200).send(exported.content);
+  }
+
+  @Get('api/admin/primary_data_form_comparsion')
+  @Get('admin/primary_data_form_comparsion')
+  async exportPrimaryDataComparison(
+    @Query() query: Record<string, any>,
+    @Res() res: Response,
+  ): Promise<void> {
+    const exported = await this.companyProjectsService.exportPrimaryDataFormComparison(
+      query || {},
+    );
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${exported.filename}"`);
+    res.status(200).send(exported.content);
+  }
+
+  @Get('api/admin/rating_data_form_comparsion')
+  @Get('admin/rating_data_form_comparsion')
+  async exportRatingDataComparison(
+    @Query() query: Record<string, any>,
+    @Res() res: Response,
+  ): Promise<void> {
+    const exported = await this.companyProjectsService.exportRatingDataFormComparison(
+      query || {},
+    );
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    res.setHeader('Content-Disposition', `attachment; filename="${exported.filename}"`);
+    res.status(200).send(exported.buffer);
+  }
+
+  @Get('api/admin/check_comparsion_report')
+  @Get('admin/check_comparsion_report')
+  async exportScoringComparison(
+    @Query() query: Record<string, any>,
+    @Res() res: Response,
+  ): Promise<void> {
+    const exported = await this.companyProjectsService.exportScoringComparisonReport(
+      query || {},
+    );
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    res.setHeader('Content-Disposition', `attachment; filename="${exported.filename}"`);
+    res.status(200).send(exported.buffer);
+  }
+
   @Post('api/admin/assessors/:assessorId/approval-status')
   @Post('admin/assessors/:assessorId/approval-status')
   @Post('api/admin/assessor_status/:assessorId')
@@ -991,6 +1051,18 @@ export class AdminCompanyFlowController {
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
   async getReports(@Query() query: ReportsQueryDto): Promise<any> {
     return this.companyProjectsService.getReportsAdminFlow(query);
+  }
+
+  /**
+   * Certification completed listing:
+   * projects where certificate is uploaded.
+   */
+  @Get('api/admin/projects/certification-completed')
+  @Get('admin/projects/certification-completed')
+  @Get('api/admin/projects/certification_completed')
+  @Get('admin/projects/certification_completed')
+  async listCertificationCompletedProjects(@Query() query: Record<string, any>): Promise<any> {
+    return this.companyProjectsService.listCertificationCompletedProjects(query);
   }
 
   @Get('api/admin/financeDocument/:companyProject')

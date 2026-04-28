@@ -924,6 +924,472 @@ export class CompanyProjectsService {
     };
   }
 
+  private csvEscape(value: unknown): string {
+    return `"${String(value ?? '').replace(/"/g, '""')}"`;
+  }
+
+  private parseLegacyDateRange(query?: Record<string, any>): {
+    fromDate: Date | null;
+    toDate: Date | null;
+    hasFrom: boolean;
+    hasTo: boolean;
+  } {
+    const fromInput = String(
+      query?.fromdate ?? query?.from_date ?? query?.fromDate ?? '',
+    ).trim();
+    const toInput = String(query?.todate ?? query?.to_date ?? query?.toDate ?? '').trim();
+    const fromDate = fromInput ? new Date(fromInput) : null;
+    const toDate = toInput ? new Date(toInput) : null;
+    const hasFrom = !!(fromDate && !Number.isNaN(fromDate.getTime()));
+    const hasTo = !!(toDate && !Number.isNaN(toDate.getTime()));
+    if (hasTo && toDate) toDate.setHours(23, 59, 59, 999);
+    return { fromDate, toDate, hasFrom, hasTo };
+  }
+
+  private async getCompanyManagementRowsForExports(
+    query?: Record<string, any>,
+  ): Promise<
+    Array<{
+      project_object_id: string;
+      project_id: string;
+      company_object_id: string;
+      reg_id: string;
+      name: string;
+      email: string;
+      mobile: string;
+      status: string;
+      state: string;
+      industry: string;
+      sector: string;
+      entity: string;
+      turnover: string;
+      turnover_numeric: number | null;
+      created_at: Date | null;
+    }>
+  > {
+    const q = query || {};
+    const name = String(q.name ?? '').trim();
+    const regId = String(q.reg_id ?? '').trim();
+    const projectCode = String(q.project_id ?? '').trim();
+    const phone = String(q.mobile ?? q.phone ?? '').trim();
+    const email = String(q.email ?? '').trim();
+    const status = String(q.status ?? q.account_status ?? '').trim();
+    const state = String(q.state ?? '').trim();
+    const industry = String(q.industry ?? q.type_of_industry ?? '').trim();
+    const sector = String(q.sector ?? q.type_of_sector ?? '').trim();
+    const entity = String(q.entity ?? q.type_of_entity ?? '').trim();
+    const minTurn = Number.parseFloat(String(q.fromturnover ?? q.turnover_min ?? '').trim());
+    const maxTurn = Number.parseFloat(String(q.toturnover ?? q.turnover_max ?? '').trim());
+    const { fromDate, toDate, hasFrom, hasTo } = this.parseLegacyDateRange(q);
+
+    const companyFilter: Record<string, any> = {};
+    if (name) companyFilter.name = { $regex: name, $options: 'i' };
+    if (regId) companyFilter.reg_id = { $regex: regId, $options: 'i' };
+    if (phone) companyFilter.mobile = { $regex: phone, $options: 'i' };
+    if (email) companyFilter.email = { $regex: email, $options: 'i' };
+    if (status && status !== 'All') companyFilter.account_status = status;
+
+    const companies = await this.companyModel
+      .find(companyFilter)
+      .select('_id reg_id name email mobile account_status turnover mst_sector_id createdAt')
+      .lean();
+    if (!companies.length) return [];
+
+    const companyById = new Map(companies.map((c: any) => [String(c._id), c]));
+    const companyIds = companies.map((c: any) => c._id);
+    const projectFilter: Record<string, any> = { company_id: { $in: companyIds } };
+    if (projectCode) {
+      projectFilter.project_id = { $regex: projectCode, $options: 'i' };
+    }
+
+    const projects = await this.projectModel
+      .find(projectFilter)
+      .select('_id company_id project_id registration_info createdAt')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const contains = (value: unknown, needle: string) =>
+      String(value ?? '').toLowerCase().includes(String(needle || '').toLowerCase());
+
+    return projects
+      .map((p: any) => {
+        const company = companyById.get(String(p.company_id));
+        const reg = p.registration_info || {};
+        const turnoverRaw = String(company?.turnover || reg.turnover || '').trim();
+        const turnoverNumeric = Number.parseFloat(turnoverRaw.replace(/[^0-9.]/g, ''));
+        return {
+          project_object_id: String(p._id),
+          project_id: String(p.project_id || ''),
+          company_object_id: String(company?._id || ''),
+          reg_id: String(company?.reg_id || ''),
+          name: String(company?.name || ''),
+          email: String(company?.email || ''),
+          mobile: String(company?.mobile || ''),
+          status: String(company?.account_status || ''),
+          state: String(reg.state || reg.state_name || reg.state_id || ''),
+          industry: String(reg.industry || reg.industry_name || reg.industry_id || ''),
+          sector: String(
+            reg.sector || reg.sector_name || reg.sector_id || company?.mst_sector_id || '',
+          ),
+          entity: String(reg.entity || reg.entity_name || reg.entity_id || ''),
+          turnover: turnoverRaw,
+          turnover_numeric: Number.isFinite(turnoverNumeric) ? turnoverNumeric : null,
+          created_at: p.createdAt || null,
+        };
+      })
+      .filter((r) => {
+        if (state && state !== 'All' && !contains(r.state, state)) return false;
+        if (industry && industry !== 'All' && !contains(r.industry, industry)) return false;
+        if (sector && sector !== 'All' && !contains(r.sector, sector)) return false;
+        if (entity && entity !== 'All' && !contains(r.entity, entity)) return false;
+        if (Number.isFinite(minTurn)) {
+          if (!Number.isFinite(Number(r.turnover_numeric)) || Number(r.turnover_numeric) < minTurn)
+            return false;
+        }
+        if (Number.isFinite(maxTurn)) {
+          if (!Number.isFinite(Number(r.turnover_numeric)) || Number(r.turnover_numeric) > maxTurn)
+            return false;
+        }
+        if (hasFrom || hasTo) {
+          const created = r.created_at ? new Date(r.created_at) : null;
+          if (!created || Number.isNaN(created.getTime())) return false;
+          if (hasFrom && fromDate && created < fromDate) return false;
+          if (hasTo && toDate && created > toDate) return false;
+        }
+        return true;
+      });
+  }
+
+  async exportCompaniesBulk(query?: Record<string, any>): Promise<{ filename: string; content: string }> {
+    const rows = await this.getCompanyManagementRowsForExports(query);
+    const headers = [
+      'reg_id',
+      'project_id',
+      'name',
+      'email',
+      'mobile',
+      'status',
+      'state',
+      'industry',
+      'sector',
+      'entity',
+      'turnover',
+      'created_at',
+    ];
+    const lines = [
+      headers.join(','),
+      ...rows.map((r) =>
+        [
+          r.reg_id,
+          r.project_id,
+          r.name,
+          r.email,
+          r.mobile,
+          r.status,
+          r.state,
+          r.industry,
+          r.sector,
+          r.entity,
+          r.turnover,
+          r.created_at ? new Date(r.created_at).toISOString() : '',
+        ]
+          .map((v) => this.csvEscape(v))
+          .join(','),
+      ),
+    ];
+    return {
+      filename: `company_bulk_export_${Date.now()}.csv`,
+      content: lines.join('\n'),
+    };
+  }
+
+  async exportPrimaryDataFormComparison(
+    query?: Record<string, any>,
+  ): Promise<{ filename: string; content: string }> {
+    const rows = await this.getCompanyManagementRowsForExports(query);
+    if (!rows.length) {
+      return { filename: `primary_data_form_comparsion_${Date.now()}.csv`, content: 'reg_id,project_id,name,final_submit_rows' };
+    }
+
+    const projectIds = rows
+      .map((r) => (Types.ObjectId.isValid(r.project_object_id) ? new Types.ObjectId(r.project_object_id) : null))
+      .filter((id): id is Types.ObjectId => !!id);
+
+    const grouped = await this.primaryDataFormModel.aggregate([
+      {
+        $match: {
+          project_id: { $in: projectIds },
+          final_submit: 1,
+          $or: [{ document: { $exists: false } }, { document: null }, { document: '' }],
+        },
+      },
+      { $group: { _id: '$project_id', submitted_rows: { $sum: 1 } } },
+    ]);
+    const countByProject = new Map(grouped.map((g: any) => [String(g._id), Number(g.submitted_rows || 0)]));
+
+    const filtered = rows.filter((r) => countByProject.has(r.project_object_id));
+    const lines = [
+      'reg_id,project_id,name,email,mobile,final_submit_rows',
+      ...filtered.map((r) =>
+        [r.reg_id, r.project_id, r.name, r.email, r.mobile, countByProject.get(r.project_object_id) || 0]
+          .map((v) => this.csvEscape(v))
+          .join(','),
+      ),
+    ];
+    return {
+      filename: `primary_data_form_comparsion_${Date.now()}.csv`,
+      content: lines.join('\n'),
+    };
+  }
+
+  async exportRatingDataFormComparison(
+    query?: Record<string, any>,
+  ): Promise<{ filename: string; buffer: Buffer }> {
+    const rows = await this.getCompanyManagementRowsForExports(query);
+    const projectIds = rows
+      .map((r) => (Types.ObjectId.isValid(r.project_object_id) ? new Types.ObjectId(r.project_object_id) : null))
+      .filter((id): id is Types.ObjectId => !!id);
+    const projectIdStrings = rows.map((r) => String(r.project_object_id)).filter(Boolean);
+
+    const scoreRows: any[] = projectIds.length || projectIdStrings.length
+      ? await this.mongoConnection.db
+      .collection('company_assesment_scoring')
+      .aggregate([
+        {
+          $match: {
+            $or: [{ project_id: { $in: projectIds } }, { project_id: { $in: projectIdStrings } }],
+            assesment_score: { $exists: true, $ne: null },
+          },
+        },
+        {
+          $group: {
+            _id: '$project_id',
+            total_rating_score: { $sum: { $toDouble: '$assesment_score' } },
+            assessor_updated_at: { $max: '$assessor_updated_at' },
+            updated_at: { $max: '$updatedAt' },
+          },
+        },
+      ])
+      .toArray()
+      : [];
+
+    const scoreByProject = new Map(scoreRows.map((r: any) => [String(r._id), r]));
+    const filtered = rows.filter((r) => scoreByProject.has(r.project_object_id));
+
+    const [projectDocs, coordinatorAssignments, facilitatorAssignments] = await Promise.all([
+      projectIds.length
+        ? this.projectModel
+            .find({ _id: { $in: projectIds } })
+            .select('_id percentage_score')
+            .lean()
+        : [],
+      projectIds.length
+        ? this.companyCoordinatorModel
+            .find({ project_id: { $in: projectIds } })
+            .populate('coordinator_id', 'name')
+            .select('project_id coordinator_id')
+            .lean()
+        : [],
+      projectIds.length
+        ? this.companyFacilitatorModel
+            .find({ project_id: { $in: projectIds } })
+            .populate('facilitator_id', 'name')
+            .select('project_id facilitator_id')
+            .lean()
+        : [],
+    ]);
+    const certificationRows: any[] = projectIds.length || projectIdStrings.length
+      ? await this.mongoConnection.db
+          .collection('certification_data')
+          .find(
+            {
+              $or: [{ project_id: { $in: projectIds } }, { project_id: { $in: projectIdStrings } }],
+            },
+            { projection: { project_id: 1, certification_type: 1 } },
+          )
+          .toArray()
+      : [];
+
+    const projectById = new Map((projectDocs as any[]).map((p) => [String(p._id), p]));
+    const coordinatorByProjectId = new Map(
+      (coordinatorAssignments as any[]).map((r) => [String(r.project_id), (r.coordinator_id as any)?.name || 'N/A']),
+    );
+    const facilitatorByProjectId = new Map(
+      (facilitatorAssignments as any[]).map((r) => [String(r.project_id), (r.facilitator_id as any)?.name || 'N/A']),
+    );
+    const certificationTypeByProjectId = new Map(
+      certificationRows.map((r: any) => [String(r.project_id), String(r.certification_type || '').trim()]),
+    );
+
+    const sectorIds = Array.from(
+      new Set(
+        filtered
+          .map((r) => String(r.sector || ''))
+          .filter((s) => Types.ObjectId.isValid(s))
+          .map((s) => new Types.ObjectId(s)),
+      ),
+    );
+    const sectors = sectorIds.length
+      ? await this.sectorModel.find({ _id: { $in: sectorIds } }).select('_id name').lean()
+      : [];
+    const sectorNameById = new Map((sectors as any[]).map((s) => [String(s._id), String(s.name || '')]));
+
+    let Workbook: any;
+    try {
+      const exceljs = await import('exceljs');
+      Workbook = exceljs.Workbook;
+    } catch {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Excel export requires the exceljs package. Run: npm install exceljs',
+      });
+    }
+
+    const wb = new Workbook();
+    const ws = wb.addWorksheet('RatingDataComparsion');
+    ws.columns = [
+      { header: '#', key: 'sno', width: 8 },
+      { header: 'Company Name', key: 'company_name', width: 28 },
+      { header: 'Rating Level', key: 'rating_level', width: 18 },
+      { header: 'Date of Rating Declaration', key: 'rating_date', width: 26 },
+      { header: 'Coordinator Name', key: 'coordinator_name', width: 24 },
+      { header: 'Facilitator Name', key: 'facilitator_name', width: 24 },
+      { header: 'CheckList', key: 'checklist', width: 22 },
+    ];
+
+    ws.addRows(
+      filtered.map((r, idx) => {
+        const scoreInfo = scoreByProject.get(r.project_object_id) || {};
+        const projectDoc = projectById.get(r.project_object_id) as any;
+        const percentage = Number(projectDoc?.percentage_score ?? 0);
+        const certificationType = certificationTypeByProjectId.get(r.project_object_id) || '';
+        const ratingLevel =
+          certificationType ||
+          (Number.isFinite(percentage) && percentage > 0 ? getCertificationType(percentage) : 'N/A');
+        const ratingDateRaw = scoreInfo?.assessor_updated_at || scoreInfo?.updated_at || null;
+        const ratingDate = ratingDateRaw ? new Date(ratingDateRaw).toISOString() : 'N/A';
+        const checklist =
+          sectorNameById.get(String(r.sector || '')) || String(r.sector || '').trim() || 'N/A';
+        return {
+          sno: idx + 1,
+          company_name: r.name || 'N/A',
+          rating_level: ratingLevel,
+          rating_date: ratingDate,
+          coordinator_name: coordinatorByProjectId.get(r.project_object_id) || 'N/A',
+          facilitator_name: facilitatorByProjectId.get(r.project_object_id) || 'N/A',
+          checklist,
+        };
+      }),
+    );
+
+    const buffer = (await wb.xlsx.writeBuffer()) as Buffer;
+    return {
+      filename: 'RatingData_Comparsion.xlsx',
+      buffer,
+    };
+  }
+
+  async exportScoringComparisonReport(
+    query?: Record<string, any>,
+  ): Promise<{ filename: string; buffer: Buffer }> {
+    const rows = await this.getCompanyManagementRowsForExports(query);
+    const projectIds = rows
+      .map((r) => (Types.ObjectId.isValid(r.project_object_id) ? new Types.ObjectId(r.project_object_id) : null))
+      .filter((id): id is Types.ObjectId => !!id);
+    const projectIdStrings = rows.map((r) => String(r.project_object_id)).filter(Boolean);
+
+    const scoreMatrix: any[] = projectIds.length || projectIdStrings.length
+      ? await this.mongoConnection.db
+      .collection('company_assesment_scoring')
+      .aggregate([
+        {
+          $match: {
+            $or: [{ project_id: { $in: projectIds } }, { project_id: { $in: projectIdStrings } }],
+            assesment_score: { $exists: true, $ne: null },
+          },
+        },
+        {
+          $group: {
+            _id: { project_id: '$project_id', criteria_id: '$criteria_id' },
+            score: { $sum: { $toDouble: '$assesment_score' } },
+          },
+        },
+      ])
+      .toArray()
+      : [];
+
+    const criteriaCollection = this.mongoConnection.db.collection('checklist_criterions');
+    const checklistTypes = await criteriaCollection
+      .find({}, { projection: { criterion_title: 1, criterion_sc: 1 } })
+      .sort({ _id: 1 })
+      .toArray();
+
+    const criteriaIdsFromScores = Array.from(
+      new Set(scoreMatrix.map((r: any) => String(r?._id?.criteria_id ?? ''))),
+    ).filter(Boolean);
+    const criteriaIds = checklistTypes.length
+      ? checklistTypes.map((c: any) => String(c._id))
+      : criteriaIdsFromScores.sort();
+    const criteriaHeaderById = new Map<string, string>();
+    for (const c of checklistTypes as any[]) {
+      const title = String(c?.criterion_title || '').trim() || 'Criteria';
+      const sc = String(c?.criterion_sc || '').trim();
+      criteriaHeaderById.set(String(c._id), sc ? `${title}-(${sc})` : title);
+    }
+
+    const scoreMap = new Map<string, number>();
+    for (const row of scoreMatrix as any[]) {
+      const key = `${String(row?._id?.project_id)}::${String(row?._id?.criteria_id)}`;
+      scoreMap.set(key, Number(row?.score || 0));
+    }
+
+    let Workbook: any;
+    try {
+      const exceljs = await import('exceljs');
+      Workbook = exceljs.Workbook;
+    } catch {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Excel export requires the exceljs package. Run: npm install exceljs',
+      });
+    }
+
+    const wb = new Workbook();
+    const ws = wb.addWorksheet('ScoringComparsion');
+    ws.columns = [
+      { header: '#', key: 'sno', width: 8 },
+      { header: 'Name', key: 'name', width: 28 },
+      { header: 'Location', key: 'location', width: 22 },
+      { header: 'Project Id', key: 'project_id', width: 18 },
+      ...criteriaIds.map((id) => ({
+        header: criteriaHeaderById.get(id) || `criteria_${id}`,
+        key: `criteria_${id}`,
+        width: 16,
+      })),
+    ];
+
+    ws.addRows(
+      rows.map((r, idx) => {
+        const base: Record<string, string | number> = {
+          sno: idx + 1,
+          name: r.name || '',
+          location: String(r.state || '').trim() || 'N/A',
+          project_id: r.project_id || '',
+        };
+        for (const cId of criteriaIds) {
+          base[`criteria_${cId}`] = scoreMap.get(`${r.project_object_id}::${cId}`) || 0;
+        }
+        return base;
+      }),
+    );
+
+    const buffer = (await wb.xlsx.writeBuffer()) as Buffer;
+    return {
+      filename: 'Score_Comparsion.xlsx',
+      buffer,
+    };
+  }
+
   async updateAssessorApprovalStatusAdminFlow(
     assessorId: string,
     statusInput?: string,
@@ -1113,7 +1579,10 @@ export class CompanyProjectsService {
     const companyIds = [...new Set(projects.map((p: any) => String(p.company_id)))];
 
     const [companies, facilitatorAssignments, assessorAssignments, coordinatorAssignments] = await Promise.all([
-      this.companyModel.find({ _id: { $in: companyIds } }).select('_id name email account_status reg_id').lean(),
+      this.companyModel
+        .find({ _id: { $in: companyIds } })
+        .select('_id name email account_status reg_id turnover')
+        .lean(),
       this.companyFacilitatorModel
         .find({ project_id: { $in: projectIds } })
         .populate('facilitator_id', 'name')
@@ -1144,6 +1613,8 @@ export class CompanyProjectsService {
 
     const rows = projects.map((p: any) => {
       const company = companyById.get(String(p.company_id)) || {};
+      const turnoverRaw = String((company as any).turnover || '').trim();
+      const turnoverNumeric = Number.parseFloat(turnoverRaw.replace(/[^0-9.]/g, ''));
       return {
         project_id: String(p._id),
         company_id: String(p.company_id),
@@ -1154,6 +1625,8 @@ export class CompanyProjectsService {
         company_status_value: (company as any).account_status || '',
         email: (company as any).email || '',
         reg_id: (company as any).reg_id || '',
+        turnover: turnoverRaw,
+        turnover_numeric: Number.isFinite(turnoverNumeric) ? turnoverNumeric : null,
         facilitator: facilitatorByProjectId.get(String(p._id)) || '',
         assessor: assessorByProjectId.get(String(p._id)) || '',
         coordinator: coordinatorByProjectId.get(String(p._id)) || '',
@@ -1163,6 +1636,22 @@ export class CompanyProjectsService {
 
     const contains = (value: string, needle: string) =>
       String(value || '').toLowerCase().includes(String(needle || '').trim().toLowerCase());
+
+    const minTurn = Number.parseFloat(
+      String(query?.turnover_min ?? query?.fromturnover ?? '').trim(),
+    );
+    const maxTurn = Number.parseFloat(
+      String(query?.turnover_max ?? query?.toturnover ?? '').trim(),
+    );
+    const fromDateInput = String(query?.from_date ?? '').trim();
+    const toDateInput = String(query?.to_date ?? '').trim();
+    const fromDate = fromDateInput ? new Date(fromDateInput) : null;
+    const toDate = toDateInput ? new Date(toDateInput) : null;
+    const hasValidFromDate = !!(fromDate && !Number.isNaN(fromDate.getTime()));
+    const hasValidToDate = !!(toDate && !Number.isNaN(toDate.getTime()));
+    if (hasValidToDate && toDate) {
+      toDate.setHours(23, 59, 59, 999);
+    }
 
     const filtered = rows.filter((r) => {
       if (query?.name?.trim() && !contains(r.company_name, query.name)) return false;
@@ -1175,6 +1664,18 @@ export class CompanyProjectsService {
         if (normalized === 'active' && r.company_status_value !== '1') return false;
         if (normalized === 'inactive' && r.company_status_value === '1') return false;
         if (!['active', 'inactive'].includes(normalized) && r.company_status_value !== query.company_status.trim()) return false;
+      }
+      if (Number.isFinite(minTurn)) {
+        if (!Number.isFinite(Number(r.turnover_numeric)) || Number(r.turnover_numeric) < minTurn) return false;
+      }
+      if (Number.isFinite(maxTurn)) {
+        if (!Number.isFinite(Number(r.turnover_numeric)) || Number(r.turnover_numeric) > maxTurn) return false;
+      }
+      if (hasValidFromDate || hasValidToDate) {
+        const rowDate = r.created_at ? new Date(r.created_at) : null;
+        if (!rowDate || Number.isNaN(rowDate.getTime())) return false;
+        if (hasValidFromDate && fromDate && rowDate < fromDate) return false;
+        if (hasValidToDate && toDate && rowDate > toDate) return false;
       }
       return true;
     });
@@ -1205,6 +1706,118 @@ export class CompanyProjectsService {
         facilitator: query?.facilitator ?? '',
         assessor: query?.assessor ?? '',
         coordinator: query?.coordinator ?? '',
+        turnover_min: query?.turnover_min ?? query?.fromturnover ?? '',
+        turnover_max: query?.turnover_max ?? query?.toturnover ?? '',
+        from_date: query?.from_date ?? '',
+        to_date: query?.to_date ?? '',
+      },
+    };
+  }
+
+  async listCertificationCompletedProjects(query?: {
+    page?: string;
+    limit?: string;
+    name?: string;
+    email?: string;
+    project_code?: string;
+  }) {
+    const parsedPage = Number.parseInt(String(query?.page ?? '1'), 10);
+    const parsedLimit = Number.parseInt(String(query?.limit ?? '10'), 10);
+    const page = Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1;
+    const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : 10;
+    const cappedLimit = Math.min(limit, 100);
+
+    const projectFilter: Record<string, any> = {
+      certificate_document_url: { $exists: true, $ne: '' },
+    };
+    if (String(query?.project_code || '').trim()) {
+      projectFilter.project_id = {
+        $regex: String(query?.project_code || '').trim(),
+        $options: 'i',
+      };
+    }
+
+    const projects = await this.projectModel
+      .find(projectFilter)
+      .select(
+        '_id company_id project_id certificate_document_url certificate_document_filename certificate_upload_date next_activities_id createdAt',
+      )
+      .sort({ certificate_upload_date: -1, createdAt: -1 })
+      .lean();
+
+    if (!projects.length) {
+      return {
+        status: 'success',
+        message: 'Certification completed projects fetched successfully',
+        data: [],
+        pagination: {
+          page,
+          limit: cappedLimit,
+          total: 0,
+          total_pages: 1,
+          has_next_page: false,
+          has_prev_page: false,
+        },
+      };
+    }
+
+    const companyIds = [...new Set(projects.map((p: any) => String(p.company_id)).filter(Boolean))];
+    const companies = await this.companyModel
+      .find({ _id: { $in: companyIds } })
+      .select('_id name email mobile reg_id')
+      .lean();
+    const companyById = new Map(companies.map((c: any) => [String(c._id), c]));
+
+    const baseUrl = process.env.API_BASE_URL || 'http://localhost:3001';
+    const rows = projects
+      .map((p: any) => {
+        const company = companyById.get(String(p.company_id)) || {};
+        return {
+          project_id: String(p._id),
+          project_code: String(p.project_id || ''),
+          company_id: String(p.company_id || ''),
+          reg_id: String((company as any).reg_id || ''),
+          company_name: String((company as any).name || ''),
+          email: String((company as any).email || ''),
+          mobile: String((company as any).mobile || ''),
+          certificate_uploaded_at: p.certificate_upload_date || null,
+          certificate_document: p.certificate_document_url
+            ? `${baseUrl.replace(/\/$/, '')}/api/admin/projects/${String(p._id)}/certificate-document`
+            : null,
+          certificate_document_filename: String(p.certificate_document_filename || 'certificate.pdf'),
+          next_activities_id: Number(p.next_activities_id || 0),
+          workflow_status: Number(p.next_activities_id || 0) >= 24 ? 'Project Closed' : 'Certificate Uploaded',
+        };
+      })
+      .filter((r: any) => {
+        const nameFilter = String(query?.name || '').trim().toLowerCase();
+        const emailFilter = String(query?.email || '').trim().toLowerCase();
+        if (nameFilter && !String(r.company_name || '').toLowerCase().includes(nameFilter)) return false;
+        if (emailFilter && !String(r.email || '').toLowerCase().includes(emailFilter)) return false;
+        return true;
+      });
+
+    const total = rows.length;
+    const totalPages = Math.max(1, Math.ceil(total / cappedLimit));
+    const start = (page - 1) * cappedLimit;
+    const data = rows.slice(start, start + cappedLimit);
+
+    return {
+      status: 'success',
+      message: 'Certification completed projects fetched successfully',
+      data,
+      pagination: {
+        page,
+        limit: cappedLimit,
+        total,
+        total_pages: totalPages,
+        has_next_page: page < totalPages,
+        has_prev_page: page > 1,
+      },
+      applied_filters: {
+        name: query?.name ?? '',
+        email: query?.email ?? '',
+        project_code: query?.project_code ?? '',
       },
     };
   }

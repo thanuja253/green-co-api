@@ -3,6 +3,10 @@ import { IsOptional, IsString } from 'class-validator';
 export class ListSectorsQueryDto {
   @IsOptional()
   @IsString()
+  t?: string;
+
+  @IsOptional()
+  @IsString()
   page?: string;
 
   @IsOptional()

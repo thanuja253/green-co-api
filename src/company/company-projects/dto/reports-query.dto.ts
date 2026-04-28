@@ -40,5 +40,33 @@ export class ReportsQueryDto {
   @IsOptional()
   @IsString()
   coordinator?: string;
+
+  @IsOptional()
+  @IsString()
+  turnover_min?: string;
+
+  @IsOptional()
+  @IsString()
+  fromturnover?: string;
+
+  @IsOptional()
+  @IsString()
+  turnover_max?: string;
+
+  @IsOptional()
+  @IsString()
+  toturnover?: string;
+
+  @IsOptional()
+  @IsString()
+  from_date?: string;
+
+  @IsOptional()
+  @IsString()
+  to_date?: string;
+
+  @IsOptional()
+  @IsString()
+  t?: string;
 }
 

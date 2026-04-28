@@ -454,8 +454,29 @@ export class CompanyAuthService {
         : (searchTermOrQuery ?? {});
 
     const name = String(queryInput?.name ?? '').trim();
-    const parsedPage = Number.parseInt(String(queryInput?.page ?? '1'), 10);
-    const parsedLimit = Number.parseInt(String(queryInput?.limit ?? '10'), 10);
+    const parsedPage = Number.parseInt(
+      String(
+        queryInput?.page ??
+          queryInput?.current_page ??
+          queryInput?.currentPage ??
+          queryInput?.page_no ??
+          queryInput?.pageno ??
+          '1',
+      ),
+      10,
+    );
+    const parsedLimit = Number.parseInt(
+      String(
+        queryInput?.limit ??
+          queryInput?.per_page ??
+          queryInput?.perPage ??
+          queryInput?.page_size ??
+          queryInput?.pageSize ??
+          queryInput?.rowsPerPage ??
+          '10',
+      ),
+      10,
+    );
     const safePage = Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1;
     const safeLimit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : 10;
     const cappedLimit = Math.min(safeLimit, 100);
@@ -476,12 +497,31 @@ export class CompanyAuthService {
       'turnover_max',
       'fromturnover',
       'toturnover',
+      'from_date',
+      'to_date',
+      'fromDate',
+      'toDate',
+      'date_from',
+      'date_to',
       'account_status',
       'verified_status',
     ].some((k) => String((queryInput as any)?.[k] ?? '').trim() !== '');
 
     // Backward-compatible autocomplete response (existing behavior).
-    if (!hasAdvancedFilters && queryInput?.page == null && queryInput?.limit == null) {
+    const hasAnyPaginationInput =
+      queryInput?.page != null ||
+      queryInput?.limit != null ||
+      queryInput?.current_page != null ||
+      queryInput?.currentPage != null ||
+      queryInput?.page_no != null ||
+      queryInput?.pageno != null ||
+      queryInput?.per_page != null ||
+      queryInput?.perPage != null ||
+      queryInput?.page_size != null ||
+      queryInput?.pageSize != null ||
+      queryInput?.rowsPerPage != null;
+
+    if (!hasAdvancedFilters && !hasAnyPaginationInput) {
       const query: any = {};
       if (name) {
         query.name = { $regex: name, $options: 'i' };
@@ -495,14 +535,22 @@ export class CompanyAuthService {
     const companyFilter: Record<string, any> = {};
     const phone = String(queryInput?.mobile ?? queryInput?.phone ?? '').trim();
     const email = String(queryInput?.email ?? '').trim();
-    const companyIdFilter = String(queryInput?.company_id ?? queryInput?.reg_id ?? '').trim();
+    const companyObjectIdFilter = String(queryInput?.company_id ?? '').trim();
+    const regIdFilter = String(queryInput?.reg_id ?? '').trim();
     const accountStatus = String(queryInput?.account_status ?? '').trim();
     const verifiedStatus = String(queryInput?.verified_status ?? '').trim();
 
     if (name) companyFilter.name = { $regex: name, $options: 'i' };
     if (phone) companyFilter.mobile = { $regex: phone, $options: 'i' };
     if (email) companyFilter.email = { $regex: email, $options: 'i' };
-    if (companyIdFilter) companyFilter.reg_id = { $regex: companyIdFilter, $options: 'i' };
+    if (companyObjectIdFilter) {
+      if (Types.ObjectId.isValid(companyObjectIdFilter)) {
+        companyFilter._id = new Types.ObjectId(companyObjectIdFilter);
+      } else {
+        companyFilter._id = new Types.ObjectId();
+      }
+    }
+    if (regIdFilter) companyFilter.reg_id = { $regex: regIdFilter, $options: 'i' };
     if (accountStatus && accountStatus !== 'All') companyFilter.account_status = accountStatus;
     if (verifiedStatus && verifiedStatus !== 'All') companyFilter.verified_status = verifiedStatus;
 
@@ -518,12 +566,43 @@ export class CompanyAuthService {
         limit: cappedLimit,
         total: 0,
         total_pages: 1,
+        has_next: false,
+        has_prev: false,
       };
       return {
         status: 'success',
         data: [],
         companies: [],
         rows: [],
+        items: [],
+        payload: {
+          q: '',
+          page: safePage,
+          limit: cappedLimit,
+        },
+        summary: {
+          total: 0,
+          active: 0,
+          inactive: 0,
+          verified: 0,
+          unverified: 0,
+        },
+        data_table: {
+          payload: {
+            q: '',
+            page: safePage,
+            limit: cappedLimit,
+          },
+          summary: {
+            total: 0,
+            active: 0,
+            inactive: 0,
+            verified: 0,
+            unverified: 0,
+          },
+          pagination: emptyPagination,
+          items: [],
+        },
         pagination: emptyPagination,
         meta: emptyPagination,
         total: 0,
@@ -536,7 +615,10 @@ export class CompanyAuthService {
     const companyIds = companies.map((c: any) => c._id);
     const projectIdInput = String(queryInput?.project_id ?? '').trim();
     const projectFilter: Record<string, any> = { company_id: { $in: companyIds } };
-    if (projectIdInput) projectFilter.project_id = { $regex: projectIdInput, $options: 'i' };
+    if (projectIdInput) {
+      const escaped = projectIdInput.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      projectFilter.project_id = { $regex: `^${escaped}$`, $options: 'i' };
+    }
 
     const projects = await this.companyProjectModel
       .find(projectFilter)
@@ -553,6 +635,7 @@ export class CompanyAuthService {
         id: String(project._id),
         project_object_id: String(project._id),
         project_id: String(project.project_id || ''),
+        project_code: String(project.project_id || ''),
         company_object_id: String(company?._id || ''),
         company_id: String(company?.reg_id || ''),
         reg_id: String(company?.reg_id || ''),
@@ -578,9 +661,34 @@ export class CompanyAuthService {
     const strContains = (value: unknown, needle: string): boolean =>
       String(value ?? '').toLowerCase().includes(needle.toLowerCase());
 
+    const fromDateInput = String(
+      queryInput?.from_date ?? queryInput?.fromDate ?? queryInput?.date_from ?? '',
+    ).trim();
+    const toDateInput = String(
+      queryInput?.to_date ?? queryInput?.toDate ?? queryInput?.date_to ?? '',
+    ).trim();
+    const fromDate = fromDateInput ? new Date(fromDateInput) : null;
+    const toDate = toDateInput ? new Date(toDateInput) : null;
+    const hasValidFromDate = !!(fromDate && !Number.isNaN(fromDate.getTime()));
+    const hasValidToDate = !!(toDate && !Number.isNaN(toDate.getTime()));
+    if (hasValidToDate && toDate) {
+      toDate.setHours(23, 59, 59, 999);
+    }
+
     const filteredRows = rowsUnfiltered.filter((r) => {
-      if (companyIdFilter && !strContains(r.company_id, companyIdFilter)) return false;
-      if (projectIdInput && !strContains(r.project_id, projectIdInput)) return false;
+      if (
+        companyObjectIdFilter &&
+        String(r.company_object_id || '').trim() !== companyObjectIdFilter
+      ) {
+        return false;
+      }
+      if (regIdFilter && !strContains(r.reg_id, regIdFilter)) return false;
+      if (
+        projectIdInput &&
+        String(r.project_id || '').trim().toLowerCase() !== projectIdInput.toLowerCase()
+      ) {
+        return false;
+      }
       if (name && !strContains(r.name, name)) return false;
       if (phone && !strContains(r.mobile, phone)) return false;
       if (email && !strContains(r.email, email)) return false;
@@ -610,6 +718,13 @@ export class CompanyAuthService {
         if (!Number.isFinite(Number(r.turnover_numeric)) || Number(r.turnover_numeric) > maxTurn) return false;
       }
 
+      if (hasValidFromDate || hasValidToDate) {
+        const rowDate = r.created_at ? new Date(r.created_at) : null;
+        if (!rowDate || Number.isNaN(rowDate.getTime())) return false;
+        if (hasValidFromDate && fromDate && rowDate < fromDate) return false;
+        if (hasValidToDate && toDate && rowDate > toDate) return false;
+      }
+
       return true;
     });
 
@@ -620,18 +735,110 @@ export class CompanyAuthService {
       limit: cappedLimit,
       total,
       total_pages: total > 0 ? Math.ceil(total / cappedLimit) : 1,
+      has_next: safePage < (total > 0 ? Math.ceil(total / cappedLimit) : 1),
+      has_prev: safePage > 1,
     };
+
+    const summary = {
+      total: filteredRows.length,
+      active: filteredRows.filter((r) => String(r.account_status || '0') === '1').length,
+      inactive: filteredRows.filter((r) => String(r.account_status || '0') !== '1').length,
+      verified: filteredRows.filter((r) => String(r.verified_status || '0') === '1').length,
+      unverified: filteredRows.filter((r) => String(r.verified_status || '0') !== '1').length,
+    };
+    const payload = {
+      q: '',
+      page: safePage,
+      limit: cappedLimit,
+    };
+    const items = pagedRows.map((row: any, index: number) => ({
+      sno: skip + index + 1,
+      id: row.company_object_id || row.company_id || row.id,
+      project_id: row.project_id || '',
+      project_code: row.project_code || row.project_id || '',
+      name: row.name || '',
+      email: row.email || '',
+      mobile: row.mobile || '',
+      account_status: row.account_status || '0',
+      verified_status: row.verified_status || '0',
+      created_at: row.created_at || null,
+    }));
 
     return {
       status: 'success',
       data: pagedRows,
       companies: pagedRows,
       rows: pagedRows,
+      items,
+      payload,
+      summary,
+      data_table: {
+        payload,
+        summary,
+        pagination,
+        items,
+      },
       pagination,
       meta: pagination,
       total,
       page: safePage,
       limit: cappedLimit,
+    };
+  }
+
+  async updateCompanyStatus(
+    payload?: Record<string, any>,
+  ): Promise<{
+    status: 'success';
+    message: string;
+    data: { id: string; account_status: string };
+  }> {
+    const input = payload || {};
+    const companyIdRaw = String(
+      input.company_id ?? input.companyId ?? input.id ?? '',
+    ).trim();
+    const regIdRaw = String(input.reg_id ?? input.regId ?? '').trim();
+    const statusRaw = String(
+      input.account_status ?? input.status ?? input.value ?? input.is_active ?? '',
+    )
+      .trim()
+      .toLowerCase();
+
+    if (!statusRaw) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Status is required',
+      });
+    }
+
+    const normalizedStatus =
+      ['1', 'active', 'approved', 'true', 'yes'].includes(statusRaw) ? '1' : '0';
+
+    let company: CompanyDocument | null = null;
+    if (companyIdRaw && Types.ObjectId.isValid(companyIdRaw)) {
+      company = await this.companyModel.findById(companyIdRaw);
+    }
+    if (!company && regIdRaw) {
+      company = await this.companyModel.findOne({ reg_id: regIdRaw });
+    }
+
+    if (!company) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Company not found',
+      });
+    }
+
+    company.account_status = normalizedStatus;
+    await company.save();
+
+    return {
+      status: 'success',
+      message: 'Company status updated successfully',
+      data: {
+        id: String(company._id),
+        account_status: String(company.account_status || '0'),
+      },
     };
   }
 }
