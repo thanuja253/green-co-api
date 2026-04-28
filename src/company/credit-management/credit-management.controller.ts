@@ -1,5 +1,6 @@
-import { Body, Controller, Get, Param, Post, Query, UseInterceptors, UsePipes, ValidationPipe } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, Res, UseInterceptors, UsePipes, ValidationPipe } from '@nestjs/common';
 import { AnyFilesInterceptor } from '@nestjs/platform-express';
+import type { Response } from 'express';
 import { CreditManagementService } from './credit-management.service';
 import { CreateCreditManagementDto } from './dto/create-credit-management.dto';
 import { ListCreditManagementQueryDto } from './dto/list-credit-management-query.dto';
@@ -29,6 +30,22 @@ export class CreditManagementController {
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
   async listCredits(@Query() query: ListCreditManagementQueryDto) {
     return this.creditService.listCredits(query);
+  }
+
+  @Get('api/admin/scoring_bulk_export')
+  @Get('admin/scoring_bulk_export')
+  @Get('api/admin/credit_bulk_export')
+  @Get('admin/credit_bulk_export')
+  @Get('api/admin/credits_bulk_export')
+  @Get('admin/credits_bulk_export')
+  @Get('api/admin/credit_management_bulk_export')
+  @Get('admin/credit_management_bulk_export')
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
+  async exportCredits(@Query() query: ListCreditManagementQueryDto, @Res() res: Response): Promise<void> {
+    const exported = await this.creditService.exportCredits(query);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${exported.filename}"`);
+    res.status(200).send(exported.content);
   }
 
   @Get('api/admin/scoring/:id')

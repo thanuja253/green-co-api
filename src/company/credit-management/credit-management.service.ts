@@ -58,6 +58,48 @@ export class CreditManagementService {
     };
   }
 
+  private buildListFilter(query?: ListCreditManagementQueryDto): Record<string, any> {
+    const filter: Record<string, any> = {};
+    const name = String(query?.name || '').trim();
+    if (name) {
+      filter.$or = [
+        { checklist_criteria: { $regex: name, $options: 'i' } },
+        { parameter: { $regex: name, $options: 'i' } },
+      ];
+    }
+    if (query?.checklist_criteria?.trim()) {
+      filter.checklist_criteria = { $regex: query.checklist_criteria.trim(), $options: 'i' };
+    }
+    if (query?.credit_number?.trim()) {
+      filter.credit_number = { $regex: query.credit_number.trim(), $options: 'i' };
+    }
+    if (query?.parameter?.trim()) {
+      filter.parameter = { $regex: query.parameter.trim(), $options: 'i' };
+    }
+    if (query?.max_score?.trim()) {
+      filter.max_score = { $regex: query.max_score.trim(), $options: 'i' };
+    }
+    if (query?.status?.trim() && query.status.trim().toLowerCase() !== 'all') {
+      filter.status = query.status.trim();
+    }
+    if (query?.search?.trim()) {
+      const s = query.search.trim();
+      filter.$and = filter.$and || [];
+      filter.$and.push({
+        $or: [
+          { checklist_criteria: { $regex: s, $options: 'i' } },
+          { credit_main_heading: { $regex: s, $options: 'i' } },
+          { credit_number: { $regex: s, $options: 'i' } },
+          { parameter: { $regex: s, $options: 'i' } },
+          { max_score: { $regex: s, $options: 'i' } },
+          { requirements: { $regex: s, $options: 'i' } },
+          { status: { $regex: s, $options: 'i' } },
+        ],
+      });
+    }
+    return filter;
+  }
+
   async createCredit(payload: CreateCreditManagementDto) {
     const checklistCriteria = this.resolveChecklistCriteria(payload);
     const creditMainHeading = this.resolveCreditMainHeading(payload);
@@ -100,41 +142,7 @@ export class CreditManagementService {
     const cappedLimit = Math.min(limit, 100);
     const skip = (page - 1) * cappedLimit;
 
-    const filter: Record<string, any> = {};
-    const name = String(query?.name || '').trim();
-    if (name) {
-      filter.$or = [{ checklist_criteria: { $regex: name, $options: 'i' } }, { parameter: { $regex: name, $options: 'i' } }];
-    }
-    if (query?.checklist_criteria?.trim()) {
-      filter.checklist_criteria = { $regex: query.checklist_criteria.trim(), $options: 'i' };
-    }
-    if (query?.credit_number?.trim()) {
-      filter.credit_number = { $regex: query.credit_number.trim(), $options: 'i' };
-    }
-    if (query?.parameter?.trim()) {
-      filter.parameter = { $regex: query.parameter.trim(), $options: 'i' };
-    }
-    if (query?.max_score?.trim()) {
-      filter.max_score = { $regex: query.max_score.trim(), $options: 'i' };
-    }
-    if (query?.status?.trim() && query.status.trim().toLowerCase() !== 'all') {
-      filter.status = query.status.trim();
-    }
-    if (query?.search?.trim()) {
-      const s = query.search.trim();
-      filter.$and = filter.$and || [];
-      filter.$and.push({
-        $or: [
-          { checklist_criteria: { $regex: s, $options: 'i' } },
-          { credit_main_heading: { $regex: s, $options: 'i' } },
-          { credit_number: { $regex: s, $options: 'i' } },
-          { parameter: { $regex: s, $options: 'i' } },
-          { max_score: { $regex: s, $options: 'i' } },
-          { requirements: { $regex: s, $options: 'i' } },
-          { status: { $regex: s, $options: 'i' } },
-        ],
-      });
-    }
+    const filter = this.buildListFilter(query);
 
     const [rows, total] = await Promise.all([
       this.creditModel.find(filter).sort({ createdAt: -1 }).skip(skip).limit(cappedLimit).lean(),
@@ -173,6 +181,45 @@ export class CreditManagementService {
       status: 'success',
       message: 'Credit fetched successfully',
       data: this.mapRow(row),
+    };
+  }
+
+  async exportCredits(query?: ListCreditManagementQueryDto): Promise<{ filename: string; content: string }> {
+    const filter = this.buildListFilter(query);
+    const rows = await this.creditModel.find(filter).sort({ createdAt: -1 }).lean();
+    const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const csvLines = [
+      [
+        'id',
+        'checklist_criteria',
+        'criteria_name',
+        'credit_number',
+        'parameter',
+        'requirements',
+        'max_score',
+        'status',
+      ]
+        .map(esc)
+        .join(','),
+      ...rows.map((row: any) =>
+        [
+          String(row._id),
+          row.checklist_criteria || '',
+          row.credit_main_heading || '',
+          row.credit_number || '',
+          row.parameter || '',
+          row.requirements || '',
+          row.max_score || '',
+          String(row.status ?? '1'),
+        ]
+          .map(esc)
+          .join(','),
+      ),
+    ];
+
+    return {
+      filename: `credits-${Date.now()}.csv`,
+      content: csvLines.join('\n'),
     };
   }
 }
