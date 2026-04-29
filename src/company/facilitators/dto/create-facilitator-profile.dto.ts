@@ -1,6 +1,10 @@
 import { IsEmail, IsOptional, IsString } from 'class-validator';
 
 export class CreateFacilitatorProfileDto {
+  @IsOptional()
+  @IsString()
+  consultant_id?: string;
+
   @IsString()
   name: string;
 
@@ -14,6 +18,10 @@ export class CreateFacilitatorProfileDto {
   @IsOptional()
   @IsString()
   industry_category?: string;
+
+  @IsOptional()
+  @IsString()
+  organization?: string;
 
   @IsOptional()
   @IsString()
@@ -106,6 +114,38 @@ export class CreateFacilitatorProfileDto {
   @IsOptional()
   @IsString()
   ifsc_code?: string;
+
+  @IsOptional()
+  @IsString()
+  educational_qualification?: string;
+
+  @IsOptional()
+  @IsString()
+  additional_professional_qualification?: string;
+
+  @IsOptional()
+  @IsString()
+  total_years_professional_experience?: string;
+
+  @IsOptional()
+  @IsString()
+  years_env_sustainability?: string;
+
+  @IsOptional()
+  @IsString()
+  areas_of_specialization?: string;
+
+  @IsOptional()
+  @IsString()
+  company_website?: string;
+
+  @IsOptional()
+  @IsString()
+  company_website_details?: string;
+
+  @IsOptional()
+  @IsString()
+  linkedin_profile?: string;
 
   @IsOptional()
   @IsString()

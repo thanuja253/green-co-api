@@ -52,6 +52,10 @@ export class CompanyAuthService {
   ) {}
 
   async register(registerDto: RegisterDto) {
+    const assessmentInput = String(registerDto.assessment || '').trim().toLowerCase();
+    const normalizedAssessment =
+      assessmentInput === 'facilitator' || assessmentInput === 'f' ? 'facilitator' : 'cii';
+
     // Check if email already exists
     const existingEmail = await this.companyModel.findOne({
       email: registerDto.email.toLowerCase(),
@@ -86,7 +90,7 @@ export class CompanyAuthService {
     }
 
     // Validate facilitator if facilitator type is selected
-    if (registerDto.assessment === 'facilitator' && registerDto.selectfacilitator) {
+    if (normalizedAssessment === 'facilitator' && registerDto.selectfacilitator) {
       const facilitator = await this.facilitatorModel.findById(
         registerDto.selectfacilitator,
       );
@@ -122,7 +126,7 @@ export class CompanyAuthService {
     // Create project
     const project = new this.companyProjectModel({
       company_id: savedCompany._id,
-      process_type: registerDto.assessment === 'cii' ? 'c' : 'f',
+      process_type: normalizedAssessment === 'facilitator' ? 'f' : 'c',
       next_activities_id: 1,
     });
 
@@ -156,7 +160,7 @@ export class CompanyAuthService {
       );
 
     // Create facilitator assignment if assessment is facilitator
-    if (registerDto.assessment === 'facilitator' && registerDto.selectfacilitator) {
+    if (normalizedAssessment === 'facilitator' && registerDto.selectfacilitator) {
       const facilitator = new this.companyFacilitatorModel({
         company_id: savedCompany._id,
         project_id: savedProject._id,

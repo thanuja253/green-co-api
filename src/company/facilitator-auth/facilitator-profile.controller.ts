@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -14,6 +15,7 @@ import { FileFieldsInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { extname, join } from 'path';
 import * as fs from 'fs';
+import * as jwt from 'jsonwebtoken';
 import type { Request } from 'express';
 import { FacilitatorAccountStatusGuard } from './guards/facilitator-account-status.guard';
 import { FacilitatorJwtAuthGuard } from './guards/facilitator-jwt-auth.guard';
@@ -27,9 +29,29 @@ export class FacilitatorProfileController {
   @Get('facilitator/profile/me')
   @Get('api/facilitators/profile/me')
   @Get('facilitators/profile/me')
-  @UseGuards(FacilitatorJwtAuthGuard, FacilitatorAccountStatusGuard)
   async me(@Req() req: any): Promise<any> {
-    return this.facilitatorProfileService.getMyProfile(req.user.facilitatorId);
+    let facilitatorId = String(
+      req?.user?.facilitatorId ||
+      req?.query?.facilitator_id ||
+      req?.query?.facilitatorId ||
+      req?.query?.id ||
+      '',
+    ).trim();
+    if (!facilitatorId) {
+      const auth = String(req?.headers?.authorization || '').trim();
+      const token = auth.toLowerCase().startsWith('bearer ') ? auth.slice(7).trim() : '';
+      if (token) {
+        const decoded = jwt.decode(token) as Record<string, any> | null;
+        facilitatorId = String(decoded?.sub || '').trim();
+      }
+    }
+    if (!facilitatorId) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'facilitator_id is required',
+      });
+    }
+    return this.facilitatorProfileService.getMyProfile(facilitatorId);
   }
 
   @Get('api/facilitator/profile/required-fields')

@@ -28,12 +28,12 @@ export class RegisterDto {
   mobileno: string;
 
   @IsNotEmpty({ message: 'Assessment type is required' })
-  @IsEnum(['cii', 'facilitator'], {
-    message: 'Assessment must be either "cii" or "facilitator"',
+  @IsEnum(['cii', 'facilitator', 'c', 'f'], {
+    message: 'Assessment must be one of "cii", "facilitator", "c", or "f"',
   })
-  assessment: 'cii' | 'facilitator';
+  assessment: 'cii' | 'facilitator' | 'c' | 'f';
 
-  @ValidateIf((o) => o.assessment === 'facilitator')
+  @ValidateIf((o) => o.assessment === 'facilitator' || o.assessment === 'f')
   @IsNotEmpty({ message: 'Facilitator selection is required when assessment is facilitator' })
   @IsString()
   selectfacilitator?: string;

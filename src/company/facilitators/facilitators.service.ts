@@ -49,6 +49,21 @@ export class FacilitatorsService {
   }
 
   private mapFacilitatorResponse(a: any) {
+    const reviewApprovals = this.buildReviewRequiredApprovalsMap(a);
+    const reviewValues = Object.values(reviewApprovals);
+    const derivedApprovalStatus =
+      reviewValues.length === 0
+        ? String(a.approval_status || 'Pending')
+        : reviewValues.some((v) => v.status === 'Rejected')
+          ? 'Rejected'
+          : reviewValues.some((v) => v.status === 'Pending')
+            ? 'Pending'
+            : 'Approved';
+    const derivedProfileStatus =
+      reviewValues.length > 0 && reviewValues.every((v) => v.status === 'Approved')
+        ? 'Complete'
+        : 'Incomplete';
+
     return {
       id: a._id?.toString?.() || a._id,
       consultant_id: a.consultant_id || '',
@@ -97,9 +112,9 @@ export class FacilitatorsService {
       pan_card_url: this.toAbsoluteFileUrl(a.pan_card),
       cancelled_cheque_url: this.toAbsoluteFileUrl(a.cancelled_cheque),
       profile_image_url: this.toAbsoluteFileUrl(a.profile_image),
-      approval_status: a.approval_status || 'Pending',
+      approval_status: derivedApprovalStatus,
       approval_remarks: a.approval_remarks || '',
-      profile_status: a.profile_status || 'Incomplete',
+      profile_status: derivedProfileStatus,
       document_approvals: this.buildDocumentApprovalsMap(a),
     };
   }
@@ -142,14 +157,22 @@ export class FacilitatorsService {
   }
 
   private async getNextConsultantId(): Promise<string> {
-    const latest = await this.facilitatorModel
-      .findOne({ consultant_id: { $regex: '^F\\d+$', $options: 'i' } })
-      .sort({ consultant_id: -1 })
-      .select('consultant_id')
-      .lean();
-    const current = String((latest as any)?.consultant_id || '').trim().toUpperCase();
-    const currentNum = Number.parseInt(current.replace(/^F/, ''), 10);
-    const next = Number.isFinite(currentNum) ? currentNum + 1 : 1;
+    const maxRows = await this.facilitatorModel.aggregate([
+      { $match: { consultant_id: { $regex: '^F\\d+$', $options: 'i' } } },
+      {
+        $project: {
+          numeric: {
+            $toInt: {
+              $substrCP: [{ $toUpper: '$consultant_id' }, 1, 10],
+            },
+          },
+        },
+      },
+      { $sort: { numeric: -1 } },
+      { $limit: 1 },
+    ]);
+    const currentNum = Number((maxRows?.[0] as any)?.numeric ?? 0);
+    const next = Number.isFinite(currentNum) && currentNum > 0 ? currentNum + 1 : 1;
     return `F${String(next).padStart(5, '0')}`;
   }
 
@@ -348,8 +371,8 @@ export class FacilitatorsService {
       name: dto.name.trim(),
       email: normalizedEmail,
       mobile: (dto.mobile || '').trim(),
-      consultant_id: await this.getNextConsultantId(),
-      industry_category: dto.industry_category || '',
+      consultant_id: String(dto.consultant_id || '').trim() || await this.getNextConsultantId(),
+      industry_category: dto.organization || dto.industry_category || '',
       alternate_mobile: dto.alternate_mobile || '',
       address_line_1: dto.address_line_1 || '',
       address_line_2: dto.address_line_2 || '',
@@ -373,6 +396,13 @@ export class FacilitatorsService {
       account_number: dto.account_number || '',
       branch_name: bankInfo.branch_name || '',
       ifsc_code: bankInfo.ifsc_code || '',
+      educational_qualification: dto.educational_qualification || '',
+      additional_professional_qualification: dto.additional_professional_qualification || '',
+      total_years_professional_experience: dto.total_years_professional_experience || '',
+      years_env_sustainability: dto.years_env_sustainability || '',
+      areas_of_specialization: dto.areas_of_specialization || '',
+      company_website: dto.company_website_details || dto.company_website || '',
+      linkedin_profile: dto.linkedin_profile || '',
       biodata: filePath(files?.biodata),
       vendor_registration_form: filePath(files?.vendor_registration_form),
       non_disclosure_agreement: filePath(files?.non_disclosure_agreement),
@@ -439,7 +469,8 @@ export class FacilitatorsService {
     row.name = (dto.name || row.name || '').trim();
     row.email = (dto.email || row.email || '').trim().toLowerCase();
     row.mobile = (dto.mobile || row.mobile || '').trim();
-    row.industry_category = dto.industry_category ?? row.industry_category;
+    row.consultant_id = (dto.consultant_id || row.consultant_id || '').trim();
+    row.industry_category = dto.organization ?? dto.industry_category ?? row.industry_category;
     row.alternate_mobile = dto.alternate_mobile ?? row.alternate_mobile;
     row.address_line_1 = dto.address_line_1 ?? row.address_line_1;
     row.address_line_2 = dto.address_line_2 ?? row.address_line_2;
@@ -463,6 +494,19 @@ export class FacilitatorsService {
     row.account_number = dto.account_number ?? row.account_number;
     row.branch_name = bankInfo.branch_name;
     row.ifsc_code = bankInfo.ifsc_code;
+    (row as any).educational_qualification =
+      dto.educational_qualification ?? (row as any).educational_qualification;
+    (row as any).additional_professional_qualification =
+      dto.additional_professional_qualification ?? (row as any).additional_professional_qualification;
+    (row as any).total_years_professional_experience =
+      dto.total_years_professional_experience ?? (row as any).total_years_professional_experience;
+    (row as any).years_env_sustainability =
+      dto.years_env_sustainability ?? (row as any).years_env_sustainability;
+    (row as any).areas_of_specialization =
+      dto.areas_of_specialization ?? (row as any).areas_of_specialization;
+    (row as any).company_website =
+      dto.company_website_details ?? dto.company_website ?? (row as any).company_website;
+    (row as any).linkedin_profile = dto.linkedin_profile ?? (row as any).linkedin_profile;
     row.status = (dto.status || row.status || '1').toString();
     row.approval_status = 'Approved';
     row.approval_remarks = '';
@@ -528,9 +572,10 @@ export class FacilitatorsService {
       approvalStatus = normalized.charAt(0).toUpperCase() + normalized.slice(1);
     }
 
+    const remarksTrim = String(remarks || '').trim();
+
     row.approval_status = approvalStatus;
-    row.approval_remarks = (remarks || '').trim();
-    const remarksTrim = (remarks || '').trim();
+    row.approval_remarks = remarksTrim;
     if (approvalStatus === 'Approved' || approvalStatus === 'Rejected') {
       const prev = ((row as any).document_approvals || {}) as Record<
         string,
@@ -554,6 +599,11 @@ export class FacilitatorsService {
       }
       (row as any).document_approvals = docApprovals;
     }
+    if (approvalStatus === 'Approved') {
+      row.profile_status = 'Complete';
+    } else if (approvalStatus === 'Rejected' || approvalStatus === 'Pending') {
+      row.profile_status = 'Incomplete';
+    }
     await row.save();
 
     return {
@@ -569,6 +619,14 @@ export class FacilitatorsService {
     status: 'Approved' | 'Rejected' | 'Pending',
     remarks?: string,
   ) {
+    const remarksTrim = String(remarks ?? '').trim();
+    if (status === 'Rejected' && !remarksTrim) {
+      throw new BadRequestException({
+        status: 'validations',
+        errors: { remarks: ['remarks is required when rejecting a document.'] },
+      });
+    }
+
     if (!isFacilitatorProfileDocumentKey(documentKey)) {
       throw new BadRequestException({
         status: 'error',
@@ -598,7 +656,7 @@ export class FacilitatorsService {
     }
     docApprovals[documentKey] = {
       status,
-      remarks: String(remarks ?? '').trim(),
+      remarks: remarksTrim,
     };
     (row as any).document_approvals = docApprovals;
 
@@ -612,12 +670,15 @@ export class FacilitatorsService {
     const allApproved = values.length > 0 && values.every((v) => v.status === 'Approved');
     if (anyRejected) {
       row.approval_status = 'Rejected';
+      row.profile_status = 'Incomplete';
     } else if (anyPending) {
       row.approval_status = 'Pending';
       row.approval_remarks = '';
+      row.profile_status = 'Incomplete';
     } else if (allApproved) {
       row.approval_status = 'Approved';
       row.approval_remarks = '';
+      row.profile_status = 'Complete';
     }
 
     await row.save();
