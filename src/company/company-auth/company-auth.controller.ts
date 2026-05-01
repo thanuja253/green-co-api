@@ -14,6 +14,7 @@ import {
 import { ValidationError } from 'class-validator';
 import { CompanyAuthService } from './company-auth.service';
 import { RegisterDto } from './dto/register.dto';
+import { RegisterThroughFacilitatorDto } from './dto/register-through-facilitator.dto';
 import { LoginDto } from './dto/login.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
@@ -52,6 +53,30 @@ export class CompanyAuthController {
   )
   async register(@Body() registerDto: RegisterDto) {
     return this.companyAuthService.register(registerDto);
+  }
+
+  @Post('register-through-facilitator')
+  @UsePipes(
+    new ValidationPipe({
+      transform: true,
+      whitelist: true,
+      exceptionFactory: (validationErrors: ValidationError[] = []) => {
+        const errors: Record<string, string[]> = {};
+        validationErrors.forEach((error) => {
+          if (error.constraints) {
+            errors[error.property] = Object.values(error.constraints);
+          }
+        });
+        return new BadRequestException({
+          status: 'error',
+          message: 'Validation failed',
+          errors,
+        });
+      },
+    }),
+  )
+  async registerThroughFacilitator(@Body() registerDto: RegisterThroughFacilitatorDto) {
+    return this.companyAuthService.registerThroughFacilitator(registerDto);
   }
 
   @Get('register')

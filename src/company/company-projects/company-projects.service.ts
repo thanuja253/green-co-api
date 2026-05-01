@@ -1,5 +1,5 @@
 /// <reference path="../../exceljs.d.ts" />
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { Connection, Model, Types } from 'mongoose';
 import {
@@ -3491,6 +3491,57 @@ export class CompanyProjectsService {
       delete normalizedData.gstin_no;
     }
 
+    // Normalize facilitator field aliases for registration payload
+    const facilitatorIdRaw = String(
+      normalizedData.facilitator_id ??
+        normalizedData.facilitatorId ??
+        '',
+    ).trim();
+    const facilitatorNameRaw = String(
+      normalizedData.facilitator_name ??
+        normalizedData.facilitatorName ??
+        '',
+    ).trim();
+    const facilitatorCodeRaw = String(
+      normalizedData.facilitator_code ??
+        normalizedData.facilitatorCode ??
+        '',
+    ).trim();
+
+    if (facilitatorIdRaw) {
+      normalizedData.facilitator_id = facilitatorIdRaw;
+      if (!facilitatorNameRaw || !facilitatorCodeRaw) {
+        try {
+          const facilitator = await this.facilitatorModel
+            .findById(facilitatorIdRaw)
+            .select('name consultant_id')
+            .lean();
+          if (facilitator) {
+            if (!facilitatorNameRaw) {
+              normalizedData.facilitator_name = String((facilitator as any).name || '').trim();
+            } else {
+              normalizedData.facilitator_name = facilitatorNameRaw;
+            }
+            if (!facilitatorCodeRaw) {
+              normalizedData.facilitator_code = String((facilitator as any).consultant_id || '').trim();
+            } else {
+              normalizedData.facilitator_code = facilitatorCodeRaw;
+            }
+          }
+        } catch {
+          // Keep provided values if facilitator lookup fails.
+          normalizedData.facilitator_name = facilitatorNameRaw;
+          normalizedData.facilitator_code = facilitatorCodeRaw;
+        }
+      } else {
+        normalizedData.facilitator_name = facilitatorNameRaw;
+        normalizedData.facilitator_code = facilitatorCodeRaw;
+      }
+    }
+    delete normalizedData.facilitatorId;
+    delete normalizedData.facilitatorName;
+    delete normalizedData.facilitatorCode;
+
     // Registration files → GridFS (persistent on MongoDB; not Render ephemeral disk)
     const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(/\/+$/, '');
     const prevReg = (project.registration_info || {}) as Record<string, any>;
@@ -3718,6 +3769,39 @@ export class CompanyProjectsService {
     return response;
   }
 
+  async saveFacilitatorRegistrationInfo(
+    companyId: string,
+    projectId: string,
+    dto: RegistrationInfoDto,
+    files?: {
+      company_brief_profile?: Express.Multer.File[];
+      brief_profile?: Express.Multer.File[];
+      turnover_document?: Express.Multer.File[];
+      turnover?: Express.Multer.File[];
+      sez_document?: Express.Multer.File[];
+      sezDocument?: Express.Multer.File[];
+      sez_input?: Express.Multer.File[];
+      sezinput?: Express.Multer.File[];
+    },
+    options?: { isUpdate?: boolean; skipMilestone?: boolean },
+  ) {
+    const project = await this.projectModel
+      .findOne({ _id: projectId, company_id: companyId })
+      .select('_id process_type')
+      .lean();
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const processType = String((project as any).process_type || '').trim().toLowerCase();
+    if (processType !== 'f' && processType !== 'facilitator') {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'This endpoint is only for facilitator registration projects.',
+      });
+    }
+    return this.saveRegistrationInfo(companyId, projectId, dto, files, options);
+  }
+
   async getRegistrationInfo(companyId: string, projectId: string) {
     const project = await this.projectModel.findOne({
       _id: projectId,
@@ -3735,6 +3819,72 @@ export class CompanyProjectsService {
     const registrationInfo = project.registration_info || {};
 
     const responseData: any = { ...omitRegistrationFileBinaries(registrationInfo) };
+
+    // Backfill facilitator name/code for old registration rows that stored only facilitator_id.
+    let facilitatorId = String(
+      responseData.facilitator_id ??
+        responseData.facilitatorId ??
+        '',
+    ).trim();
+    if (!facilitatorId) {
+      const assigned = await this.companyFacilitatorModel
+        .findOne({ company_id: companyId, project_id: projectId })
+        .lean();
+      facilitatorId = String((assigned as any)?.facilitator_id || '').trim();
+    }
+    const facilitatorName = String(
+      responseData.facilitator_name ??
+        responseData.facilitatorName ??
+        '',
+    ).trim();
+    const facilitatorCode = String(
+      responseData.facilitator_code ??
+        responseData.facilitatorCode ??
+        '',
+    ).trim();
+    if (facilitatorId && (!facilitatorName || !facilitatorCode)) {
+      const facilitator = await this.facilitatorModel
+        .findById(facilitatorId)
+        .select('name consultant_id')
+        .lean();
+      if (facilitator) {
+        responseData.facilitator_name =
+          facilitatorName || String((facilitator as any).name || '').trim();
+        responseData.facilitator_code =
+          facilitatorCode || String((facilitator as any).consultant_id || '').trim();
+      }
+    } else {
+      if (facilitatorName) responseData.facilitator_name = facilitatorName;
+      if (facilitatorCode) responseData.facilitator_code = facilitatorCode;
+    }
+    if (facilitatorId) responseData.facilitator_id = facilitatorId;
+    responseData.facilitatorId = responseData.facilitator_id || '';
+    responseData.facilitatorName = responseData.facilitator_name || '';
+    responseData.facilitatorCode = responseData.facilitator_code || '';
+    if (facilitatorId) {
+      const selected = await this.facilitatorModel
+        .findById(facilitatorId)
+        .select(
+          '_id name consultant_id email mobile state city address_line_1 pincode industry_category',
+        )
+        .lean();
+      if (selected) {
+        responseData.selected_facilitator = {
+          id: String((selected as any)._id || ''),
+          name: String((selected as any).name || ''),
+          consultant_id: String((selected as any).consultant_id || ''),
+          consultant_code: String((selected as any).consultant_id || ''),
+          facilitator_code: String((selected as any).consultant_id || ''),
+          email: String((selected as any).email || ''),
+          mobile: String((selected as any).mobile || ''),
+          state: String((selected as any).state || ''),
+          city: String((selected as any).city || ''),
+          address_line_1: String((selected as any).address_line_1 || ''),
+          pincode: String((selected as any).pincode || ''),
+          industry_category: String((selected as any).industry_category || ''),
+        };
+      }
+    }
 
     const briefBuf = bufferFromRegistrationStored(registrationInfo.company_brief_profile_file?.data);
     const briefGrid = registrationGridfsIdFromReg(registrationInfo, 'company_brief_profile_gridfs_id');
@@ -3804,6 +3954,39 @@ export class CompanyProjectsService {
     };
   }
 
+  async getFacilitatorRegistrationInfo(companyId: string, projectId: string) {
+    const project = await this.projectModel
+      .findOne({ _id: projectId, company_id: companyId })
+      .select('_id process_type')
+      .lean();
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const processType = String((project as any).process_type || '').trim().toLowerCase();
+    if (processType !== 'f' && processType !== 'facilitator') {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'This endpoint is only for facilitator registration projects.',
+      });
+    }
+    return this.getRegistrationInfo(companyId, projectId);
+  }
+
+  async getFacilitatorRegistrationInfoByProjectId(projectOrCompanyId: string) {
+    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    if (!resolved) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const processType = String((resolved as any).process_type || '').trim().toLowerCase();
+    if (processType !== 'f' && processType !== 'facilitator') {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'This endpoint is only for facilitator registration projects.',
+      });
+    }
+    return this.getRegistrationInfo(String((resolved as any).company_id), String((resolved as any)._id));
+  }
+
   async getRegistrationInfoForAdmin(projectOrCompanyId: string) {
     const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
     if (!resolved) {
@@ -3817,6 +4000,72 @@ export class CompanyProjectsService {
     const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(/\/+$/, '');
     const registrationInfo = resolved.registration_info || {};
     const responseData: any = { ...omitRegistrationFileBinaries(registrationInfo) };
+
+    // Backfill facilitator name/code for old registration rows that stored only facilitator_id.
+    let facilitatorId = String(
+      responseData.facilitator_id ??
+        responseData.facilitatorId ??
+        '',
+    ).trim();
+    if (!facilitatorId) {
+      const assigned = await this.companyFacilitatorModel
+        .findOne({ company_id: resolved.company_id, project_id: resolved._id })
+        .lean();
+      facilitatorId = String((assigned as any)?.facilitator_id || '').trim();
+    }
+    const facilitatorName = String(
+      responseData.facilitator_name ??
+        responseData.facilitatorName ??
+        '',
+    ).trim();
+    const facilitatorCode = String(
+      responseData.facilitator_code ??
+        responseData.facilitatorCode ??
+        '',
+    ).trim();
+    if (facilitatorId && (!facilitatorName || !facilitatorCode)) {
+      const facilitator = await this.facilitatorModel
+        .findById(facilitatorId)
+        .select('name consultant_id')
+        .lean();
+      if (facilitator) {
+        responseData.facilitator_name =
+          facilitatorName || String((facilitator as any).name || '').trim();
+        responseData.facilitator_code =
+          facilitatorCode || String((facilitator as any).consultant_id || '').trim();
+      }
+    } else {
+      if (facilitatorName) responseData.facilitator_name = facilitatorName;
+      if (facilitatorCode) responseData.facilitator_code = facilitatorCode;
+    }
+    if (facilitatorId) responseData.facilitator_id = facilitatorId;
+    responseData.facilitatorId = responseData.facilitator_id || '';
+    responseData.facilitatorName = responseData.facilitator_name || '';
+    responseData.facilitatorCode = responseData.facilitator_code || '';
+    if (facilitatorId) {
+      const selected = await this.facilitatorModel
+        .findById(facilitatorId)
+        .select(
+          '_id name consultant_id email mobile state city address_line_1 pincode industry_category',
+        )
+        .lean();
+      if (selected) {
+        responseData.selected_facilitator = {
+          id: String((selected as any)._id || ''),
+          name: String((selected as any).name || ''),
+          consultant_id: String((selected as any).consultant_id || ''),
+          consultant_code: String((selected as any).consultant_id || ''),
+          facilitator_code: String((selected as any).consultant_id || ''),
+          email: String((selected as any).email || ''),
+          mobile: String((selected as any).mobile || ''),
+          state: String((selected as any).state || ''),
+          city: String((selected as any).city || ''),
+          address_line_1: String((selected as any).address_line_1 || ''),
+          pincode: String((selected as any).pincode || ''),
+          industry_category: String((selected as any).industry_category || ''),
+        };
+      }
+    }
 
     const briefBuf = bufferFromRegistrationStored(registrationInfo.company_brief_profile_file?.data);
     const briefGrid = registrationGridfsIdFromReg(registrationInfo, 'company_brief_profile_gridfs_id');
@@ -4515,6 +4764,13 @@ export class CompanyProjectsService {
     message: string;
     data: any;
   }> {
+    if (!Types.ObjectId.isValid(projectId)) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Invalid project id',
+      });
+    }
+
     const project = await this.projectModel
       .findOne({ _id: projectId, company_id: companyId })
       .lean();
@@ -5132,6 +5388,13 @@ export class CompanyProjectsService {
     assessorId: string,
     projectId: string,
   ): Promise<{ status: 'success'; message: string; data: any }> {
+    if (!Types.ObjectId.isValid(projectId)) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Invalid project id',
+      });
+    }
+
     const assignment = await this.companyAssessorModel.findOne({
       assessor_id: assessorId,
       project_id: projectId,
@@ -5155,6 +5418,13 @@ export class CompanyProjectsService {
   async getQuickviewDataPublicByProject(
     projectId: string,
   ): Promise<{ status: 'success'; message: string; data: any }> {
+    if (!Types.ObjectId.isValid(projectId)) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Invalid project id',
+      });
+    }
+
     const project = await this.projectModel.findById(projectId).select('company_id').lean();
     if (!project?.company_id) {
       throw new NotFoundException({
@@ -6769,6 +7039,59 @@ export class CompanyProjectsService {
     };
   }
 
+  private async resolveFacilitatorLaunchTrainingProject(
+    facilitatorId: string,
+    projectId: string,
+  ): Promise<{ companyId: string; projectId: string }> {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const processType = String((resolved as any).process_type || '').trim().toLowerCase();
+    if (processType !== 'f' && processType !== 'facilitator') {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'This endpoint is only for facilitator flow projects.',
+      });
+    }
+    const assigned = await this.companyFacilitatorModel
+      .findOne({
+        facilitator_id: facilitatorId,
+        project_id: (resolved as any)._id,
+      })
+      .select('_id')
+      .lean();
+    if (!assigned) {
+      throw new ForbiddenException({
+        status: 'error',
+        message: 'Facilitator is not assigned to this project.',
+      });
+    }
+    return {
+      companyId: String((resolved as any).company_id),
+      projectId: String((resolved as any)._id),
+    };
+  }
+
+  async getLaunchTrainingProgramForFacilitator(facilitatorId: string, projectId: string) {
+    const resolved = await this.resolveFacilitatorLaunchTrainingProject(facilitatorId, projectId);
+    return this.getLaunchTrainingProgramPayload(resolved.companyId, resolved.projectId);
+  }
+
+  async addLaunchTrainingSessionForFacilitator(
+    facilitatorId: string,
+    projectId: string,
+    file: Express.Multer.File,
+    sessionDateRaw?: string,
+  ) {
+    const resolved = await this.resolveFacilitatorLaunchTrainingProject(facilitatorId, projectId);
+    return this.addLaunchTrainingSessionForAdmin(
+      resolved.projectId,
+      file,
+      sessionDateRaw,
+    );
+  }
+
   async addLaunchTrainingSessionForAdmin(
     projectOrCompanyId: string,
     file: Express.Multer.File,
@@ -6894,6 +7217,19 @@ export class CompanyProjectsService {
         legacy_single: d.legacy_single,
       },
     };
+  }
+
+  async getLaunchAndTrainingForFacilitator(
+    facilitatorId: string,
+    projectId: string,
+  ) {
+    const resolved = await this.resolveFacilitatorLaunchTrainingProject(facilitatorId, projectId);
+    return this.getLaunchAndTraining(resolved.companyId, resolved.projectId);
+  }
+
+  async getLaunchAndTrainingByProjectId(projectId: string) {
+    const companyId = await this.resolveCompanyIdFromProjectId(projectId);
+    return this.getLaunchAndTraining(companyId, projectId);
   }
 
   /**
@@ -7081,6 +7417,97 @@ export class CompanyProjectsService {
   /**
    * Finance v2 (new API family): list Proforma/Tax invoices created by `/finance-v2/proforma-invoices`.
    */
+  private async resolveFacilitatorFinanceProject(
+    facilitatorId: string,
+    projectId: string,
+  ): Promise<{ companyId: string; projectId: string }> {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const processType = String((resolved as any).process_type || '').trim().toLowerCase();
+    if (processType !== 'f' && processType !== 'facilitator') {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'This endpoint is only for facilitator flow projects.',
+      });
+    }
+    const assigned = await this.companyFacilitatorModel
+      .findOne({
+        facilitator_id: facilitatorId,
+        project_id: (resolved as any)._id,
+      })
+      .select('_id')
+      .lean();
+    if (!assigned) {
+      throw new ForbiddenException({
+        status: 'error',
+        message: 'Facilitator is not assigned to this project.',
+      });
+    }
+    return {
+      companyId: String((resolved as any).company_id),
+      projectId: String((resolved as any)._id),
+    };
+  }
+
+  async getFinanceV2InvoicesForFacilitator(facilitatorId: string, projectId: string) {
+    return this.withFinanceV2MongoRetry(async () => {
+      const resolved = await this.resolveFacilitatorFinanceProject(facilitatorId, projectId);
+      return this.getFinanceV2Invoices(resolved.companyId, resolved.projectId);
+    });
+  }
+
+  async createFinanceV2InvoiceForFacilitator(
+    facilitatorId: string,
+    projectId: string,
+    dto: CreateProformaInvoiceV2Dto,
+    file: Express.Multer.File,
+  ) {
+    return this.withFinanceV2MongoRetry(async () => {
+      const resolved = await this.resolveFacilitatorFinanceProject(facilitatorId, projectId);
+      return this.createFinanceV2Invoice(resolved.companyId, resolved.projectId, dto, file);
+    });
+  }
+
+  async updateFinanceV2InvoiceForFacilitator(
+    facilitatorId: string,
+    projectId: string,
+    invoiceId: string,
+    dto: UpdateProformaInvoiceV2Dto,
+    file?: Express.Multer.File,
+  ) {
+    return this.withFinanceV2MongoRetry(async () => {
+      const resolved = await this.resolveFacilitatorFinanceProject(facilitatorId, projectId);
+      return this.updateFinanceV2Invoice(resolved.companyId, resolved.projectId, invoiceId, dto, file);
+    });
+  }
+
+  async submitFinanceV2PaymentForFacilitator(
+    facilitatorId: string,
+    projectId: string,
+    invoiceId: string,
+    dto: SubmitFinanceV2PaymentDto,
+    file?: Express.Multer.File,
+  ) {
+    return this.withFinanceV2MongoRetry(async () => {
+      const resolved = await this.resolveFacilitatorFinanceProject(facilitatorId, projectId);
+      return this.submitFinanceV2Payment(resolved.companyId, resolved.projectId, invoiceId, dto, file);
+    });
+  }
+
+  async updateFinanceV2ApprovalForFacilitator(
+    facilitatorId: string,
+    projectId: string,
+    invoiceId: string,
+    dto: UpdateFinanceV2ApprovalDto,
+  ) {
+    return this.withFinanceV2MongoRetry(async () => {
+      const resolved = await this.resolveFacilitatorFinanceProject(facilitatorId, projectId);
+      return this.updateFinanceV2Approval(resolved.companyId, resolved.projectId, invoiceId, dto);
+    });
+  }
+
   async getFinanceV2InvoicesByProjectId(projectId: string) {
     return this.withFinanceV2MongoRetry(async () => {
       const resolved = await this.resolveProjectForAdmin(projectId);
@@ -7174,6 +7601,8 @@ export class CompanyProjectsService {
           approval_status_label: INVOICE_APPROVAL_STATUS[inv.approval_status ?? 0] ?? 'Pending',
           approval_status_color: INVOICE_APPROVAL_STATUS_COLORS[inv.approval_status ?? 0] ?? 'warning',
           remarks: inv.remarks ?? null,
+          rejected_remarks:
+            Number(inv.approval_status ?? 0) === 2 ? inv.remarks ?? null : null,
           reminders_sent_count: Number(inv.reminders_sent_count ?? 0),
           max_reminders: inv.max_reminders ?? null,
           reminder_end_date: inv.reminder_end_date?.toISOString?.() ?? null,
@@ -7659,6 +8088,34 @@ export class CompanyProjectsService {
     dto: SubmitFinanceV2PaymentDto,
     file?: Express.Multer.File,
   ) {
+    const normalizedPaymentType = (() => {
+      const rawCandidates = [
+        dto?.payment_type,
+        (dto as any)?.payment_mode,
+        (dto as any)?.transaction_mode,
+        (dto as any)?.trans_mode,
+      ];
+      const picked = rawCandidates.find(
+        (v) => v !== undefined && v !== null && String(v).trim() !== '',
+      );
+      const normalized = String(picked ?? '').trim().toLowerCase();
+      if (normalized === 'online') return 'Online';
+      if (normalized === 'offline') return 'Offline';
+      return '';
+    })();
+    if (!normalizedPaymentType) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'payment_type must be one of the following values: Online, Offline',
+      });
+    }
+
+    const normalizedTransId = String(
+      dto?.trans_id ??
+        (dto as any)?.transaction_id ??
+        '',
+    ).trim();
+
     const invoice = await this.companyInvoiceModel.findOne({
       _id: invoiceId,
       company_id: companyId,
@@ -7668,8 +8125,8 @@ export class CompanyProjectsService {
     if (!invoice) {
       throw new NotFoundException({ status: 'error', message: 'Invoice not found' });
     }
-    if (dto.payment_type === 'Offline') {
-      if (!dto.trans_id?.trim()) {
+    if (normalizedPaymentType === 'Offline') {
+      if (!normalizedTransId) {
         throw new BadRequestException({
           status: 'error',
           message: 'Transaction ID is required when payment mode is Offline',
@@ -7708,8 +8165,8 @@ export class CompanyProjectsService {
     }
 
     const relativePath = file ? `uploads/company/${companyId}/finance-v2-payments/${file.filename}` : undefined;
-    (invoice as any).payment_type = dto.payment_type;
-    (invoice as any).trans_id = dto.payment_type === 'Offline' ? dto.trans_id?.trim() : undefined;
+    (invoice as any).payment_type = normalizedPaymentType;
+    (invoice as any).trans_id = normalizedPaymentType === 'Offline' ? normalizedTransId : undefined;
     if (relativePath) {
       const oldDoc = (invoice as any).offline_tran_doc;
       const oldName = (invoice as any).offline_tran_doc_filename;
@@ -7802,6 +8259,10 @@ export class CompanyProjectsService {
         approval_status_label:
           INVOICE_APPROVAL_STATUS[Number((invoice as any).approval_status ?? 0)] ?? 'Pending',
         remarks: (invoice as any).remarks ?? null,
+        rejected_remarks:
+          Number((invoice as any).approval_status ?? 0) === 2
+            ? (invoice as any).remarks ?? null
+            : null,
       },
     };
   }
@@ -7821,6 +8282,43 @@ export class CompanyProjectsService {
         String(resolved._id),
         invoiceId,
         dto,
+      );
+    });
+  }
+
+  async getFinanceV2Approval(companyId: string, projectId: string, invoiceId: string) {
+    const invoice = await this.companyInvoiceModel.findOne({
+      _id: invoiceId,
+      company_id: companyId,
+      project_id: projectId,
+      invoice_type: { $in: ['proforma', 'tax'] },
+    });
+    if (!invoice) {
+      throw new NotFoundException({ status: 'error', message: 'Invoice not found' });
+    }
+    return {
+      status: 'success',
+      message: 'Finance v2 approval loaded',
+      data: {
+        invoice_id: String((invoice as any)._id),
+        approval_status: Number((invoice as any).approval_status ?? 0),
+        approval_status_label:
+          INVOICE_APPROVAL_STATUS[Number((invoice as any).approval_status ?? 0)] ?? 'Pending',
+        remarks: (invoice as any).remarks ?? null,
+      },
+    };
+  }
+
+  async getFinanceV2ApprovalByProjectId(projectId: string, invoiceId: string) {
+    return this.withFinanceV2MongoRetry(async () => {
+      const resolved = await this.resolveProjectForAdmin(projectId);
+      if (!resolved?.company_id) {
+        throw new NotFoundException({ status: 'error', message: 'Project not found' });
+      }
+      return this.getFinanceV2Approval(
+        String(resolved.company_id),
+        String(resolved._id),
+        invoiceId,
       );
     });
   }
@@ -9186,6 +9684,72 @@ export class CompanyProjectsService {
         document_url: fullUrl,
         document_filename: file.originalname,
         project_id: projectId,
+        launch_training_report_date: reportDate?.toISOString?.() ?? launchTrainingReportDate ?? null,
+      },
+    };
+  }
+
+  async uploadLaunchAndTrainingForFacilitator(
+    facilitatorId: string,
+    projectId: string,
+    file: Express.Multer.File,
+    launchTrainingReportDate?: string,
+  ) {
+    const resolved = await this.resolveFacilitatorLaunchTrainingProject(facilitatorId, projectId);
+    const project = await this.projectModel.findOne({
+      _id: resolved.projectId,
+      company_id: resolved.companyId,
+    });
+    if (!project) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Project not found',
+      });
+    }
+
+    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com';
+    const relativePath = `uploads/companyproject/launchAndTraining/${resolved.projectId}/${file.filename}`;
+    const fullUrl = `${baseUrl}/${relativePath}`;
+    const reportDate = launchTrainingReportDate
+      ? (() => {
+          const d = new Date(launchTrainingReportDate);
+          return Number.isNaN(d.getTime()) ? undefined : d;
+        })()
+      : undefined;
+
+    (project as any).launch_training_document = relativePath;
+    if (reportDate) (project as any).launch_training_report_date = reportDate;
+    await project.save();
+
+    await this.companyActivityModel.create({
+      company_id: resolved.companyId,
+      project_id: resolved.projectId,
+      description: 'Consultant Uploaded Site Visit Report',
+      activity_type: 'company',
+      milestone_flow: 63,
+      milestone_completed: true,
+    });
+
+    const company = await this.companyModel.findById(resolved.companyId).lean();
+    this.notificationsService
+      .create(
+        'Site Visit Report uploaded',
+        'The Site Visit Report (Launch & Training) has been uploaded for your project. You can view it in the portal.',
+        'C',
+        resolved.companyId,
+      )
+      .catch((err) => console.error('Site visit notification failed:', err));
+    this.mailService
+      .sendSiteVisitReportUploadedEmail(company?.email, company?.name || 'Company')
+      .catch((err) => console.error('Site visit report email failed:', err));
+
+    return {
+      status: 'success',
+      message: 'Launch And Training Program uploaded Successfully!',
+      data: {
+        document_url: fullUrl,
+        document_filename: file.originalname,
+        project_id: resolved.projectId,
         launch_training_report_date: reportDate?.toISOString?.() ?? launchTrainingReportDate ?? null,
       },
     };

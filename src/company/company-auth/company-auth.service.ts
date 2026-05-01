@@ -28,6 +28,7 @@ import { MailService } from '../../mail/mail.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { passwordGeneration } from '../../helpers/password.helper';
 import { RegisterDto } from './dto/register.dto';
+import { RegisterThroughFacilitatorDto } from './dto/register-through-facilitator.dto';
 import { LoginDto } from './dto/login.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
@@ -35,6 +36,36 @@ import { RegistrationMastersService } from '../registration-masters/registration
 
 @Injectable()
 export class CompanyAuthService {
+  private async resolveFacilitatorForRegistration(input: {
+    facilitator_id?: string;
+    consultant_id?: string;
+    facilitator_code?: string;
+  }): Promise<FacilitatorDocument> {
+    const facilitatorId = String(input.facilitator_id || '').trim();
+    const facilitatorCode = String(input.consultant_id || input.facilitator_code || '')
+      .trim()
+      .toUpperCase();
+    let facilitator: FacilitatorDocument | null = null;
+    if (facilitatorId && Types.ObjectId.isValid(facilitatorId)) {
+      facilitator = await this.facilitatorModel.findById(facilitatorId);
+    }
+    if (!facilitator && facilitatorCode) {
+      facilitator = await this.facilitatorModel.findOne({
+        consultant_id: facilitatorCode,
+      });
+    }
+    if (!facilitator || facilitator.status !== '1') {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Validation failed',
+        errors: {
+          facilitator: ['Valid active facilitator is required. Send facilitator_id or facilitator_code.'],
+        },
+      });
+    }
+    return facilitator;
+  }
+
   constructor(
     @InjectModel(Company.name) private companyModel: Model<CompanyDocument>,
     @InjectModel(CompanyProject.name)
@@ -204,6 +235,39 @@ export class CompanyAuthService {
     return {
       status: 'success',
       message: 'Company Registered Successfully.',
+    };
+  }
+
+  async registerThroughFacilitator(registerDto: RegisterThroughFacilitatorDto) {
+    const facilitator = await this.resolveFacilitatorForRegistration({
+      facilitator_id: registerDto.facilitator_id,
+      consultant_id: registerDto.consultant_id,
+      facilitator_code: registerDto.facilitator_code,
+    });
+
+    const registerPayload: RegisterDto = {
+      email: registerDto.email,
+      company_name: registerDto.company_name,
+      mobileno: registerDto.mobileno,
+      assessment: 'facilitator',
+      selectfacilitator: String(facilitator._id),
+    };
+
+    await this.register(registerPayload);
+    return {
+      status: 'success',
+      message: 'Company Registered Successfully through facilitator.',
+      data: {
+        facilitator: {
+          id: String(facilitator._id),
+          name: String((facilitator as any).name || ''),
+          consultant_id: String((facilitator as any).consultant_id || ''),
+          consultant_code: String((facilitator as any).consultant_id || ''),
+          facilitator_code: String((facilitator as any).consultant_id || ''),
+          email: String((facilitator as any).email || ''),
+          mobile: String((facilitator as any).mobile || ''),
+        },
+      },
     };
   }
 

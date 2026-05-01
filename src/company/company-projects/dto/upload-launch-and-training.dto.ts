@@ -11,6 +11,14 @@ export class UploadLaunchAndTrainingDto {
   @IsString()
   session_date?: string;
 
+  /** Backward-compatible alias used by some clients; treated same as session_date. */
+  @IsOptional()
+  @Transform(({ value }) =>
+    value === '' || value === null || value === undefined ? undefined : String(value),
+  )
+  @IsString()
+  session?: string;
+
   /**
    * UI may send which session slot (1–4); upload handler ignores it.
    * Whitelisted so global `forbidNonWhitelisted` accepts multipart/form fields.

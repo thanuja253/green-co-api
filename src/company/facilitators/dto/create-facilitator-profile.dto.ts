@@ -5,11 +5,29 @@ export class CreateFacilitatorProfileDto {
   @IsString()
   consultant_id?: string;
 
+  @IsOptional()
   @IsString()
-  name: string;
+  name?: string;
 
+  @IsOptional()
   @IsEmail()
-  email: string;
+  email?: string;
+
+  @IsOptional()
+  @IsString()
+  facilitator_name?: string;
+
+  @IsOptional()
+  @IsString()
+  company_name?: string;
+
+  @IsOptional()
+  @IsEmail()
+  facilitator_email?: string;
+
+  @IsOptional()
+  @IsEmail()
+  company_email?: string;
 
   @IsOptional()
   @IsString()

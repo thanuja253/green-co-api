@@ -74,6 +74,18 @@ export class FacilitatorsController {
     return this.facilitatorsService.getFacilitatorAdminFlow(facilitatorId);
   }
 
+  @Get('api/admin/facilitators/:facilitatorId/profile-data')
+  @Get('admin/facilitators/:facilitatorId/profile-data')
+  async getFacilitatorProfileData(@Param('facilitatorId') facilitatorId: string): Promise<any> {
+    return this.facilitatorsService.getFacilitatorAdminFlow(facilitatorId);
+  }
+
+  @Get('api/admin/facilitators/:facilitatorId/approval-status')
+  @Get('admin/facilitators/:facilitatorId/approval-status')
+  async getFacilitatorApprovalStatus(@Param('facilitatorId') facilitatorId: string): Promise<any> {
+    return this.facilitatorsService.getFacilitatorApprovalStatusAdminFlow(facilitatorId);
+  }
+
   @Post('api/admin/facilitators/:facilitatorId/approval-status')
   @Post('admin/facilitators/:facilitatorId/approval-status')
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
@@ -82,12 +94,7 @@ export class FacilitatorsController {
     @Body() dto: UpdateFacilitatorApprovalDto,
     @Req() req: Request,
   ): Promise<any> {
-    const path = req.path.toLowerCase();
-    let status = dto.approval_status || dto.status || '';
-    if (!status) {
-      if (path.includes('/reject')) status = 'rejected';
-      else if (path.includes('/approve')) status = 'approved';
-    }
+    const status = 'approved';
     return this.facilitatorsService.updateFacilitatorApprovalStatusAdminFlow(
       facilitatorId,
       status,
@@ -119,6 +126,12 @@ export class FacilitatorsController {
     );
   }
 
+  @Post('api/admin/facilitators/:facilitatorId/approval-status/reset')
+  @Post('admin/facilitators/:facilitatorId/approval-status/reset')
+  async resetFacilitatorApprovalStatus(@Param('facilitatorId') facilitatorId: string): Promise<any> {
+    return this.facilitatorsService.resetFacilitatorApprovalStatusAdminFlow(facilitatorId);
+  }
+
   /**
    * Admin: approve/reject/pending one facilitator-uploaded document.
    * Re-upload by facilitator resets that document to Pending.
@@ -140,12 +153,14 @@ export class FacilitatorsController {
   }
 
   @Post('admin/facilitators/profile')
-  @Post('api/admin/facilitators/profile')
   @UseInterceptors(
     FileFieldsInterceptor(
       [
         { name: 'profile_image', maxCount: 1 },
         { name: 'biodata', maxCount: 1 },
+        { name: 'brief_profile_individual', maxCount: 1 },
+        { name: 'brief_profile_organization', maxCount: 1 },
+        { name: 'projects_handled', maxCount: 1 },
         { name: 'vendor_registration_form', maxCount: 1 },
         { name: 'non_disclosure_agreement', maxCount: 1 },
         { name: 'health_declaration', maxCount: 1 },
@@ -181,11 +196,14 @@ export class FacilitatorsController {
   )
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
   async createFacilitatorProfile(
-    @Body() dto: CreateFacilitatorProfileDto,
+    @Body() body: Record<string, any>,
     @UploadedFiles()
     files?: {
       profile_image?: Express.Multer.File[];
       biodata?: Express.Multer.File[];
+      brief_profile_individual?: Express.Multer.File[];
+      brief_profile_organization?: Express.Multer.File[];
+      projects_handled?: Express.Multer.File[];
       vendor_registration_form?: Express.Multer.File[];
       non_disclosure_agreement?: Express.Multer.File[];
       health_declaration?: Express.Multer.File[];
@@ -194,7 +212,149 @@ export class FacilitatorsController {
       cancelled_cheque?: Express.Multer.File[];
     },
   ): Promise<any> {
-    return this.facilitatorsService.createFacilitatorProfileAdminFlow(dto, files);
+    const dto: CreateFacilitatorProfileDto = {
+      ...body,
+      name: String(body?.name || body?.facilitator_name || body?.company_name || '').trim() || undefined,
+      email:
+        String(body?.email || body?.facilitator_email || body?.company_email || '')
+          .trim()
+          .toLowerCase() || undefined,
+    };
+    return this.facilitatorsService.upsertFacilitatorProfileAdminFlow(dto, files);
+  }
+
+  @Post('api/admin/facilitators/profile')
+  @UseInterceptors(
+    FileFieldsInterceptor(
+      [
+        { name: 'profile_image', maxCount: 1 },
+        { name: 'biodata', maxCount: 1 },
+        { name: 'brief_profile_individual', maxCount: 1 },
+        { name: 'brief_profile_organization', maxCount: 1 },
+        { name: 'projects_handled', maxCount: 1 },
+        { name: 'vendor_registration_form', maxCount: 1 },
+        { name: 'non_disclosure_agreement', maxCount: 1 },
+        { name: 'health_declaration', maxCount: 1 },
+        { name: 'gst_declaration', maxCount: 1 },
+        { name: 'pan_card', maxCount: 1 },
+        { name: 'cancelled_cheque', maxCount: 1 },
+      ],
+      {
+        storage: diskStorage({
+          destination: (req, file, cb) => {
+            const uploadPath = join(process.cwd(), 'uploads', 'facilitators');
+            if (!fs.existsSync(uploadPath)) fs.mkdirSync(uploadPath, { recursive: true });
+            cb(null, uploadPath);
+          },
+          filename: (req, file, cb) => {
+            const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+            cb(null, `${file.fieldname}-${unique}${extname(file.originalname)}`);
+          },
+        }),
+        fileFilter: (req, file, cb) => {
+          if (file.fieldname === 'profile_image') {
+            const imageTypes = ['image/png', 'image/jpeg', 'image/jpg'];
+            if (!imageTypes.includes(file.mimetype)) {
+              cb(new Error('profile_image must be PNG/JPG/JPEG'), false);
+              return;
+            }
+          }
+          cb(null, true);
+        },
+        limits: { fileSize: 10 * 1024 * 1024 },
+      },
+    ),
+  )
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
+  async createFacilitatorProfileApi(
+    @Body() body: Record<string, any>,
+    @UploadedFiles()
+    files?: {
+      profile_image?: Express.Multer.File[];
+      biodata?: Express.Multer.File[];
+      brief_profile_individual?: Express.Multer.File[];
+      brief_profile_organization?: Express.Multer.File[];
+      projects_handled?: Express.Multer.File[];
+      vendor_registration_form?: Express.Multer.File[];
+      non_disclosure_agreement?: Express.Multer.File[];
+      health_declaration?: Express.Multer.File[];
+      gst_declaration?: Express.Multer.File[];
+      pan_card?: Express.Multer.File[];
+      cancelled_cheque?: Express.Multer.File[];
+    },
+  ): Promise<any> {
+    return this.createFacilitatorProfile(body, files);
+  }
+
+  @Post('api/admin/facilitators/profile/upsert')
+  @UseInterceptors(
+    FileFieldsInterceptor(
+      [
+        { name: 'profile_image', maxCount: 1 },
+        { name: 'biodata', maxCount: 1 },
+        { name: 'brief_profile_individual', maxCount: 1 },
+        { name: 'brief_profile_organization', maxCount: 1 },
+        { name: 'projects_handled', maxCount: 1 },
+        { name: 'vendor_registration_form', maxCount: 1 },
+        { name: 'non_disclosure_agreement', maxCount: 1 },
+        { name: 'health_declaration', maxCount: 1 },
+        { name: 'gst_declaration', maxCount: 1 },
+        { name: 'pan_card', maxCount: 1 },
+        { name: 'cancelled_cheque', maxCount: 1 },
+      ],
+      {
+        storage: diskStorage({
+          destination: (req, file, cb) => {
+            const uploadPath = join(process.cwd(), 'uploads', 'facilitators');
+            if (!fs.existsSync(uploadPath)) fs.mkdirSync(uploadPath, { recursive: true });
+            cb(null, uploadPath);
+          },
+          filename: (req, file, cb) => {
+            const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+            cb(null, `${file.fieldname}-${unique}${extname(file.originalname)}`);
+          },
+        }),
+        fileFilter: (req, file, cb) => {
+          if (file.fieldname === 'profile_image') {
+            const imageTypes = ['image/png', 'image/jpeg', 'image/jpg'];
+            if (!imageTypes.includes(file.mimetype)) {
+              cb(new Error('profile_image must be PNG/JPG/JPEG'), false);
+              return;
+            }
+          }
+          cb(null, true);
+        },
+        limits: { fileSize: 10 * 1024 * 1024 },
+      },
+    ),
+  )
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
+  async upsertFacilitatorProfile(
+    @Body() body: Record<string, any>,
+    @UploadedFiles()
+    files?: {
+      profile_image?: Express.Multer.File[];
+      biodata?: Express.Multer.File[];
+      brief_profile_individual?: Express.Multer.File[];
+      brief_profile_organization?: Express.Multer.File[];
+      projects_handled?: Express.Multer.File[];
+      vendor_registration_form?: Express.Multer.File[];
+      non_disclosure_agreement?: Express.Multer.File[];
+      health_declaration?: Express.Multer.File[];
+      gst_declaration?: Express.Multer.File[];
+      pan_card?: Express.Multer.File[];
+      cancelled_cheque?: Express.Multer.File[];
+    },
+  ): Promise<any> {
+    const dto: CreateFacilitatorProfileDto = {
+      ...body,
+      name: String(body?.name || body?.facilitator_name || body?.company_name || '').trim() || undefined,
+      email:
+        String(body?.email || body?.facilitator_email || body?.company_email || '')
+          .trim()
+          .toLowerCase() || undefined,
+    };
+    return this.facilitatorsService.upsertFacilitatorProfileAdminFlow(dto, files);
   }
 
   @Put('api/admin/facilitators/:facilitatorId/edit')
@@ -208,6 +368,9 @@ export class FacilitatorsController {
       [
         { name: 'profile_image', maxCount: 1 },
         { name: 'biodata', maxCount: 1 },
+        { name: 'brief_profile_individual', maxCount: 1 },
+        { name: 'brief_profile_organization', maxCount: 1 },
+        { name: 'projects_handled', maxCount: 1 },
         { name: 'vendor_registration_form', maxCount: 1 },
         { name: 'non_disclosure_agreement', maxCount: 1 },
         { name: 'health_declaration', maxCount: 1 },
@@ -249,6 +412,9 @@ export class FacilitatorsController {
     files?: {
       profile_image?: Express.Multer.File[];
       biodata?: Express.Multer.File[];
+      brief_profile_individual?: Express.Multer.File[];
+      brief_profile_organization?: Express.Multer.File[];
+      projects_handled?: Express.Multer.File[];
       vendor_registration_form?: Express.Multer.File[];
       non_disclosure_agreement?: Express.Multer.File[];
       health_declaration?: Express.Multer.File[];

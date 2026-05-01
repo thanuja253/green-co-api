@@ -108,16 +108,6 @@ async function bootstrap() {
     next();
   });
 
-  // Legacy facilitator profile create alias:
-  // Some clients post to /api/admin/facilitators/profile while others use /api/admin/facilitators/create.
-  app.use((req, _res, next) => {
-    const url = req.url || '';
-    if (req.method === 'POST' && (url === '/api/admin/facilitators/profile' || url === '/admin/facilitators/profile')) {
-      req.url = '/api/admin/facilitators/create';
-    }
-    next();
-  });
-
   // Legacy admin assessor assignment alias:
   // admin UI may post /api/company/projects/:projectId/assign-assessor
   // but admin backend route is /api/admin/assign_assessor/:projectId.

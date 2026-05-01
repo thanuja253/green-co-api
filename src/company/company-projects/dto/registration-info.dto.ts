@@ -1,7 +1,31 @@
-import { IsOptional, IsString, IsBoolean, IsNumber } from 'class-validator';
-import { Type } from 'class-transformer';
+import { IsOptional, IsString, IsBoolean } from 'class-validator';
 
 export class RegistrationInfoDto {
+  // Facilitator selection (from registration masters)
+  @IsOptional()
+  @IsString()
+  facilitator_id?: string;
+
+  @IsOptional()
+  @IsString()
+  facilitator_name?: string;
+
+  @IsOptional()
+  @IsString()
+  facilitator_code?: string;
+
+  @IsOptional()
+  @IsString()
+  facilitatorId?: string; // alias
+
+  @IsOptional()
+  @IsString()
+  facilitatorName?: string; // alias
+
+  @IsOptional()
+  @IsString()
+  facilitatorCode?: string; // alias
+
   // Dropdown selections (IDs)
   @IsOptional()
   @IsString()

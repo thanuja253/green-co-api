@@ -1,5 +1,4 @@
 import {
-  BadRequestException,
   Injectable,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
@@ -57,7 +56,14 @@ export class RegistrationMastersService {
       entities: Array<{ id: string; name: string }>;
       sectors: Array<{ id: string; name: string; group_name?: string }>;
       states: Array<{ id: string; name: string; code?: string }>;
-      facilitators: Array<{ id: string; name: string }>;
+      facilitators: Array<{
+        id: string;
+        name: string;
+        code?: string;
+        consultant_id?: string;
+        facilitator_name?: string;
+        facilitator_code?: string;
+      }>;
     };
   }> {
     try {
@@ -111,7 +117,7 @@ export class RegistrationMastersService {
               ],
             })
             .sort({ name: 1 })
-            .select('_id name')
+            .select('_id name consultant_id')
             .lean(),
         ]);
 
@@ -130,7 +136,7 @@ export class RegistrationMastersService {
       
       const facilitators = facilitatorsFiltered.length > 0
         ? facilitatorsFiltered
-        : await this.facilitatorModel.find({}).sort({ name: 1 }).select('_id name').lean();
+        : await this.facilitatorModel.find({}).sort({ name: 1 }).select('_id name consultant_id').lean();
 
       console.log('[RegistrationMasters] Results:', {
         industries: industries.length,
@@ -161,6 +167,10 @@ export class RegistrationMastersService {
           facilitators: facilitators.map((f: any) => ({
             id: f._id.toString(),
             name: f.name,
+            code: String(f.consultant_id || '').trim() || undefined,
+            consultant_id: String(f.consultant_id || '').trim() || undefined,
+            facilitator_name: String(f.name || '').trim() || undefined,
+            facilitator_code: String(f.consultant_id || '').trim() || undefined,
           })),
         },
       };

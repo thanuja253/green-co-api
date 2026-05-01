@@ -3,6 +3,7 @@ import {
   Injectable,
   InternalServerErrorException,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import * as bcrypt from 'bcrypt';
@@ -33,6 +34,18 @@ export class FacilitatorsService {
     return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'y';
   }
 
+  private isTransientDatabaseError(error: unknown): boolean {
+    const message = String((error as any)?.message || '').toLowerCase();
+    return (
+      message.includes('ehostunreach') ||
+      message.includes('mongo network error') ||
+      message.includes('mongonetworkerror') ||
+      message.includes('mongopoolclearederror') ||
+      message.includes('connection pool') ||
+      message.includes('timed out')
+    );
+  }
+
   private toPublicFilePath(path?: string): string {
     const raw = String(path || '').trim();
     if (!raw) return '';
@@ -49,30 +62,35 @@ export class FacilitatorsService {
   }
 
   private mapFacilitatorResponse(a: any) {
-    const reviewApprovals = this.buildReviewRequiredApprovalsMap(a);
-    const reviewValues = Object.values(reviewApprovals);
-    const derivedApprovalStatus =
-      reviewValues.length === 0
-        ? String(a.approval_status || 'Pending')
-        : reviewValues.some((v) => v.status === 'Rejected')
-          ? 'Rejected'
-          : reviewValues.some((v) => v.status === 'Pending')
-            ? 'Pending'
-            : 'Approved';
-    const derivedProfileStatus =
-      reviewValues.length > 0 && reviewValues.every((v) => v.status === 'Approved')
-        ? 'Complete'
-        : 'Incomplete';
+    const rawStoredStatus = String(a.approval_status || '').trim().toLowerCase();
+    const storedApprovalStatus =
+      rawStoredStatus === 'rejected'
+        ? 'Rejected'
+        : rawStoredStatus === 'pending'
+          ? 'Pending'
+          : 'Approved';
+    const derivedApprovalStatus = storedApprovalStatus;
+    const derivedProfileStatus = storedApprovalStatus === 'Approved' ? 'Complete' : 'Incomplete';
+    const mappedDocApprovals = this.buildDocumentApprovalsMap(a);
+    for (const key of Object.keys(mappedDocApprovals)) {
+      mappedDocApprovals[key] = {
+        status: storedApprovalStatus,
+        remarks: storedApprovalStatus === 'Rejected' ? String(a.approval_remarks || '').trim() : '',
+      };
+    }
 
     return {
       id: a._id?.toString?.() || a._id,
       consultant_id: a.consultant_id || '',
+      consultant_code: a.consultant_id || '',
+      facilitator_code: a.consultant_id || '',
       name: a.name || '',
       email: a.email || '',
       mobile: a.mobile || '',
       status: a.status ?? '1',
       account_status: a.status ?? '1',
       industry_category: a.industry_category || '',
+      organization: a.industry_category || '',
       alternate_mobile: a.alternate_mobile || '',
       address_line_1: a.address_line_1 || '',
       address_line_2: a.address_line_2 || '',
@@ -112,10 +130,15 @@ export class FacilitatorsService {
       pan_card_url: this.toAbsoluteFileUrl(a.pan_card),
       cancelled_cheque_url: this.toAbsoluteFileUrl(a.cancelled_cheque),
       profile_image_url: this.toAbsoluteFileUrl(a.profile_image),
+      // Legacy aggregated status (kept for compatibility with existing clients).
       approval_status: derivedApprovalStatus,
+      // Explicit facilitator-level status (independent key for UI use).
+      overall_approval_status: storedApprovalStatus,
+      // Explicit document-level aggregated status.
+      documents_approval_status: derivedApprovalStatus,
       approval_remarks: a.approval_remarks || '',
       profile_status: derivedProfileStatus,
-      document_approvals: this.buildDocumentApprovalsMap(a),
+      document_approvals: mappedDocApprovals,
     };
   }
 
@@ -124,6 +147,15 @@ export class FacilitatorsService {
       return String(source?.brief_profile_individual || source?.biodata || '').trim();
     }
     return String(source?.[key] || '').trim();
+  }
+
+  private clearFacilitatorDocumentPath(target: any, key: string): void {
+    if (key === 'brief_profile_individual') {
+      target.brief_profile_individual = '';
+      target.biodata = '';
+      return;
+    }
+    target[key] = '';
   }
 
   private buildReviewRequiredApprovalsMap(source: any): Record<string, { status: string; remarks: string }> {
@@ -279,6 +311,8 @@ export class FacilitatorsService {
       data: {
         id: facilitator._id.toString(),
         consultant_id: (facilitator as any).consultant_id || '',
+        consultant_code: (facilitator as any).consultant_id || '',
+        facilitator_code: (facilitator as any).consultant_id || '',
         name: facilitator.name,
         email: facilitator.email,
         mobile: (facilitator as any).mobile,
@@ -347,11 +381,45 @@ export class FacilitatorsService {
     };
   }
 
+  async getFacilitatorApprovalStatusAdminFlow(facilitatorId: string) {
+    try {
+      const row = await this.facilitatorModel.findById(facilitatorId).lean();
+      if (!row) throw new NotFoundException({ status: 'error', message: 'Facilitator not found' });
+
+      const mapped = this.mapFacilitatorResponse(row);
+      return {
+        status: 'success',
+        message: 'Facilitator approval status fetched successfully',
+        data: {
+          id: mapped.id,
+          consultant_id: mapped.consultant_id,
+          name: mapped.name,
+          email: mapped.email,
+          overall_approval_status: mapped.overall_approval_status,
+          documents_approval_status: mapped.documents_approval_status,
+          profile_status: mapped.profile_status,
+        },
+      };
+    } catch (error) {
+      if (error instanceof NotFoundException) throw error;
+      if (this.isTransientDatabaseError(error)) {
+        throw new ServiceUnavailableException({
+          status: 'error',
+          message: 'Database temporarily unavailable. Please retry in a few seconds.',
+        });
+      }
+      throw error;
+    }
+  }
+
   async createFacilitatorProfileAdminFlow(
     dto: CreateFacilitatorProfileDto,
     files?: {
       profile_image?: Express.Multer.File[];
       biodata?: Express.Multer.File[];
+      brief_profile_individual?: Express.Multer.File[];
+      brief_profile_organization?: Express.Multer.File[];
+      projects_handled?: Express.Multer.File[];
       vendor_registration_form?: Express.Multer.File[];
       non_disclosure_agreement?: Express.Multer.File[];
       health_declaration?: Express.Multer.File[];
@@ -360,15 +428,31 @@ export class FacilitatorsService {
       cancelled_cheque?: Express.Multer.File[];
     },
   ) {
-    const normalizedEmail = dto.email.trim().toLowerCase();
+    const resolvedName = String(dto.name || dto.facilitator_name || dto.company_name || '').trim();
+    const resolvedEmail = String(
+      dto.email || dto.facilitator_email || dto.company_email || '',
+    )
+      .trim()
+      .toLowerCase();
+    if (!resolvedName || !resolvedEmail) {
+      throw new BadRequestException({
+        status: 'validations',
+        errors: {
+          ...(resolvedName ? {} : { name: ['name is required.'] }),
+          ...(resolvedEmail ? {} : { email: ['email is required.'] }),
+        },
+      });
+    }
+    const normalizedEmail = resolvedEmail;
     const existing = await this.facilitatorModel.findOne({ email: normalizedEmail }).lean();
     if (existing) {
       throw new BadRequestException({ status: 'validations', errors: { email: ['Facilitator with this email already exists.'] } });
     }
     const filePath = (f?: Express.Multer.File[]) => (f?.[0] ? `uploads/facilitators/${f[0].filename}` : '');
+    const briefProfileIndividualPath = filePath(files?.brief_profile_individual) || filePath(files?.biodata);
     const bankInfo = await this.deriveBankDetails(dto.ifsc_code, dto.bank_name, dto.branch_name);
     const row = await this.facilitatorModel.create({
-      name: dto.name.trim(),
+      name: resolvedName,
       email: normalizedEmail,
       mobile: (dto.mobile || '').trim(),
       consultant_id: String(dto.consultant_id || '').trim() || await this.getNextConsultantId(),
@@ -403,7 +487,10 @@ export class FacilitatorsService {
       areas_of_specialization: dto.areas_of_specialization || '',
       company_website: dto.company_website_details || dto.company_website || '',
       linkedin_profile: dto.linkedin_profile || '',
-      biodata: filePath(files?.biodata),
+      biodata: briefProfileIndividualPath,
+      brief_profile_individual: briefProfileIndividualPath,
+      brief_profile_organization: filePath(files?.brief_profile_organization),
+      projects_handled: filePath(files?.projects_handled),
       vendor_registration_form: filePath(files?.vendor_registration_form),
       non_disclosure_agreement: filePath(files?.non_disclosure_agreement),
       health_declaration: filePath(files?.health_declaration),
@@ -417,7 +504,18 @@ export class FacilitatorsService {
       profile_status: 'Complete',
       document_approvals: {
         ...(filePath(files?.profile_image) ? { profile_image: { status: 'Approved', remarks: '' } } : {}),
-        ...(filePath(files?.biodata) ? { biodata: { status: 'Approved', remarks: '' } } : {}),
+        ...(briefProfileIndividualPath
+          ? {
+              biodata: { status: 'Approved', remarks: '' },
+              brief_profile_individual: { status: 'Approved', remarks: '' },
+            }
+          : {}),
+        ...(filePath(files?.brief_profile_organization)
+          ? { brief_profile_organization: { status: 'Approved', remarks: '' } }
+          : {}),
+        ...(filePath(files?.projects_handled)
+          ? { projects_handled: { status: 'Approved', remarks: '' } }
+          : {}),
         ...(filePath(files?.vendor_registration_form)
           ? { vendor_registration_form: { status: 'Approved', remarks: '' } }
           : {}),
@@ -449,6 +547,9 @@ export class FacilitatorsService {
     files?: {
       profile_image?: Express.Multer.File[];
       biodata?: Express.Multer.File[];
+      brief_profile_individual?: Express.Multer.File[];
+      brief_profile_organization?: Express.Multer.File[];
+      projects_handled?: Express.Multer.File[];
       vendor_registration_form?: Express.Multer.File[];
       non_disclosure_agreement?: Express.Multer.File[];
       health_declaration?: Express.Multer.File[];
@@ -511,7 +612,12 @@ export class FacilitatorsService {
     row.approval_status = 'Approved';
     row.approval_remarks = '';
     row.profile_image = filePath(files?.profile_image) ?? row.profile_image;
-    row.biodata = filePath(files?.biodata) ?? row.biodata;
+    const briefProfileIndividualPath = filePath(files?.brief_profile_individual) ?? filePath(files?.biodata);
+    row.biodata = briefProfileIndividualPath ?? row.biodata;
+    (row as any).brief_profile_individual = briefProfileIndividualPath ?? (row as any).brief_profile_individual;
+    (row as any).brief_profile_organization =
+      filePath(files?.brief_profile_organization) ?? (row as any).brief_profile_organization;
+    (row as any).projects_handled = filePath(files?.projects_handled) ?? (row as any).projects_handled;
     row.vendor_registration_form = filePath(files?.vendor_registration_form) ?? row.vendor_registration_form;
     row.non_disclosure_agreement = filePath(files?.non_disclosure_agreement) ?? row.non_disclosure_agreement;
     row.health_declaration = filePath(files?.health_declaration) ?? row.health_declaration;
@@ -531,7 +637,16 @@ export class FacilitatorsService {
       };
     }
     if (files?.profile_image?.[0]) docApprovals.profile_image = { status: 'Approved', remarks: '' };
-    if (files?.biodata?.[0]) docApprovals.biodata = { status: 'Approved', remarks: '' };
+    if (files?.biodata?.[0] || files?.brief_profile_individual?.[0]) {
+      docApprovals.biodata = { status: 'Approved', remarks: '' };
+      docApprovals.brief_profile_individual = { status: 'Approved', remarks: '' };
+    }
+    if (files?.brief_profile_organization?.[0]) {
+      docApprovals.brief_profile_organization = { status: 'Approved', remarks: '' };
+    }
+    if (files?.projects_handled?.[0]) {
+      docApprovals.projects_handled = { status: 'Approved', remarks: '' };
+    }
     if (files?.vendor_registration_form?.[0]) docApprovals.vendor_registration_form = { status: 'Approved', remarks: '' };
     if (files?.non_disclosure_agreement?.[0]) docApprovals.non_disclosure_agreement = { status: 'Approved', remarks: '' };
     if (files?.health_declaration?.[0]) docApprovals.health_declaration = { status: 'Approved', remarks: '' };
@@ -566,7 +681,7 @@ export class FacilitatorsService {
     let approvalStatus = 'Pending';
     if (['1', 'approved', 'approve', 'yes'].includes(normalized)) {
       approvalStatus = 'Approved';
-    } else if (['2', 'rejected', 'reject', 'disapproved', 'no'].includes(normalized)) {
+    } else if (['0', '2', 'rejected', 'reject', 'disapproved', 'no', 'not approved'].includes(normalized)) {
       approvalStatus = 'Rejected';
     } else if (normalized) {
       approvalStatus = normalized.charAt(0).toUpperCase() + normalized.slice(1);
@@ -597,6 +712,12 @@ export class FacilitatorsService {
           remarks: approvalStatus === 'Rejected' ? remarksTrim : '',
         };
       }
+      // Rejection requires facilitator to upload fresh files again.
+      if (approvalStatus === 'Rejected') {
+        for (const key of FACILITATOR_PROFILE_DOCUMENT_KEYS) {
+          this.clearFacilitatorDocumentPath(row as any, key);
+        }
+      }
       (row as any).document_approvals = docApprovals;
     }
     if (approvalStatus === 'Approved') {
@@ -609,6 +730,36 @@ export class FacilitatorsService {
     return {
       status: 'success',
       message: `Facilitator ${approvalStatus.toLowerCase()} successfully`,
+      data: this.mapFacilitatorResponse(row.toObject()),
+    };
+  }
+
+  async resetFacilitatorApprovalStatusAdminFlow(facilitatorId: string) {
+    const row = await this.facilitatorModel.findById(facilitatorId);
+    if (!row) {
+      throw new NotFoundException({ status: 'error', message: 'Facilitator not found' });
+    }
+
+    row.approval_status = 'Pending';
+    row.approval_remarks = '';
+    row.profile_status = 'Complete';
+
+    const prev = ((row as any).document_approvals || {}) as Record<
+      string,
+      { status?: string; remarks?: string }
+    >;
+    const docApprovals: Record<string, { status: string; remarks: string }> = {};
+    for (const key of Object.keys(prev)) {
+      const pathVal = this.getFacilitatorDocumentPath(row.toObject(), key);
+      if (!pathVal) continue;
+      docApprovals[key] = { status: 'Pending', remarks: '' };
+    }
+    (row as any).document_approvals = docApprovals;
+
+    await row.save();
+    return {
+      status: 'success',
+      message: 'Facilitator approval reset to pending successfully',
       data: this.mapFacilitatorResponse(row.toObject()),
     };
   }
@@ -687,6 +838,37 @@ export class FacilitatorsService {
       message: `Document ${documentKey} marked as ${status}`,
       data: this.mapFacilitatorResponse(row.toObject()),
     };
+  }
+
+  async upsertFacilitatorProfileAdminFlow(
+    dto: CreateFacilitatorProfileDto,
+    files?: {
+      profile_image?: Express.Multer.File[];
+      biodata?: Express.Multer.File[];
+      brief_profile_individual?: Express.Multer.File[];
+      brief_profile_organization?: Express.Multer.File[];
+      projects_handled?: Express.Multer.File[];
+      vendor_registration_form?: Express.Multer.File[];
+      non_disclosure_agreement?: Express.Multer.File[];
+      health_declaration?: Express.Multer.File[];
+      gst_declaration?: Express.Multer.File[];
+      pan_card?: Express.Multer.File[];
+      cancelled_cheque?: Express.Multer.File[];
+    },
+  ) {
+    const normalizedEmail = String(
+      dto.email || dto.facilitator_email || dto.company_email || '',
+    )
+      .trim()
+      .toLowerCase();
+    if (!normalizedEmail) {
+      return this.createFacilitatorProfileAdminFlow(dto, files);
+    }
+    const existing = await this.facilitatorModel.findOne({ email: normalizedEmail }).lean();
+    if (!existing?._id) {
+      return this.createFacilitatorProfileAdminFlow(dto, files);
+    }
+    return this.updateFacilitatorProfileAdminFlow(String(existing._id), dto, files);
   }
 }
 

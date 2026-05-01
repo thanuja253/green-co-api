@@ -4,7 +4,6 @@ import { Model } from 'mongoose';
 import { Facilitator, FacilitatorDocument } from '../schemas/facilitator.schema';
 import {
   FACILITATOR_PROFILE_DOCUMENT_KEYS,
-  FACILITATOR_REVIEW_REQUIRED_DOCUMENT_KEYS,
 } from './facilitator-profile-document-keys';
 
 @Injectable()
@@ -170,26 +169,22 @@ export class FacilitatorProfileService {
         remarks: String(e?.remarks ?? '').trim(),
       };
     }
-    let reviewRequiredDocChanged = false;
     for (const key of FACILITATOR_PROFILE_DOCUMENT_KEYS) {
       if (files?.[key]?.[0]) {
-        docApprovals[key] = { status: 'Pending', remarks: '' };
-        if ((FACILITATOR_REVIEW_REQUIRED_DOCUMENT_KEYS as readonly string[]).includes(key)) {
-          reviewRequiredDocChanged = true;
-        }
+        docApprovals[key] = { status: 'Approved', remarks: '' };
       }
     }
     // Alias handling: re-uploading biodata should also reset brief_profile_individual.
     if (files?.biodata?.[0]) {
-      docApprovals.brief_profile_individual = { status: 'Pending', remarks: '' };
-      reviewRequiredDocChanged = true;
+      docApprovals.brief_profile_individual = { status: 'Approved', remarks: '' };
+    }
+    for (const key of Object.keys(docApprovals)) {
+      docApprovals[key] = { status: 'Approved', remarks: '' };
     }
     (facilitator as any).document_approvals = docApprovals;
 
-    if (reviewRequiredDocChanged) {
-      facilitator.approval_status = 'Pending';
-      facilitator.approval_remarks = '';
-    }
+    facilitator.approval_status = 'Approved';
+    facilitator.approval_remarks = '';
     facilitator.profile_status = 'Complete';
 
     await facilitator.save();

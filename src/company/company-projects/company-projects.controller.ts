@@ -451,9 +451,49 @@ export class CompanyProjectsController {
     });
 
     return result;
+  }   /**
+   * Facilitator-only registration flow endpoint (keeps existing /registration-info unchanged).
+   * Supports company_brief_profile upload via multipart/form-data.
+   */
+  @Post(':projectId/facilitator-registration-info')
+  @Put(':projectId/facilitator-registration-info')
+  @Patch(':projectId/facilitator-registration-info')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
+  @UseInterceptors(
+    FileFieldsInterceptor(REGISTRATION_INFO_FILE_FIELDS, registrationInfoMulterOptions),
+  )
+  @UsePipes(createRegistrationInfoValidationPipe())
+  async saveFacilitatorRegistrationInfo(
+    @Request() req,
+    @Param('projectId') projectId: string,
+    @Body() body: any,
+    @UploadedFiles() files?: {
+      company_brief_profile?: Express.Multer.File[];
+      brief_profile?: Express.Multer.File[];
+      turnover_document?: Express.Multer.File[];
+      turnover?: Express.Multer.File[];
+      sez_document?: Express.Multer.File[];
+      sezDocument?: Express.Multer.File[];
+      sez_input?: Express.Multer.File[];
+      sezinput?: Express.Multer.File[];
+    },
+  ): Promise<any> {
+    const reqFiles = (req as any).files;
+    const { dto, files: mergedFiles } = parseRegistrationMultipartBody(body, files, reqFiles);
+    const isUpdate = req.method === 'PUT' || req.method === 'PATCH';
+    return this.companyProjectsService.saveFacilitatorRegistrationInfo(
+      req.user.userId,
+      projectId,
+      dto,
+      mergedFiles,
+      isUpdate ? { isUpdate: true, skipMilestone: true } : undefined,
+    );
   }
 
   @Get(':projectId/registration-info')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+  @Header('Pragma', 'no-cache')
+  @Header('Expires', '0')
   @UseGuards(JwtAuthGuard, AccountStatusGuard)
   async getRegistrationInfo(
     @Request() req,
@@ -465,11 +505,26 @@ export class CompanyProjectsController {
     );
   }
 
+  @Get(':projectId/facilitator-registration-info')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+  @Header('Pragma', 'no-cache')
+  @Header('Expires', '0')
+  async getFacilitatorRegistrationInfo(
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.getFacilitatorRegistrationInfoByProjectId(
+      projectId,
+    );
+  }
+
   /**
    * Admin-safe alias to fetch registration info by project id.
    * GET /api/company/projects/:projectId/admin/registration-data
    */
   @Get(':projectId/admin/registration-data')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+  @Header('Pragma', 'no-cache')
+  @Header('Expires', '0')
   async getRegistrationInfoForAdminAlias(
     @Param('projectId') projectId: string,
   ): Promise<any> {
@@ -1792,7 +1847,6 @@ export class CompanyProjectsController {
    * POST /api/company/projects/:projectId/work-order-document
    */
   @Post(':projectId/work-order-document')
-  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   @UseInterceptors(
     FileInterceptor('workorderdocument', {
       storage: diskStorage({
@@ -1828,7 +1882,6 @@ export class CompanyProjectsController {
     }),
   )
   async uploadWorkOrderDocument(
-    @Request() req,
     @Param('projectId') projectId: string,
     @UploadedFile() file: Express.Multer.File,
   ): Promise<any> {
@@ -1845,11 +1898,7 @@ export class CompanyProjectsController {
       size: file.size,
     });
 
-    return this.companyProjectsService.uploadWorkOrderDocument(
-      req.user.userId,
-      projectId,
-      file,
-    );
+    return this.companyProjectsService.uploadWorkOrderDocumentByProjectId(projectId, file);
   }
 
   /**
@@ -1860,6 +1909,126 @@ export class CompanyProjectsController {
   @Get(':projectId/work-order-document')
   async getWorkOrderDocument(@Param('projectId') projectId: string): Promise<any> {
     return this.companyProjectsService.getWorkOrderDocumentByProjectId(projectId);
+  }
+
+  @Get(':projectId/facilitator-contract-document')
+  async getFacilitatorContractDocument(@Param('projectId') projectId: string): Promise<any> {
+    return this.companyProjectsService.getWorkOrderDocumentByProjectId(projectId);
+  }
+
+  @Post(':projectId/facilitator-contract-document')
+  @UseInterceptors(
+    FileInterceptor('workorderdocument', {
+      storage: diskStorage({
+        destination: (req, file, cb) => {
+          const projectId = req.params.projectId;
+          const uploadPath = join(process.cwd(), 'uploads', 'companyproject', projectId);
+          if (!fs.existsSync(uploadPath)) {
+            fs.mkdirSync(uploadPath, { recursive: true });
+          }
+          cb(null, uploadPath);
+        },
+        filename: (req, file, cb) => {
+          const timestamp = Date.now();
+          cb(null, `${timestamp}_${file.originalname}`);
+        },
+      }),
+      limits: { fileSize: 10 * 1024 * 1024 },
+      fileFilter: (req, file, cb) => {
+        if (file.mimetype === 'application/pdf') cb(null, true);
+        else cb(new Error('Invalid file type. Only PDF files are allowed.'), false);
+      },
+    }),
+  )
+  async uploadFacilitatorContractDocument(
+    @Param('projectId') projectId: string,
+    @UploadedFile() file: Express.Multer.File,
+  ): Promise<any> {
+    if (!file) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'No file uploaded. Please select a PDF file.',
+      });
+    }
+    return this.companyProjectsService.uploadWorkOrderDocumentByProjectId(projectId, file);
+  }
+
+  @Post(':projectId/facilitator-contract-document/reupload')
+  @UseInterceptors(
+    FileInterceptor('workorderdocument', {
+      storage: diskStorage({
+        destination: (req, file, cb) => {
+          const projectId = req.params.projectId;
+          const uploadPath = join(process.cwd(), 'uploads', 'companyproject', projectId);
+          if (!fs.existsSync(uploadPath)) {
+            fs.mkdirSync(uploadPath, { recursive: true });
+          }
+          cb(null, uploadPath);
+        },
+        filename: (req, file, cb) => {
+          const timestamp = Date.now();
+          cb(null, `${timestamp}_${file.originalname}`);
+        },
+      }),
+      limits: { fileSize: 10 * 1024 * 1024 },
+      fileFilter: (req, file, cb) => {
+        if (file.mimetype === 'application/pdf') cb(null, true);
+        else cb(new Error('Invalid file type. Only PDF files are allowed.'), false);
+      },
+    }),
+  )
+  async reuploadFacilitatorContractDocument(
+    @Param('projectId') projectId: string,
+    @UploadedFile() file: Express.Multer.File,
+  ): Promise<any> {
+    if (!file) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'No file uploaded. Use field workorderdocument (PDF).',
+      });
+    }
+    return this.companyProjectsService.reuploadWorkOrderDocumentByProjectId(projectId, file);
+  }
+
+  @Patch(':projectId/facilitator-contract-document/review')
+  @UsePipes(
+    new ValidationPipe({
+      transform: true,
+      whitelist: true,
+      forbidNonWhitelisted: true,
+    }),
+  )
+  async reviewFacilitatorContractDocument(
+    @Param('projectId') projectId: string,
+    @Body() dto: ApproveWorkOrderDto,
+  ): Promise<any> {
+    if (dto.wo_status === 2 && !dto.wo_remarks) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Remarks are required when rejecting work order',
+      });
+    }
+    return this.companyProjectsService.updateWorkOrderStatusByProjectId(projectId, dto);
+  }
+
+  @Get(':projectId/facilitator-contract-document/acceptance')
+  async getFacilitatorContractAcceptance(@Param('projectId') projectId: string): Promise<any> {
+    return this.companyProjectsService.getWorkOrderAcceptanceDetailsByProjectId(projectId);
+  }
+
+  @Patch(':projectId/facilitator-contract-document/acceptance')
+  @UsePipes(
+    new ValidationPipe({
+      transform: true,
+      whitelist: true,
+      forbidNonWhitelisted: true,
+    }),
+  )
+  async setFacilitatorContractAcceptance(
+    @Param('projectId') projectId: string,
+    @Body() dto: WorkOrderAcceptanceDetailsDto,
+  ): Promise<any> {
+    return this.companyProjectsService.setWorkOrderAcceptanceDetailsByProjectId(projectId, dto);
   }
 
   /**

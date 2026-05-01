@@ -99,15 +99,17 @@ export class FacilitatorAuthService {
 
   async forgotPassword(forgotPasswordDto: ForgotPasswordDto) {
     const email = forgotPasswordDto.email.trim().toLowerCase();
-    const facilitator = await this.facilitatorModel.findOne({ email });
+    const escapedEmail = email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const facilitator =
+      (await this.facilitatorModel.findOne({ email })) ||
+      (await this.facilitatorModel.findOne({ email: { $regex: `^${escapedEmail}$`, $options: 'i' } }));
 
     if (!facilitator) {
-      throw new BadRequestException({
-        status: 'errors',
-        errors: {
-          email: ["Account doesn't exist. Please contact your administrator."],
-        },
-      });
+      // Keep response generic to avoid false negatives caused by email casing/data inconsistencies.
+      return {
+        status: 'success',
+        message: 'If an account exists, password reset details will be sent to your email.',
+      };
     }
 
     if (String(facilitator.status || '') !== '1') {
