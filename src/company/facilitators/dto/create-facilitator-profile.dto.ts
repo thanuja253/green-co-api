@@ -37,9 +37,19 @@ export class CreateFacilitatorProfileDto {
   @IsString()
   industry_category?: string;
 
+  /** Some clients send PascalCase; whitelisted for ValidationPipe. */
+  @IsOptional()
+  @IsString()
+  Industry_category?: string;
+
   @IsOptional()
   @IsString()
   organization?: string;
+
+  /** Some clients send PascalCase; whitelisted for ValidationPipe. */
+  @IsOptional()
+  @IsString()
+  Organization?: string;
 
   @IsOptional()
   @IsString()

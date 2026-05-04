@@ -458,13 +458,20 @@ export class FacilitatorsService {
     const filePath = (f?: Express.Multer.File[]) => (f?.[0] ? `uploads/facilitators/${f[0].filename}` : '');
     const briefProfileIndividualPath = filePath(files?.brief_profile_individual) || filePath(files?.biodata);
     const bankInfo = await this.deriveBankDetails(dto.ifsc_code, dto.bank_name, dto.branch_name);
+    const orgIndustry = String(
+      dto.organization ||
+      dto.Organization ||
+      dto.industry_category ||
+      dto.Industry_category ||
+      '',
+    ).trim();
     const row = await this.facilitatorModel.create({
       name: resolvedName,
       email: normalizedEmail,
       mobile: (dto.mobile || '').trim(),
       consultant_id: String(dto.consultant_id || '').trim() || await this.getNextConsultantId(),
-      industry_category: dto.organization || dto.industry_category || '',
-      organization: dto.organization || dto.industry_category || '',
+      industry_category: orgIndustry,
+      organization: orgIndustry,
       alternate_mobile: dto.alternate_mobile || '',
       address_line_1: dto.address_line_1 || '',
       address_line_2: dto.address_line_2 || '',
@@ -579,11 +586,11 @@ export class FacilitatorsService {
     row.email = (dto.email || row.email || '').trim().toLowerCase();
     row.mobile = (dto.mobile || row.mobile || '').trim();
     row.consultant_id = (dto.consultant_id || row.consultant_id || '').trim();
+    const fromDtoOrg = [dto.organization, dto.Organization, dto.industry_category, dto.Industry_category]
+      .map((v) => (v == null ? '' : String(v).trim()))
+      .find((s) => s.length > 0);
     const nextOrganization =
-      dto.organization ??
-      dto.industry_category ??
-      row.industry_category ??
-      (row as any).organization;
+      fromDtoOrg || String(row.industry_category || (row as any).organization || '').trim() || '';
     row.industry_category = nextOrganization;
     (row as any).organization = nextOrganization;
     row.alternate_mobile = dto.alternate_mobile ?? row.alternate_mobile;

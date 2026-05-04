@@ -26,6 +26,10 @@ export class Facilitator {
   @Prop()
   industry_category?: string;
 
+  /** Same value as industry_category when sent as organization (admin/UI). */
+  @Prop()
+  organization?: string;
+
   @Prop()
   alternate_mobile?: string;
 
