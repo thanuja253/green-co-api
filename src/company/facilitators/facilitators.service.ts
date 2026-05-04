@@ -62,22 +62,30 @@ export class FacilitatorsService {
   }
 
   private mapFacilitatorResponse(a: any) {
+    const organizationValue = String(a.industry_category || a.organization || '').trim();
     const rawStoredStatus = String(a.approval_status || '').trim().toLowerCase();
     const storedApprovalStatus =
-      rawStoredStatus === 'rejected'
-        ? 'Rejected'
-        : rawStoredStatus === 'pending'
-          ? 'Pending'
-          : 'Approved';
-    const derivedApprovalStatus = storedApprovalStatus;
-    const derivedProfileStatus = storedApprovalStatus === 'Approved' ? 'Complete' : 'Incomplete';
+      rawStoredStatus === 'approved'
+        ? 'Approved'
+        : rawStoredStatus === 'rejected'
+          ? 'Rejected'
+          : 'Pending';
     const mappedDocApprovals = this.buildDocumentApprovalsMap(a);
-    for (const key of Object.keys(mappedDocApprovals)) {
-      mappedDocApprovals[key] = {
-        status: storedApprovalStatus,
-        remarks: storedApprovalStatus === 'Rejected' ? String(a.approval_remarks || '').trim() : '',
-      };
-    }
+    const derivedDocumentStatus = (() => {
+      const values = Object.values(mappedDocApprovals || {});
+      if (!values.length) return storedApprovalStatus;
+      if (values.some((v: any) => String(v?.status || '').toLowerCase() === 'rejected')) {
+        return 'Rejected';
+      }
+      if (values.some((v: any) => String(v?.status || '').toLowerCase() === 'pending')) {
+        return 'Pending';
+      }
+      return 'Approved';
+    })();
+    const derivedApprovalStatus = storedApprovalStatus;
+    const storedProfileStatus = String(a.profile_status || '').trim();
+    const derivedProfileStatus =
+      storedProfileStatus || (storedApprovalStatus === 'Approved' ? 'Complete' : 'Incomplete');
 
     return {
       id: a._id?.toString?.() || a._id,
@@ -89,8 +97,8 @@ export class FacilitatorsService {
       mobile: a.mobile || '',
       status: a.status ?? '1',
       account_status: a.status ?? '1',
-      industry_category: a.industry_category || '',
-      organization: a.industry_category || '',
+      industry_category: organizationValue,
+      organization: organizationValue,
       alternate_mobile: a.alternate_mobile || '',
       address_line_1: a.address_line_1 || '',
       address_line_2: a.address_line_2 || '',
@@ -135,7 +143,7 @@ export class FacilitatorsService {
       // Explicit facilitator-level status (independent key for UI use).
       overall_approval_status: storedApprovalStatus,
       // Explicit document-level aggregated status.
-      documents_approval_status: derivedApprovalStatus,
+      documents_approval_status: derivedDocumentStatus,
       approval_remarks: a.approval_remarks || '',
       profile_status: derivedProfileStatus,
       document_approvals: mappedDocApprovals,
@@ -276,7 +284,6 @@ export class FacilitatorsService {
       mobile: mobile.trim(),
       consultant_id: await this.getNextConsultantId(),
       status: '1',
-      approval_status: 'Pending',
       profile_status: 'Incomplete',
       password: passwordHash,
     });
@@ -457,6 +464,7 @@ export class FacilitatorsService {
       mobile: (dto.mobile || '').trim(),
       consultant_id: String(dto.consultant_id || '').trim() || await this.getNextConsultantId(),
       industry_category: dto.organization || dto.industry_category || '',
+      organization: dto.organization || dto.industry_category || '',
       alternate_mobile: dto.alternate_mobile || '',
       address_line_1: dto.address_line_1 || '',
       address_line_2: dto.address_line_2 || '',
@@ -499,38 +507,38 @@ export class FacilitatorsService {
       cancelled_cheque: filePath(files?.cancelled_cheque),
       profile_image: filePath(files?.profile_image),
       status: (dto.status || '1').toString(),
-      approval_status: 'Approved',
+      approval_status: 'Pending',
       approval_remarks: '',
       profile_status: 'Complete',
       document_approvals: {
-        ...(filePath(files?.profile_image) ? { profile_image: { status: 'Approved', remarks: '' } } : {}),
+        ...(filePath(files?.profile_image) ? { profile_image: { status: 'Pending', remarks: '' } } : {}),
         ...(briefProfileIndividualPath
           ? {
-              biodata: { status: 'Approved', remarks: '' },
-              brief_profile_individual: { status: 'Approved', remarks: '' },
+              biodata: { status: 'Pending', remarks: '' },
+              brief_profile_individual: { status: 'Pending', remarks: '' },
             }
           : {}),
         ...(filePath(files?.brief_profile_organization)
-          ? { brief_profile_organization: { status: 'Approved', remarks: '' } }
+          ? { brief_profile_organization: { status: 'Pending', remarks: '' } }
           : {}),
         ...(filePath(files?.projects_handled)
-          ? { projects_handled: { status: 'Approved', remarks: '' } }
+          ? { projects_handled: { status: 'Pending', remarks: '' } }
           : {}),
         ...(filePath(files?.vendor_registration_form)
-          ? { vendor_registration_form: { status: 'Approved', remarks: '' } }
+          ? { vendor_registration_form: { status: 'Pending', remarks: '' } }
           : {}),
         ...(filePath(files?.non_disclosure_agreement)
-          ? { non_disclosure_agreement: { status: 'Approved', remarks: '' } }
+          ? { non_disclosure_agreement: { status: 'Pending', remarks: '' } }
           : {}),
         ...(filePath(files?.health_declaration)
-          ? { health_declaration: { status: 'Approved', remarks: '' } }
+          ? { health_declaration: { status: 'Pending', remarks: '' } }
           : {}),
         ...(filePath(files?.gst_declaration)
-          ? { gst_declaration: { status: 'Approved', remarks: '' } }
+          ? { gst_declaration: { status: 'Pending', remarks: '' } }
           : {}),
-        ...(filePath(files?.pan_card) ? { pan_card: { status: 'Approved', remarks: '' } } : {}),
+        ...(filePath(files?.pan_card) ? { pan_card: { status: 'Pending', remarks: '' } } : {}),
         ...(filePath(files?.cancelled_cheque)
-          ? { cancelled_cheque: { status: 'Approved', remarks: '' } }
+          ? { cancelled_cheque: { status: 'Pending', remarks: '' } }
           : {}),
       },
     });
@@ -571,7 +579,13 @@ export class FacilitatorsService {
     row.email = (dto.email || row.email || '').trim().toLowerCase();
     row.mobile = (dto.mobile || row.mobile || '').trim();
     row.consultant_id = (dto.consultant_id || row.consultant_id || '').trim();
-    row.industry_category = dto.organization ?? dto.industry_category ?? row.industry_category;
+    const nextOrganization =
+      dto.organization ??
+      dto.industry_category ??
+      row.industry_category ??
+      (row as any).organization;
+    row.industry_category = nextOrganization;
+    (row as any).organization = nextOrganization;
     row.alternate_mobile = dto.alternate_mobile ?? row.alternate_mobile;
     row.address_line_1 = dto.address_line_1 ?? row.address_line_1;
     row.address_line_2 = dto.address_line_2 ?? row.address_line_2;
@@ -609,7 +623,7 @@ export class FacilitatorsService {
       dto.company_website_details ?? dto.company_website ?? (row as any).company_website;
     (row as any).linkedin_profile = dto.linkedin_profile ?? (row as any).linkedin_profile;
     row.status = (dto.status || row.status || '1').toString();
-    row.approval_status = 'Approved';
+    row.approval_status = 'Pending';
     row.approval_remarks = '';
     row.profile_image = filePath(files?.profile_image) ?? row.profile_image;
     const briefProfileIndividualPath = filePath(files?.brief_profile_individual) ?? filePath(files?.biodata);
@@ -636,23 +650,23 @@ export class FacilitatorsService {
         remarks: String(e?.remarks ?? '').trim(),
       };
     }
-    if (files?.profile_image?.[0]) docApprovals.profile_image = { status: 'Approved', remarks: '' };
+    if (files?.profile_image?.[0]) docApprovals.profile_image = { status: 'Pending', remarks: '' };
     if (files?.biodata?.[0] || files?.brief_profile_individual?.[0]) {
-      docApprovals.biodata = { status: 'Approved', remarks: '' };
-      docApprovals.brief_profile_individual = { status: 'Approved', remarks: '' };
+      docApprovals.biodata = { status: 'Pending', remarks: '' };
+      docApprovals.brief_profile_individual = { status: 'Pending', remarks: '' };
     }
     if (files?.brief_profile_organization?.[0]) {
-      docApprovals.brief_profile_organization = { status: 'Approved', remarks: '' };
+      docApprovals.brief_profile_organization = { status: 'Pending', remarks: '' };
     }
     if (files?.projects_handled?.[0]) {
-      docApprovals.projects_handled = { status: 'Approved', remarks: '' };
+      docApprovals.projects_handled = { status: 'Pending', remarks: '' };
     }
-    if (files?.vendor_registration_form?.[0]) docApprovals.vendor_registration_form = { status: 'Approved', remarks: '' };
-    if (files?.non_disclosure_agreement?.[0]) docApprovals.non_disclosure_agreement = { status: 'Approved', remarks: '' };
-    if (files?.health_declaration?.[0]) docApprovals.health_declaration = { status: 'Approved', remarks: '' };
-    if (files?.gst_declaration?.[0]) docApprovals.gst_declaration = { status: 'Approved', remarks: '' };
-    if (files?.pan_card?.[0]) docApprovals.pan_card = { status: 'Approved', remarks: '' };
-    if (files?.cancelled_cheque?.[0]) docApprovals.cancelled_cheque = { status: 'Approved', remarks: '' };
+    if (files?.vendor_registration_form?.[0]) docApprovals.vendor_registration_form = { status: 'Pending', remarks: '' };
+    if (files?.non_disclosure_agreement?.[0]) docApprovals.non_disclosure_agreement = { status: 'Pending', remarks: '' };
+    if (files?.health_declaration?.[0]) docApprovals.health_declaration = { status: 'Pending', remarks: '' };
+    if (files?.gst_declaration?.[0]) docApprovals.gst_declaration = { status: 'Pending', remarks: '' };
+    if (files?.pan_card?.[0]) docApprovals.pan_card = { status: 'Pending', remarks: '' };
+    if (files?.cancelled_cheque?.[0]) docApprovals.cancelled_cheque = { status: 'Pending', remarks: '' };
     (row as any).document_approvals = docApprovals;
     row.profile_status = 'Complete';
     await row.save();
@@ -712,12 +726,8 @@ export class FacilitatorsService {
           remarks: approvalStatus === 'Rejected' ? remarksTrim : '',
         };
       }
-      // Rejection requires facilitator to upload fresh files again.
-      if (approvalStatus === 'Rejected') {
-        for (const key of FACILITATOR_PROFILE_DOCUMENT_KEYS) {
-          this.clearFacilitatorDocumentPath(row as any, key);
-        }
-      }
+      // Keep previously uploaded files on rejection so facilitator/admin can still view
+      // rejected documents and profile image, then re-upload only the needed files.
       (row as any).document_approvals = docApprovals;
     }
     if (approvalStatus === 'Approved') {

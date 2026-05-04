@@ -86,12 +86,36 @@ export class FacilitatorProfileService {
   async getMyProfile(facilitatorId: string): Promise<any> {
     const row = await this.facilitatorModel.findById(facilitatorId).lean();
     if (!row) throw new NotFoundException({ status: 'error', message: 'Facilitator not found' });
+    const docApprovals = ((row as any).document_approvals || {}) as Record<
+      string,
+      { status?: string; remarks?: string }
+    >;
+    const hasDocumentReviews = Object.keys(docApprovals).length > 0;
+    const rawApproval = String((row as any).approval_status || '').trim();
+    const normalizedApproval = rawApproval.toLowerCase();
+    const isDraftProfile =
+      !hasDocumentReviews &&
+      (String((row as any).profile_status || '').trim().toLowerCase() !== 'complete');
+    const uiApprovalStatus = isDraftProfile
+      ? 'Draft'
+      : normalizedApproval === 'approved'
+        ? 'Approved'
+        : normalizedApproval === 'rejected'
+          ? 'Rejected'
+          : normalizedApproval === 'pending'
+            ? 'Pending'
+            : 'Draft';
     return {
       status: 'success',
       message: 'Profile fetched successfully',
       data: {
         ...(row as any),
         id: String((row as any)._id),
+        industry_category: String((row as any).industry_category || (row as any).organization || ''),
+        organization: String((row as any).industry_category || (row as any).organization || ''),
+        approval_status: uiApprovalStatus,
+        overall_approval_status: uiApprovalStatus,
+        can_edit_profile: uiApprovalStatus !== 'Approved',
       },
     };
   }
@@ -113,7 +137,13 @@ export class FacilitatorProfileService {
     facilitator.email = String(body?.email ?? facilitator.email ?? '').trim().toLowerCase();
     facilitator.mobile = String(body?.mobile ?? facilitator.mobile ?? '').trim();
 
-    facilitator.industry_category = body?.organization ?? body?.industry_category ?? facilitator.industry_category;
+    const nextOrganization =
+      body?.organization ??
+      body?.industry_category ??
+      facilitator.industry_category ??
+      (facilitator as any).organization;
+    facilitator.industry_category = nextOrganization;
+    (facilitator as any).organization = nextOrganization;
     facilitator.alternate_mobile = body?.alternate_mobile ?? facilitator.alternate_mobile;
     facilitator.address_line_1 = body?.address_line_1 ?? facilitator.address_line_1;
     facilitator.address_line_2 = body?.address_line_2 ?? facilitator.address_line_2;
@@ -171,19 +201,18 @@ export class FacilitatorProfileService {
     }
     for (const key of FACILITATOR_PROFILE_DOCUMENT_KEYS) {
       if (files?.[key]?.[0]) {
-        docApprovals[key] = { status: 'Approved', remarks: '' };
+        docApprovals[key] = { status: 'Pending', remarks: '' };
       }
     }
     // Alias handling: re-uploading biodata should also reset brief_profile_individual.
     if (files?.biodata?.[0]) {
-      docApprovals.brief_profile_individual = { status: 'Approved', remarks: '' };
-    }
-    for (const key of Object.keys(docApprovals)) {
-      docApprovals[key] = { status: 'Approved', remarks: '' };
+      docApprovals.brief_profile_individual = { status: 'Pending', remarks: '' };
     }
     (facilitator as any).document_approvals = docApprovals;
 
-    facilitator.approval_status = 'Approved';
+    // Facilitator self-submit must always go for admin re-review.
+    // This prevents any stale "Approved" status from remaining after facilitator updates.
+    facilitator.approval_status = 'Pending';
     facilitator.approval_remarks = '';
     facilitator.profile_status = 'Complete';
 
