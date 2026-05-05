@@ -15,6 +15,8 @@ import { ChangePasswordDto } from '../company-auth/dto/change-password.dto';
 import { ForgotPasswordDto } from '../company-auth/dto/forgot-password.dto';
 import { AssessorAccountStatusGuard } from './guards/assessor-account-status.guard';
 import { AssessorJwtAuthGuard } from './guards/assessor-jwt-auth.guard';
+import { OptionalAssessorAccountStatusGuard } from './guards/optional-assessor-account-status.guard';
+import { OptionalAssessorJwtAuthGuard } from './guards/optional-assessor-jwt-auth.guard';
 import { AssessorAuthService } from './assessor-auth.service';
 import { AssessorLoginDto } from './dto/assessor-login.dto';
 import { AssessorProjectsQueryDto } from './dto/assessor-projects-query.dto';
@@ -38,17 +40,28 @@ export class AssessorAuthController {
   @Get('myprojects')
   @Get('companylist')
   @Get('company_data')
-  @UseGuards(AssessorJwtAuthGuard, AssessorAccountStatusGuard)
-  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
-  async myProjects(
-    @Request() req: { user: { assessorId: string }; query?: Record<string, unknown> },
-    @Query() query: AssessorProjectsQueryDto,
-  ) {
-    return this.assessorAuthService.listAssignedProjects(
-      req.user.assessorId,
-      query,
-      req.query || {},
-    );
+  @UseGuards(OptionalAssessorJwtAuthGuard, OptionalAssessorAccountStatusGuard)
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
+  async myProjects(@Request() req: any, @Query() query: AssessorProjectsQueryDto) {
+    const rawQ = (req?.query || {}) as Record<string, string | string[] | undefined>;
+    const pick = (k: string) => {
+      const v = rawQ[k];
+      if (typeof v === 'string' && v.trim()) return v.trim();
+      if (Array.isArray(v) && typeof v[0] === 'string' && v[0].trim()) return v[0].trim();
+      return '';
+    };
+    const assessorId =
+      String(req?.user?.assessorId || '').trim() ||
+      pick('assessor_id') ||
+      pick('assessorId') ||
+      pick('id');
+    if (!assessorId) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'assessor_id is required (query: assessor_id, assessorId, or id)',
+      });
+    }
+    return this.assessorAuthService.listAssignedProjects(assessorId, query, rawQ as Record<string, unknown>);
   }
 
   @Post('change-password')

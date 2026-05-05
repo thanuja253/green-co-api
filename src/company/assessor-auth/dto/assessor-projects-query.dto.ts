@@ -1,6 +1,19 @@
 import { IsOptional, IsString } from 'class-validator';
 
 export class AssessorProjectsQueryDto {
+  /** When myprojects is called without JWT, pass Mongo assessor id. */
+  @IsOptional()
+  @IsString()
+  assessor_id?: string;
+
+  @IsOptional()
+  @IsString()
+  assessorId?: string;
+
+  @IsOptional()
+  @IsString()
+  id?: string;
+
   @IsOptional()
   @IsString()
   page?: string;

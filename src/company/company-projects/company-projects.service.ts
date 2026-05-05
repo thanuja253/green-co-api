@@ -103,6 +103,47 @@ function normalizeScoreBandRows(rows: any[]): number[][] {
   });
 }
 
+function deriveScoreBandRowsFromAssessmentScoring(
+  scoringStore: unknown,
+): { criteria_projectscore: number[][]; high_projectscore: number[][]; max_score: number[][] } | null {
+  const byCriteria = (scoringStore as any)?.by_criteria;
+  if (!byCriteria || typeof byCriteria !== 'object') return null;
+  const criteriaRows = Object.values(byCriteria).filter((r) => !!r) as Array<Record<string, any>>;
+  if (!criteriaRows.length) return null;
+
+  const BANDS = 20;
+  const MAX_ROWS = 9;
+  const asNum = (v: unknown): number => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  };
+  const toBands = (score: number, max: number): number => {
+    if (!(max > 0)) return 0;
+    return Math.max(0, Math.min(BANDS, Math.round((score / max) * BANDS)));
+  };
+  const makeRow = (filledBands: number): number[] => {
+    const row = Array(BANDS).fill(0);
+    for (let i = 0; i < Math.min(BANDS, Math.max(0, filledBands)); i++) row[i] = 1;
+    return row;
+  };
+
+  const criteria_projectscore: number[][] = [];
+  const high_projectscore: number[][] = [];
+  const max_score: number[][] = [];
+
+  for (const c of criteriaRows.slice(0, MAX_ROWS)) {
+    const max = asNum(c?.total_max_score);
+    const pre = asNum(c?.total_pre_assessment_score);
+    const final = asNum(c?.total_final_score);
+    criteria_projectscore.push(makeRow(toBands(final, max)));
+    high_projectscore.push(makeRow(toBands(pre, max)));
+    max_score.push(makeRow(max > 0 ? BANDS : 0));
+  }
+
+  if (!criteria_projectscore.length && !high_projectscore.length && !max_score.length) return null;
+  return { criteria_projectscore, high_projectscore, max_score };
+}
+
 /** Remove BSON file blobs from registration_info before JSON responses. */
 function omitRegistrationFileBinaries(reg: Record<string, any> | undefined): Record<string, any> {
   if (!reg || typeof reg !== 'object') return {};
@@ -2214,9 +2255,23 @@ export class CompanyProjectsService {
     const certification_level = getCertificationType(percentage_score);
 
     // Normalize to 9×20 so frontend Score Band grid always gets number[][] (see VIEW_CERTIFICATE_BACKEND_REQUIREMENTS)
-    const criteria_projectscore = normalizeScoreBandRows(project.criteria_projectscore || []);
-    const high_projectscore = normalizeScoreBandRows(project.high_projectscore || []);
-    const max_score = normalizeScoreBandRows(project.max_score || []);
+    let criteria_projectscore = normalizeScoreBandRows(project.criteria_projectscore || []);
+    let high_projectscore = normalizeScoreBandRows(project.high_projectscore || []);
+    let max_score = normalizeScoreBandRows(project.max_score || []);
+
+    // Backward-compatible fallback:
+    // some flows persist assessment scoring under registration_info.assessment_scoring
+    // but do not materialize legacy matrix fields on project root.
+    if (!criteria_projectscore.length && !high_projectscore.length && !max_score.length) {
+      const derived = deriveScoreBandRowsFromAssessmentScoring(
+        (project as any)?.registration_info?.assessment_scoring,
+      );
+      if (derived) {
+        criteria_projectscore = derived.criteria_projectscore;
+        high_projectscore = derived.high_projectscore;
+        max_score = derived.max_score;
+      }
+    }
 
     return {
       status: 'success',
@@ -2513,6 +2568,26 @@ export class CompanyProjectsService {
       _id: projectId,
       company_id: companyId,
     });
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    project.score_band_status = score_band_status;
+    await project.save();
+    return {
+      status: 'success',
+      message: 'Score band visibility updated',
+      data: { score_band_status: project.score_band_status },
+    };
+  }
+
+  /**
+   * Admin compatibility: update score band visibility by project id only.
+   */
+  async updateScoreBandStatusByProjectId(
+    projectId: string,
+    score_band_status: 0 | 1,
+  ): Promise<{ status: string; message: string; data?: any }> {
+    const project = await this.projectModel.findById(projectId);
     if (!project) {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
@@ -7708,7 +7783,7 @@ export class CompanyProjectsService {
       }
     }
 
-    const relativePath = `uploads/company/${companyId}/finance-v2/${file.filename}`;
+    const relativePath = `uploads/company/${projectId}/finance-v2/${file.filename}`;
     const reminderDate =
       Number(dto.send_reminder) === 1
         ? new Date(Date.now() + FINANCE_V2_REMINDER_INTERVAL_DAYS * 24 * 60 * 60 * 1000)
@@ -7887,7 +7962,7 @@ export class CompanyProjectsService {
     }
 
     if (file) {
-      const relativePath = `uploads/company/${companyId}/finance-v2/${file.filename}`;
+      const relativePath = `uploads/company/${projectId}/finance-v2/${file.filename}`;
       const hist = Array.isArray((existing as any).invoice_document_history)
         ? [...(existing as any).invoice_document_history]
         : [];
@@ -8164,7 +8239,9 @@ export class CompanyProjectsService {
       });
     }
 
-    const relativePath = file ? `uploads/company/${companyId}/finance-v2-payments/${file.filename}` : undefined;
+    const relativePath = file
+      ? `uploads/company/${projectId}/finance-v2-payments/${file.filename}`
+      : undefined;
     (invoice as any).payment_type = normalizedPaymentType;
     (invoice as any).trans_id = normalizedPaymentType === 'Offline' ? normalizedTransId : undefined;
     if (relativePath) {
@@ -11201,13 +11278,18 @@ export class CompanyProjectsService {
    * Get Primary Data Form (company): master checklist + saved data grouped by info_type.
    * Sections and info_type keys are derived dynamically from master_primary_data_checklist.
    */
-  async getPrimaryData(companyId: string, projectId: string) {
-    const project = await this.projectModel.findOne({ _id: projectId, company_id: companyId }).lean();
+  async getPrimaryData(companyId: string | undefined, projectId: string) {
+    const projectQuery: Record<string, any> = { _id: projectId };
+    if (companyId) {
+      projectQuery.company_id = companyId;
+    }
+    const project = await this.projectModel.findOne(projectQuery).lean();
     if (!project) {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
 
-    const cId = new Types.ObjectId(companyId);
+    const resolvedCompanyId = String((project as any).company_id);
+    const cId = new Types.ObjectId(resolvedCompanyId);
     const pId = new Types.ObjectId(projectId);
     const [masterList, savedRows, sections] = await Promise.all([
       this.masterPrimaryDataChecklistModel.find({ is_active: 1 }).sort({ checklist_order: 1 }).lean(),

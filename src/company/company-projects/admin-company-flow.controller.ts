@@ -41,6 +41,7 @@ import { UpdateCoordinatorDto } from './dto/update-coordinator.dto';
 import { UpsertPlaqueDetailsDto } from './dto/upsert-plaque-details.dto';
 import { UpsertOutstandingDetailsDto } from './dto/upsert-outstanding-details.dto';
 import { OutstandingDuePaymentDto } from './dto/outstanding-due-payment.dto';
+import { ScoreBandStatusDto } from './dto/score-band-status.dto';
 import {
   REGISTRATION_INFO_FILE_FIELDS,
   createRegistrationInfoValidationPipe,
@@ -1220,14 +1221,38 @@ export class AdminCompanyFlowController {
   }
 
   /**
+   * Legacy admin certificate tab toggle compatibility:
+   * PATCH /api/admin/projects/:projectId/certificate
+   * Body: { score_band_status: 0 | 1 }
+   */
+  @Patch('api/admin/projects/:projectId/certificate')
+  @Patch('admin/projects/:projectId/certificate')
+  @Patch('api/admin/upload_certificate/:projectId')
+  @Patch('admin/upload_certificate/:projectId')
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  async updateCertificateTabStatusForAdmin(
+    @Param('projectId') projectId: string,
+    @Body() dto: ScoreBandStatusDto,
+  ): Promise<any> {
+    return this.companyProjectsService.updateScoreBandStatusByProjectId(
+      projectId,
+      dto.score_band_status,
+    );
+  }
+
+  /**
    * Legacy admin certificate upload compatibility endpoint.
    * POST /api/admin/certificate_upload/:projectId
    * multipart field: certificate_upload (PDF)
    */
+  @Post('api/admin/upload_certificate/:projectId')
+  @Post('admin/upload_certificate/:projectId')
+  @Post('api/admin/projects/:projectId/certificate')
+  @Post('admin/projects/:projectId/certificate')
   @Post('api/admin/certificate_upload/:projectId')
   @Post('admin/certificate_upload/:projectId')
   @UseInterceptors(
-    FileInterceptor('certificate_upload', {
+    AnyFilesInterceptor({
       storage: diskStorage({
         destination: (req, _file, cb) => {
           const projectId = req.params.projectId;
@@ -1251,9 +1276,27 @@ export class AdminCompanyFlowController {
   )
   async uploadCertificateLegacy(
     @Param('projectId') projectId: string,
-    @UploadedFile() certificateUpload?: Express.Multer.File,
+    @Body() body?: Record<string, unknown>,
+    @UploadedFiles() files?: Express.Multer.File[],
   ): Promise<any> {
+    const certificateUpload = Array.isArray(files) ? files[0] : undefined;
     if (!certificateUpload) {
+      const rawToggle =
+        body?.score_band_status ??
+        body?.show_score_band ??
+        body?.showScoreBand ??
+        body?.visible;
+      const normalizedToggle = (() => {
+        if (rawToggle === 1 || rawToggle === '1' || rawToggle === true || rawToggle === 'true') return 1;
+        if (rawToggle === 0 || rawToggle === '0' || rawToggle === false || rawToggle === 'false') return 0;
+        return null;
+      })();
+      if (normalizedToggle !== null) {
+        return this.companyProjectsService.updateScoreBandStatusByProjectId(
+          projectId,
+          normalizedToggle,
+        );
+      }
       throw new BadRequestException({ status: 'error', message: 'No file uploaded' });
     }
     return this.companyProjectsService.uploadCertificateDocumentByProjectId(

@@ -12,6 +12,7 @@ import {
 import { Company, CompanySchema } from '../schemas/company.schema';
 import { CompanyProject, CompanyProjectSchema } from '../schemas/company-project.schema';
 import { AssessorAccountStatusGuard } from './guards/assessor-account-status.guard';
+import { OptionalAssessorAccountStatusGuard } from './guards/optional-assessor-account-status.guard';
 import { AssessorJwtStrategy } from './strategies/assessor-jwt.strategy';
 import { AssessorAuthController } from './assessor-auth.controller';
 import { AssessorAuthService } from './assessor-auth.service';
@@ -45,6 +46,7 @@ import { AssessorProfileService } from './assessor-profile.service';
     AssessorProfileService,
     AssessorJwtStrategy,
     AssessorAccountStatusGuard,
+    OptionalAssessorAccountStatusGuard,
   ],
   exports: [AssessorAuthService],
 })

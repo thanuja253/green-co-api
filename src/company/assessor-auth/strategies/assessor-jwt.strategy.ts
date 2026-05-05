@@ -5,6 +5,7 @@ import { ExtractJwt, Strategy } from 'passport-jwt';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { Assessor, AssessorDocument } from '../../schemas/assessor.schema';
+import { ASSESSOR_JWT_TOKEN_EXTRACTORS } from '../assessor-jwt-token.extractor';
 
 @Injectable()
 export class AssessorJwtStrategy extends PassportStrategy(Strategy, 'assessor-jwt') {
@@ -13,10 +14,7 @@ export class AssessorJwtStrategy extends PassportStrategy(Strategy, 'assessor-jw
     private configService: ConfigService,
   ) {
     super({
-      jwtFromRequest: ExtractJwt.fromExtractors([
-        ExtractJwt.fromAuthHeaderAsBearerToken(),
-        (req) => (req?.query?.token as string) || null,
-      ]),
+      jwtFromRequest: ExtractJwt.fromExtractors(ASSESSOR_JWT_TOKEN_EXTRACTORS),
       ignoreExpiration: false,
       secretOrKey: configService.get<string>('JWT_SECRET') || 'your-secret-key',
     });

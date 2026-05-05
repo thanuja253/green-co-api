@@ -34,6 +34,57 @@ async function bootstrap() {
   if (!fs.existsSync(uploadsRoot)) {
     fs.mkdirSync(uploadsRoot, { recursive: true });
   }
+
+  const findUniqueFinanceFileDir = (subdir: 'finance-v2-payments' | 'finance-v2', filename: string): string | null => {
+    const companyRoot = join(uploadsRoot, 'company');
+    if (!fs.existsSync(companyRoot)) return null;
+    const hits: string[] = [];
+    for (const ent of fs.readdirSync(companyRoot, { withFileTypes: true })) {
+      if (!ent.isDirectory()) continue;
+      const abs = join(companyRoot, ent.name, subdir, filename);
+      if (fs.existsSync(abs)) hits.push(ent.name);
+    }
+    return hits.length === 1 ? hits[0] : null;
+  };
+
+  // Legacy URLs used uploads/companyproject/{projectId}/… — files live under uploads/company/{projectId}/… (multer).
+  app.use((req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+    const raw = req.url || '';
+    const [pathOnly] = raw.split('?');
+    const m = pathOnly.match(
+      /^\/uploads\/companyproject\/([^/]+)\/(finance-v2-payments|finance-v2)\/([^/]+)$/,
+    );
+    if (!m) return next();
+    const [, id, subdir, filename] = m;
+    const wrong = join(uploadsRoot, 'companyproject', id, subdir, decodeURIComponent(filename));
+    const canonical = join(uploadsRoot, 'company', id, subdir, decodeURIComponent(filename));
+    if (!fs.existsSync(wrong) && fs.existsSync(canonical)) {
+      return res.redirect(302, `/uploads/company/${id}/${subdir}/${decodeURIComponent(filename)}`);
+    }
+    return next();
+  });
+
+  // DB used company_id in paths while multer wrote under project _id; find the real folder by filename.
+  app.use((req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+    const raw = req.url || '';
+    const [pathOnly] = raw.split('?');
+    const m = pathOnly.match(
+      /^\/uploads\/company\/([^/]+)\/(finance-v2-payments|finance-v2)\/([^/]+)$/,
+    );
+    if (!m) return next();
+    const [, segment, subdir, encName] = m;
+    const filename = decodeURIComponent(encName);
+    const requested = join(uploadsRoot, 'company', segment, subdir as 'finance-v2-payments' | 'finance-v2', filename);
+    if (fs.existsSync(requested)) return next();
+    const found = findUniqueFinanceFileDir(subdir as 'finance-v2-payments' | 'finance-v2', filename);
+    if (found && found !== segment) {
+      return res.redirect(302, `/uploads/company/${found}/${subdir}/${encodeURIComponent(filename)}`);
+    }
+    return next();
+  });
+
   app.use('/uploads', express.static(uploadsRoot));
 
   // Manually add JSON and URL-encoded body parsers, but skip multipart/form-data

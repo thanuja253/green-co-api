@@ -83,9 +83,8 @@ export class FacilitatorsService {
       return 'Approved';
     })();
     const derivedApprovalStatus = storedApprovalStatus;
-    const storedProfileStatus = String(a.profile_status || '').trim();
-    const derivedProfileStatus =
-      storedProfileStatus || (storedApprovalStatus === 'Approved' ? 'Complete' : 'Incomplete');
+    // Profile column = "form + uploads" ready when all uploaded docs are approved; overall approval is separate.
+    const derivedProfileStatus = derivedDocumentStatus === 'Approved' ? 'Complete' : 'Incomplete';
 
     return {
       id: a._id?.toString?.() || a._id,
@@ -184,10 +183,15 @@ export class FacilitatorsService {
   private buildDocumentApprovalsMap(source: any): Record<string, { status: string; remarks: string }> {
     const stored = (source?.document_approvals || {}) as Record<string, { status?: string; remarks?: string }>;
     const result: Record<string, { status: string; remarks: string }> = {};
+    /** Same file path; DB may only store one of biodata / brief_profile_individual. */
+    const briefOrBioStored = stored.brief_profile_individual || stored.biodata || {};
     for (const key of FACILITATOR_PROFILE_DOCUMENT_KEYS) {
       const pathVal = this.getFacilitatorDocumentPath(source, key);
       if (!pathVal) continue;
-      const existing = stored[key] || {};
+      const existing =
+        key === 'biodata' || key === 'brief_profile_individual'
+          ? stored[key] || briefOrBioStored
+          : stored[key] || {};
       result[key] = {
         status: String(existing.status || 'Pending'),
         remarks: String(existing.remarks ?? '').trim(),
@@ -516,36 +520,36 @@ export class FacilitatorsService {
       status: (dto.status || '1').toString(),
       approval_status: 'Pending',
       approval_remarks: '',
-      profile_status: 'Complete',
+      profile_status: 'Incomplete',
       document_approvals: {
-        ...(filePath(files?.profile_image) ? { profile_image: { status: 'Pending', remarks: '' } } : {}),
+        ...(filePath(files?.profile_image) ? { profile_image: { status: 'Approved', remarks: '' } } : {}),
         ...(briefProfileIndividualPath
           ? {
-              biodata: { status: 'Pending', remarks: '' },
-              brief_profile_individual: { status: 'Pending', remarks: '' },
+              biodata: { status: 'Approved', remarks: '' },
+              brief_profile_individual: { status: 'Approved', remarks: '' },
             }
           : {}),
         ...(filePath(files?.brief_profile_organization)
-          ? { brief_profile_organization: { status: 'Pending', remarks: '' } }
+          ? { brief_profile_organization: { status: 'Approved', remarks: '' } }
           : {}),
         ...(filePath(files?.projects_handled)
-          ? { projects_handled: { status: 'Pending', remarks: '' } }
+          ? { projects_handled: { status: 'Approved', remarks: '' } }
           : {}),
         ...(filePath(files?.vendor_registration_form)
-          ? { vendor_registration_form: { status: 'Pending', remarks: '' } }
+          ? { vendor_registration_form: { status: 'Approved', remarks: '' } }
           : {}),
         ...(filePath(files?.non_disclosure_agreement)
-          ? { non_disclosure_agreement: { status: 'Pending', remarks: '' } }
+          ? { non_disclosure_agreement: { status: 'Approved', remarks: '' } }
           : {}),
         ...(filePath(files?.health_declaration)
-          ? { health_declaration: { status: 'Pending', remarks: '' } }
+          ? { health_declaration: { status: 'Approved', remarks: '' } }
           : {}),
         ...(filePath(files?.gst_declaration)
-          ? { gst_declaration: { status: 'Pending', remarks: '' } }
+          ? { gst_declaration: { status: 'Approved', remarks: '' } }
           : {}),
-        ...(filePath(files?.pan_card) ? { pan_card: { status: 'Pending', remarks: '' } } : {}),
+        ...(filePath(files?.pan_card) ? { pan_card: { status: 'Approved', remarks: '' } } : {}),
         ...(filePath(files?.cancelled_cheque)
-          ? { cancelled_cheque: { status: 'Pending', remarks: '' } }
+          ? { cancelled_cheque: { status: 'Approved', remarks: '' } }
           : {}),
       },
     });
@@ -657,25 +661,25 @@ export class FacilitatorsService {
         remarks: String(e?.remarks ?? '').trim(),
       };
     }
-    if (files?.profile_image?.[0]) docApprovals.profile_image = { status: 'Pending', remarks: '' };
+    if (files?.profile_image?.[0]) docApprovals.profile_image = { status: 'Approved', remarks: '' };
     if (files?.biodata?.[0] || files?.brief_profile_individual?.[0]) {
-      docApprovals.biodata = { status: 'Pending', remarks: '' };
-      docApprovals.brief_profile_individual = { status: 'Pending', remarks: '' };
+      docApprovals.biodata = { status: 'Approved', remarks: '' };
+      docApprovals.brief_profile_individual = { status: 'Approved', remarks: '' };
     }
     if (files?.brief_profile_organization?.[0]) {
-      docApprovals.brief_profile_organization = { status: 'Pending', remarks: '' };
+      docApprovals.brief_profile_organization = { status: 'Approved', remarks: '' };
     }
     if (files?.projects_handled?.[0]) {
-      docApprovals.projects_handled = { status: 'Pending', remarks: '' };
+      docApprovals.projects_handled = { status: 'Approved', remarks: '' };
     }
-    if (files?.vendor_registration_form?.[0]) docApprovals.vendor_registration_form = { status: 'Pending', remarks: '' };
-    if (files?.non_disclosure_agreement?.[0]) docApprovals.non_disclosure_agreement = { status: 'Pending', remarks: '' };
-    if (files?.health_declaration?.[0]) docApprovals.health_declaration = { status: 'Pending', remarks: '' };
-    if (files?.gst_declaration?.[0]) docApprovals.gst_declaration = { status: 'Pending', remarks: '' };
-    if (files?.pan_card?.[0]) docApprovals.pan_card = { status: 'Pending', remarks: '' };
-    if (files?.cancelled_cheque?.[0]) docApprovals.cancelled_cheque = { status: 'Pending', remarks: '' };
+    if (files?.vendor_registration_form?.[0]) docApprovals.vendor_registration_form = { status: 'Approved', remarks: '' };
+    if (files?.non_disclosure_agreement?.[0]) docApprovals.non_disclosure_agreement = { status: 'Approved', remarks: '' };
+    if (files?.health_declaration?.[0]) docApprovals.health_declaration = { status: 'Approved', remarks: '' };
+    if (files?.gst_declaration?.[0]) docApprovals.gst_declaration = { status: 'Approved', remarks: '' };
+    if (files?.pan_card?.[0]) docApprovals.pan_card = { status: 'Approved', remarks: '' };
+    if (files?.cancelled_cheque?.[0]) docApprovals.cancelled_cheque = { status: 'Approved', remarks: '' };
     (row as any).document_approvals = docApprovals;
-    row.profile_status = 'Complete';
+    row.profile_status = 'Incomplete';
     await row.save();
 
     return {

@@ -92,7 +92,7 @@ export class CompanyProjectsController {
   }
 
   /**
-   * Create a new recertification project (no project code yet; copies registration_info).
+   * Create a new recertification project (no project code yet; copies registration_info).`1Az  
    * POST /api/company/projects/:projectId/recertify
    */
   @Post(':projectId/recertify')
@@ -1122,12 +1122,12 @@ export class CompanyProjectsController {
    * GET /api/company/projects/:projectId/primary-data
    */
   @Get(':projectId/primary-data')
-  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   async getPrimaryData(
     @Request() req,
     @Param('projectId') projectId: string,
   ): Promise<any> {
-    return this.companyProjectsService.getPrimaryData(req.user.userId, projectId);
+    const companyId = req?.user?.userId;
+    return this.companyProjectsService.getPrimaryData(companyId, projectId);
   }
 
   /**
