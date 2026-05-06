@@ -3578,6 +3578,7 @@ export class CompanyProjectsService {
     }
 
     // Handle file uploads
+    const prevReg = (project.registration_info || {}) as Record<string, unknown>;
     const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-04z5.onrender.com';
     console.log('[Registration Info Service] Processing files:', {
       hasFiles: !!files,
@@ -5504,6 +5505,7 @@ export class CompanyProjectsService {
     const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-04z5.onrender.com';
     // Use Laravel-compatible path: uploads/company/{projectId}/
     const relativePath = `uploads/company/${projectId}/${file.filename}`;
+    const hadExistingProposal = !!String((project as any).proposal_document || '').trim();
 
     // Save proposal document as relative path so server can move host/base URL safely.
     project.proposal_document = relativePath;
@@ -7027,6 +7029,13 @@ export class CompanyProjectsService {
         ? projectAny.launch_training_report_date
         : (projectAny.launch_training_report_date as Date)?.toISOString?.()
       : null;
+    const coordCount = await this.countCoordinatorsForProject(companyId, projectId);
+    const rawSessions = Array.isArray(projectAny.launch_training_sessions)
+      ? projectAny.launch_training_sessions
+      : [];
+    const sessions = rawSessions.map((s: any, idx: number) =>
+      this.formatLaunchTrainingSessionForResponse(s, idx + 1, baseUrl),
+    );
 
     return {
       status: 'success' as const,
