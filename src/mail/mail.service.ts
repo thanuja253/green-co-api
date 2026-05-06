@@ -46,12 +46,22 @@ export class MailService {
 
         this.transporter = {
           sendMail: async (mailOptions: MailPayload): Promise<void> => {
-            await this.smtpTransporter!.sendMail({
-              from: mailOptions.from || process.env.MAIL_FROM_ADDRESS || user,
-              to: mailOptions.to,
-              subject: mailOptions.subject,
-              html: mailOptions.html,
-            });
+            try {
+              await this.smtpTransporter!.sendMail({
+                from: mailOptions.from || process.env.MAIL_FROM_ADDRESS || user,
+                to: mailOptions.to,
+                subject: mailOptions.subject,
+                html: mailOptions.html,
+              });
+            } catch (smtpErr) {
+              // Render/Gmail SMTP can be flaky; transparently fall back to Resend when configured.
+              if (this.resendApiKey) {
+                console.warn('[MailService] SMTP send failed. Falling back to Resend.');
+                await this.sendViaResend(mailOptions);
+                return;
+              }
+              throw smtpErr;
+            }
           },
         };
 
