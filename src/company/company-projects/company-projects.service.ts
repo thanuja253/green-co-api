@@ -564,8 +564,8 @@ export class CompanyProjectsService {
     if (!companyId || toStep <= fromStep) return;
     const fromLabel = WORKFLOW_STEP_LABELS[fromStep] || `Step ${fromStep}`;
     const toLabel = WORKFLOW_STEP_LABELS[toStep] || `Step ${toStep}`;
-  const company = await this.companyModel.findById(companyId).lean();
-  const companyName = company?.name || 'Company';
+    const company = await this.companyModel.findById(companyId).lean();
+    const companyName = company?.name || 'Company';
     await this.notificationsService
       .create(
         `Workflow moved: ${fromLabel} -> ${toLabel}`,
@@ -579,8 +579,8 @@ export class CompanyProjectsService {
       );
     await this.notificationsService
       .create(
-      `${companyName}: Workflow moved: ${fromLabel} -> ${toLabel}`,
-      `Company: ${companyName}. Project ${projectId}: ${fromLabel} -> ${toLabel}. ${reason}.`,
+        `${companyName}: Workflow moved: ${fromLabel} -> ${toLabel}`,
+        `Company: ${companyName}. Project ${projectId}: ${fromLabel} -> ${toLabel}. ${reason}.`,
         'A',
         undefined,
         'update',
@@ -4771,6 +4771,8 @@ export class CompanyProjectsService {
         .catch((e) =>
           console.error('[Complete Milestone] Notification failed:', e?.message || e),
         );
+      this.notificationsService
+        .create(
       const company = await this.companyModel.findById(project.company_id).lean();
       const companyName = company?.name || 'Company';
       this.notificationsService
@@ -9542,6 +9544,9 @@ export class CompanyProjectsService {
         .create(`${companyName}: ${isProforma ? 'Proforma' : 'Invoice'} ${status} (Admin alert)`, content, 'A')
         .catch((e) => console.error('Payment status notification to admin failed:', e));
       this.notificationsService
+        .create(`${isProforma ? 'Proforma' : 'Invoice'} ${status} (Admin alert)`, content, 'A')
+        .catch((e) => console.error('Payment status notification to admin failed:', e));
+      this.notificationsService
         .create(title, content, 'C', companyId)
         .catch((e) => console.error('Payment status notification failed:', e));
       if (company?.email) {
@@ -9994,6 +9999,15 @@ export class CompanyProjectsService {
         );
       this.notificationsService
         .create(
+          'Work order approved (Admin alert)',
+          `Project ${projectId}: Work order approved by CII.`,
+          'A',
+        )
+        .catch((e) =>
+          console.error('[Work Order Approval] Admin notification failed:', e?.message || e),
+        );
+      this.notificationsService
+        .create(
           'Work order approved',
           `Your work order has been approved by CII for project ${project.project_id || projectId}. You can proceed to the next step.`,
           'C',
@@ -10024,6 +10038,15 @@ export class CompanyProjectsService {
         .create(
           `${companyName}: Work order rejected (Admin alert)`,
           `Company: ${companyName}. Project ${projectId}: Work order rejected by CII.${dto.wo_remarks ? ` Remarks: ${dto.wo_remarks}` : ''}`,
+          'A',
+        )
+        .catch((e) =>
+          console.error('[Work Order Approval] Admin notification failed:', e?.message || e),
+        );
+      this.notificationsService
+        .create(
+          'Work order rejected (Admin alert)',
+          `Project ${projectId}: Work order rejected by CII.${dto.wo_remarks ? ` Remarks: ${dto.wo_remarks}` : ''}`,
           'A',
         )
         .catch((e) =>
