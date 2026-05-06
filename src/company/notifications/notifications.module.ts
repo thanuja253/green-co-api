@@ -8,6 +8,8 @@ import { Company, CompanySchema } from '../schemas/company.schema';
 import { NotificationsService } from './notifications.service';
 import { NotificationsController } from './notifications.controller';
 import { AdminNotificationsController } from './admin-notifications.controller';
+import { FacilitatorNotificationsController } from './facilitator-notifications.controller';
+import { AssessorNotificationsController } from './assessor-notifications.controller';
 
 @Module({
   imports: [
@@ -16,7 +18,12 @@ import { AdminNotificationsController } from './admin-notifications.controller';
       { name: Company.name, schema: CompanySchema },
     ]),
   ],
-  controllers: [NotificationsController, AdminNotificationsController],
+  controllers: [
+    NotificationsController,
+    AdminNotificationsController,
+    FacilitatorNotificationsController,
+    AssessorNotificationsController,
+  ],
   providers: [NotificationsService],
   exports: [NotificationsService],
 })

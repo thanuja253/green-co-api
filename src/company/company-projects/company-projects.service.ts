@@ -575,6 +575,17 @@ export class CompanyProjectsService {
       .catch((e) =>
         console.error('[Step Transition Notification] Failed:', e?.message || e),
       );
+    await this.notificationsService
+      .create(
+        `Workflow moved: ${fromLabel} -> ${toLabel}`,
+        `Project ${projectId}: ${fromLabel} -> ${toLabel}. ${reason}.`,
+        'A',
+        undefined,
+        'update',
+      )
+      .catch((e) =>
+        console.error('[Step Transition Notification] Admin feed failed:', e?.message || e),
+      );
   }
 
   private parseDdMmYyyyToDate(value: string): Date | null {
@@ -4757,6 +4768,17 @@ export class CompanyProjectsService {
         .catch((e) =>
           console.error('[Complete Milestone] Notification failed:', e?.message || e),
         );
+      this.notificationsService
+        .create(
+          `Step ${dto.milestone_flow} completed`,
+          `Project ${projectId}: ${dto.description || `Milestone ${dto.milestone_flow} has been completed.`}`,
+          'A',
+          undefined,
+          'update',
+        )
+        .catch((e) =>
+          console.error('[Complete Milestone] Admin notification failed:', e?.message || e),
+        );
       
       console.log('[Complete Milestone] After update:', {
         projectId: project._id.toString(),
@@ -6228,6 +6250,9 @@ export class CompanyProjectsService {
       const docDetails = (doc as any).description || (doc as any).document_type || 'Assessment submittal';
       const remarks = updates.document_remarks || (doc as any).document_remarks || '';
       const detail = `Document: ${docDetails}. ${remarks ? `Remarks: ${remarks}` : ''}`;
+      this.notificationsService.create('Assessment submittal not accepted (Admin alert)', detail, 'A').catch((e) =>
+        console.error('Checklist not-accepted notification to admin failed:', e),
+      );
       this.notificationsService.create('Assessment submittal not accepted', detail, 'C', companyId).catch((e) => console.error('Checklist not-accepted notification failed:', e));
       if (company?.email) {
         this.mailService.sendChecklistDocNotAcceptedEmail(company.email, company.name || 'Company', detail).catch((e) => console.error('Checklist not-accepted email failed:', e));
@@ -7179,6 +7204,28 @@ export class CompanyProjectsService {
         companyId,
       )
       .catch((err) => console.error('Launch & training notification failed:', err));
+    this.notificationsService
+      .create(
+        'Launch & Training document uploaded (Admin alert)',
+        `Project ${projectId}: session ${existing.length}/${CompanyProjectsService.MAX_LAUNCH_TRAINING_SESSIONS} uploaded.`,
+        'A',
+      )
+      .catch((err) => console.error('Launch & training admin notification failed:', err));
+    const facilitatorAssignment = await this.companyFacilitatorModel
+      .findOne({ company_id: companyId, project_id: projectId })
+      .lean();
+    if (facilitatorAssignment?.facilitator_id) {
+      this.notificationsService
+        .create(
+          'Launch & Training session updated',
+          `Project ${projectId}: Launch & Training session ${existing.length}/${CompanyProjectsService.MAX_LAUNCH_TRAINING_SESSIONS} uploaded.`,
+          'F',
+          String(facilitatorAssignment.facilitator_id),
+        )
+        .catch((err) =>
+          console.error('Launch & training facilitator notification failed:', err),
+        );
+    }
 
     this.mailService
       .sendSiteVisitReportUploadedEmail(company?.email, company?.name || 'Company')
@@ -9326,6 +9373,28 @@ export class CompanyProjectsService {
     invoice.payment_status = 1; // Mark as paid/submitted
     invoice.approval_status = 0; // Pending approval when submitted
     await invoice.save();
+    this.notificationsService
+      .create(
+        'Payment submitted by company',
+        `Project ${projectId}: ${invoice.payment_for === PAYMENT_FOR_PROFORMA ? 'Proforma' : 'Tax'} invoice payment submitted and pending admin review.`,
+        'A',
+      )
+      .catch((e) => console.error('Payment submission notification to admin failed:', e));
+    const facilitatorAssignment = await this.companyFacilitatorModel
+      .findOne({ company_id: companyId, project_id: projectId })
+      .lean();
+    if (facilitatorAssignment?.facilitator_id) {
+      this.notificationsService
+        .create(
+          'Payment submitted by company',
+          `Project ${projectId}: company payment submitted for ${invoice.payment_for === PAYMENT_FOR_PROFORMA ? 'proforma' : 'tax'} invoice.`,
+          'F',
+          String(facilitatorAssignment.facilitator_id),
+        )
+        .catch((e) =>
+          console.error('Payment submission notification to facilitator failed:', e),
+        );
+    }
 
     const paymentDescription = `Payment submitted for invoice (${invoice.payment_for === PAYMENT_FOR_PROFORMA ? 'Proforma' : 'Tax Invoice'}): ${dto.payment_type}${dto.trans_id ? ` - ${dto.trans_id}` : ''}`;
 
@@ -9452,6 +9521,9 @@ export class CompanyProjectsService {
       const content = isProforma
         ? `Proforma Invoice has been ${status.toLowerCase()} for company ${companyName}. ${approvalStatus === 1 ? 'Next: Site Visit document upload, then Primary Data Form.' : ''}`
         : `GreenCo Team has ${status} the payment from company ${companyName}`;
+      this.notificationsService
+        .create(`${isProforma ? 'Proforma' : 'Invoice'} ${status} (Admin alert)`, content, 'A')
+        .catch((e) => console.error('Payment status notification to admin failed:', e));
       this.notificationsService
         .create(title, content, 'C', companyId)
         .catch((e) => console.error('Payment status notification failed:', e));
@@ -9894,6 +9966,15 @@ export class CompanyProjectsService {
     if (dto.wo_status === 1 && projectCompanyId) {
       this.notificationsService
         .create(
+          'Work order approved (Admin alert)',
+          `Project ${projectId}: Work order approved by CII.`,
+          'A',
+        )
+        .catch((e) =>
+          console.error('[Work Order Approval] Admin notification failed:', e?.message || e),
+        );
+      this.notificationsService
+        .create(
           'Work order approved',
           `Your work order has been approved by CII for project ${project.project_id || projectId}. You can proceed to the next step.`,
           'C',
@@ -9902,7 +9983,31 @@ export class CompanyProjectsService {
         .catch((e) =>
           console.error('[Work Order Approval] Notification failed:', e?.message || e),
         );
+      const facilitatorAssignment = await this.companyFacilitatorModel
+        .findOne({ company_id: companyId, project_id: projectId })
+        .lean();
+      if (facilitatorAssignment?.facilitator_id) {
+        this.notificationsService
+          .create(
+            'Work order approved',
+            `Project ${project.project_id || projectId}: work order approved by CII.`,
+            'F',
+            String(facilitatorAssignment.facilitator_id),
+          )
+          .catch((e) =>
+            console.error('[Work Order Approval] Facilitator notification failed:', e?.message || e),
+          );
+      }
     } else if (dto.wo_status === 2 && projectCompanyId) {
+      this.notificationsService
+        .create(
+          'Work order rejected (Admin alert)',
+          `Project ${projectId}: Work order rejected by CII.${dto.wo_remarks ? ` Remarks: ${dto.wo_remarks}` : ''}`,
+          'A',
+        )
+        .catch((e) =>
+          console.error('[Work Order Approval] Admin notification failed:', e?.message || e),
+        );
       this.notificationsService
         .create(
           'Work order rejected',
@@ -9913,6 +10018,21 @@ export class CompanyProjectsService {
         .catch((e) =>
           console.error('[Work Order Approval] Notification failed:', e?.message || e),
         );
+      const facilitatorAssignment = await this.companyFacilitatorModel
+        .findOne({ company_id: companyId, project_id: projectId })
+        .lean();
+      if (facilitatorAssignment?.facilitator_id) {
+        this.notificationsService
+          .create(
+            'Work order rejected',
+            `Project ${project.project_id || projectId}: work order rejected.${dto.wo_remarks ? ` Remarks: ${dto.wo_remarks}` : ''}`,
+            'F',
+            String(facilitatorAssignment.facilitator_id),
+          )
+          .catch((e) =>
+            console.error('[Work Order Approval] Facilitator notification failed:', e?.message || e),
+          );
+      }
     }
 
     console.log('[Work Order Approval] Status updated:', {
@@ -10355,6 +10475,13 @@ export class CompanyProjectsService {
         companyId,
       )
       .catch((err) => console.error('Notification to company failed:', err));
+    this.notificationsService
+      .create(
+        'Coordinator assigned (Admin alert)',
+        `Project ${projectId}: Coordinator ${coordinator.name} assigned.`,
+        'A',
+      )
+      .catch((err) => console.error('Notification to admin failed:', err));
 
     // In-app: notify Coordinator (CO) so they see assignment in their portal (if used)
     this.notificationsService
@@ -10491,6 +10618,13 @@ export class CompanyProjectsService {
         facilitatorId,
       )
       .catch((err) => console.error('Notification to facilitator failed:', err));
+    this.notificationsService
+      .create(
+        'Facilitator assigned (Admin alert)',
+        `Project ${projectId}: Facilitator ${facilitator.name} assigned.`,
+        'A',
+      )
+      .catch((err) => console.error('Notification to admin failed:', err));
 
     // In-app: notify Company (C)
     this.notificationsService
@@ -10891,6 +11025,13 @@ export class CompanyProjectsService {
         assessorId,
       )
       .catch((err) => console.error('Notification to assessor failed:', err));
+    this.notificationsService
+      .create(
+        'Assessor assigned (Admin alert)',
+        `Project ${projectId}: Assessor ${assessor.name} assigned.`,
+        'A',
+      )
+      .catch((err) => console.error('Notification to admin failed:', err));
 
     // In-app: notify Company (C)
     this.notificationsService
@@ -12452,6 +12593,9 @@ export class CompanyProjectsService {
     // In-app + email when not accepted (status 2)
     if (status === PRIMARY_DATA_DOC_STATUS.NOT_ACCEPTED) {
       const detail = `Section: ${formType}. ${remark ? `Remarks: ${remark}` : ''}`;
+      this.notificationsService
+        .create('Primary data not accepted (Admin alert)', detail, 'A')
+        .catch((e) => console.error('Primary not-accepted notification to admin failed:', e));
       this.notificationsService.create('Primary data not accepted', detail, 'C', companyId).catch((e) => console.error('Primary not-accepted notification failed:', e));
       if (company?.email) {
         this.mailService.sendPrimaryDocNotAcceptedEmail(company.email, company.name || 'Company', detail).catch((e) => console.error('Primary not-accepted email failed:', e));
@@ -12468,6 +12612,9 @@ export class CompanyProjectsService {
     // In-app + email when accepted (status 1)
     if (status === PRIMARY_DATA_DOC_STATUS.ACCEPTED) {
       const detail = `Primary data section "${formType}" has been accepted by GreenCo Team.`;
+      this.notificationsService
+        .create('Primary data accepted (Admin alert)', detail, 'A')
+        .catch((e) => console.error('Primary accepted notification to admin failed:', e));
       this.notificationsService.create('Primary data accepted', detail, 'C', companyId).catch((e) => console.error('Primary accepted notification failed:', e));
       if (company?.email) {
         this.mailService.sendPrimaryDocAcceptedEmail(company.email, company.name || 'Company', formType).catch((e) => console.error('Primary accepted email failed:', e));
