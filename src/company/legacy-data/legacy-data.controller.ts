@@ -1,11 +1,13 @@
-import { Body, Controller, Get, Param, Post, Put, Query, UsePipes, ValidationPipe } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Put, Query, UseGuards, UsePipes, ValidationPipe } from '@nestjs/common';
 import { LegacyDataService } from './legacy-data.service';
 import { CreateLegacyDataDto } from './dto/create-legacy-data.dto';
 import { ListLegacyDataQueryDto } from './dto/list-legacy-data-query.dto';
 import { ImportLegacyDataDto } from './dto/import-legacy-data.dto';
 import { UpdateLegacyDataDto } from './dto/update-legacy-data.dto';
+import { AdminJwtAuthGuard } from '../company-auth/guards/admin-jwt-auth.guard';
 
 @Controller()
+@UseGuards(AdminJwtAuthGuard)
 export class LegacyDataController {
   constructor(private readonly legacyDataService: LegacyDataService) {}
 

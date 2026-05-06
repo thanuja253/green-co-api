@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, UsePipes, ValidationPipe } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, UseGuards, UsePipes, ValidationPipe } from '@nestjs/common';
 import { RegistrationMastersService } from './registration-masters.service';
 import { CreateIndustryDto } from './dto/create-industry.dto';
 import { BulkCreateIndustriesDto } from './dto/bulk-create-industries.dto';
@@ -6,8 +6,10 @@ import { CreateStateDto } from './dto/create-state.dto';
 import { BulkCreateStatesDto } from './dto/bulk-create-states.dto';
 import { CreateAssessorGradeDto } from './dto/create-assessor-grade.dto';
 import { BulkCreateAssessorGradesDto } from './dto/bulk-create-assessor-grades.dto';
+import { AdminJwtAuthGuard } from '../company-auth/guards/admin-jwt-auth.guard';
 
 @Controller('api/admin/masters')
+@UseGuards(AdminJwtAuthGuard)
 export class AdminMastersController {
   constructor(private readonly registrationMastersService: RegistrationMastersService) {}
 

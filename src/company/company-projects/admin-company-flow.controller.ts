@@ -50,6 +50,7 @@ import {
 } from './registration-info-upload.config';
 
 @Controller()
+@UseGuards(AdminJwtAuthGuard)
 export class AdminCompanyFlowController {
   constructor(private readonly companyProjectsService: CompanyProjectsService) {}
 

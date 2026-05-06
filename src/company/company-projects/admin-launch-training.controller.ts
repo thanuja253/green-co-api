@@ -5,6 +5,7 @@ import {
   Param,
   Post,
   UploadedFiles,
+  UseGuards,
   UseInterceptors,
   UsePipes,
   ValidationPipe,
@@ -16,6 +17,7 @@ import {
   addLaunchTrainingSessionFromMultipart,
   launchTrainingSessionUploadInterceptor,
 } from './launch-training-session-upload.config';
+import { AdminJwtAuthGuard } from '../company-auth/guards/admin-jwt-auth.guard';
 
 /**
  * Admin Launch & Training — GET + POST under one controller prefix.
@@ -26,6 +28,7 @@ import {
  * Company API aliases live on `CompanyProjectsController` (`/api/company/projects/.../launch-training`).
  */
 @Controller('api/admin/projects')
+@UseGuards(AdminJwtAuthGuard)
 export class AdminLaunchTrainingController {
   constructor(private readonly companyProjectsService: CompanyProjectsService) {}
 

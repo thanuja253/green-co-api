@@ -20,6 +20,7 @@ import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { AccountStatusGuard } from './guards/account-status.guard';
+import { AdminJwtAuthGuard } from './guards/admin-jwt-auth.guard';
 import { RegistrationMastersService } from '../registration-masters/registration-masters.service';
 
 @Controller('api/company/auth')
@@ -180,6 +181,7 @@ export class CompanyAuthController {
   @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
   @Header('Pragma', 'no-cache')
   @Header('Expires', '0')
+  @UseGuards(AdminJwtAuthGuard)
   async getCompaniesList(
     @Query() query?: Record<string, any>,
   ) {
@@ -204,6 +206,7 @@ export class CompanyAuthController {
   @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
   @Header('Pragma', 'no-cache')
   @Header('Expires', '0')
+  @UseGuards(AdminJwtAuthGuard)
   async postCompaniesList(
     @Body() body?: Record<string, any>,
   ) {
@@ -211,21 +214,25 @@ export class CompanyAuthController {
   }
 
   @Get('companies-filters')
+  @UseGuards(AdminJwtAuthGuard)
   async getCompanyFilterOptions() {
     return this.companyAuthService.getCompanyListFilters();
   }
 
   @Post('companies-filters')
+  @UseGuards(AdminJwtAuthGuard)
   async postCompanyFilterOptions() {
     return this.companyAuthService.getCompanyListFilters();
   }
 
   @Get(['status_change', 'company-status', 'update-status', 'account-status'])
+  @UseGuards(AdminJwtAuthGuard)
   async getLegacyStatusChange(@Query() query?: Record<string, any>) {
     return this.companyAuthService.updateCompanyStatus(query || {});
   }
 
   @Post(['status_change', 'company-status', 'update-status', 'account-status'])
+  @UseGuards(AdminJwtAuthGuard)
   async postLegacyStatusChange(@Body() body?: Record<string, any>) {
     return this.companyAuthService.updateCompanyStatus(body || {});
   }

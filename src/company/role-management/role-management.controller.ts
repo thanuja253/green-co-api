@@ -1,9 +1,11 @@
-import { Body, Controller, Get, Param, Post, Query, UsePipes, ValidationPipe } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, UseGuards, UsePipes, ValidationPipe } from '@nestjs/common';
 import { RoleManagementService } from './role-management.service';
 import { CreateRoleDto } from './dto/create-role.dto';
 import { ListRolesQueryDto } from './dto/list-roles-query.dto';
+import { AdminJwtAuthGuard } from '../company-auth/guards/admin-jwt-auth.guard';
 
 @Controller()
+@UseGuards(AdminJwtAuthGuard)
 export class RoleManagementController {
   constructor(private readonly roleManagementService: RoleManagementService) {}
 

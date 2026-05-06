@@ -8,6 +8,7 @@ import {
   Put,
   Query,
   Res,
+  UseGuards,
   UseInterceptors,
   UsePipes,
   ValidationPipe,
@@ -17,6 +18,7 @@ import { AnyFilesInterceptor } from '@nestjs/platform-express';
 import { ParameterManagementService } from './parameter-management.service';
 import { CreateParameterDto } from './dto/create-parameter.dto';
 import { ListParametersQueryDto } from './dto/list-parameters-query.dto';
+import { AdminJwtAuthGuard } from '../company-auth/guards/admin-jwt-auth.guard';
 
 @Controller()
 export class ParameterManagementController {
@@ -26,6 +28,7 @@ export class ParameterManagementController {
   @Post('admin/parameter')
   @Post('api/admin/parameters')
   @Post('admin/parameters')
+  @UseGuards(AdminJwtAuthGuard)
   @UseInterceptors(AnyFilesInterceptor())
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
   async createParameter(@Body() payload: CreateParameterDto) {
@@ -34,6 +37,7 @@ export class ParameterManagementController {
 
   @Post('api/admin/criteria')
   @Post('admin/criteria')
+  @UseGuards(AdminJwtAuthGuard)
   @UseInterceptors(AnyFilesInterceptor())
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
   async createCriteria(@Body() payload: CreateParameterDto) {
@@ -44,6 +48,7 @@ export class ParameterManagementController {
   @Get('admin/parameter')
   @Get('api/admin/parameters')
   @Get('admin/parameters')
+  @UseGuards(AdminJwtAuthGuard)
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
   async listParameters(@Query() query: ListParametersQueryDto) {
     return this.parameterService.listParameters(query);
@@ -51,6 +56,7 @@ export class ParameterManagementController {
 
   @Get('api/admin/criteria')
   @Get('admin/criteria')
+  @UseGuards(AdminJwtAuthGuard)
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
   async listCriteria(@Query() query: ListParametersQueryDto) {
     return this.parameterService.listParameters(query);
@@ -70,6 +76,7 @@ export class ParameterManagementController {
   // Legacy datatable endpoint compatibility
   @Get('api/admin/criteria_data')
   @Get('admin/criteria_data')
+  @UseGuards(AdminJwtAuthGuard)
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
   async listParametersData(@Query() query: ListParametersQueryDto) {
     return this.parameterService.listParameters(query);
@@ -77,6 +84,7 @@ export class ParameterManagementController {
 
   @Get('api/admin/criteria_bulk_export')
   @Get('admin/criteria_bulk_export')
+  @UseGuards(AdminJwtAuthGuard)
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
   async exportParameters(@Query() query: ListParametersQueryDto, @Res() res: Response): Promise<void> {
     const exported = await this.parameterService.exportParameters(query);
@@ -89,12 +97,14 @@ export class ParameterManagementController {
   @Get('admin/parameter/:id')
   @Get('api/admin/parameters/:id')
   @Get('admin/parameters/:id')
+  @UseGuards(AdminJwtAuthGuard)
   async getParameter(@Param('id') id: string) {
     return this.parameterService.getParameter(id);
   }
 
   @Get('api/admin/criteria/:id')
   @Get('admin/criteria/:id')
+  @UseGuards(AdminJwtAuthGuard)
   async getCriteria(@Param('id') id: string) {
     return this.parameterService.getParameter(id);
   }
@@ -111,6 +121,7 @@ export class ParameterManagementController {
   @Post('admin/parameter/:id')
   @Post('api/admin/parameters/:id')
   @Post('admin/parameters/:id')
+  @UseGuards(AdminJwtAuthGuard)
   @UseInterceptors(AnyFilesInterceptor())
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
   async updateParameter(@Param('id') id: string, @Body() payload: CreateParameterDto) {
@@ -123,6 +134,7 @@ export class ParameterManagementController {
   @Patch('admin/criteria/:id')
   @Post('api/admin/criteria/:id')
   @Post('admin/criteria/:id')
+  @UseGuards(AdminJwtAuthGuard)
   @UseInterceptors(AnyFilesInterceptor())
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
   async updateCriteria(@Param('id') id: string, @Body() payload: CreateParameterDto) {

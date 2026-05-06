@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Put, Query, Req, UploadedFiles, UseInterceptors, UsePipes, ValidationPipe } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Put, Query, Req, UploadedFiles, UseGuards, UseInterceptors, UsePipes, ValidationPipe } from '@nestjs/common';
 import { FileFieldsInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { extname, join } from 'path';
@@ -10,6 +10,7 @@ import { ListFacilitatorsQueryDto } from './dto/list-facilitators-query.dto';
 import { UpdateFacilitatorApprovalDto } from './dto/update-facilitator-approval.dto';
 import { UpdateFacilitatorDocumentApprovalDto } from './dto/update-facilitator-document-approval.dto';
 import { Request } from 'express';
+import { AdminJwtAuthGuard } from '../company-auth/guards/admin-jwt-auth.guard';
 
 @Controller()
 export class FacilitatorsController {
@@ -22,6 +23,7 @@ export class FacilitatorsController {
   }
 
   @Post('admin/facilitators')
+  @UseGuards(AdminJwtAuthGuard)
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
   async createFacilitator(@Body() dto: CreateFacilitatorDto): Promise<any> {
     const mobile = (dto.mobile || dto.mobile_number || '').trim();
@@ -30,6 +32,7 @@ export class FacilitatorsController {
 
   @Post('api/admin/facilitators')
   @Post('api/admin/facilitators/create')
+  @UseGuards(AdminJwtAuthGuard)
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
   async createFacilitatorApi(@Body() dto: CreateFacilitatorDto): Promise<any> {
     const mobile = (dto.mobile || dto.mobile_number || '').trim();
@@ -38,6 +41,7 @@ export class FacilitatorsController {
 
   @Post('admin/facilitators/create')
   @Post('api/admin/facilitators/create')
+  @UseGuards(AdminJwtAuthGuard)
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
   async createFacilitatorCreateAlias(@Body() dto: CreateFacilitatorDto): Promise<any> {
     const mobile = (dto.mobile || dto.mobile_number || '').trim();
@@ -45,6 +49,7 @@ export class FacilitatorsController {
   }
 
   @Post('api/admin/facilitators/create')
+  @UseGuards(AdminJwtAuthGuard)
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
   async createFacilitatorCreateApiAlias(@Body() dto: CreateFacilitatorDto): Promise<any> {
     const mobile = (dto.mobile || dto.mobile_number || '').trim();
@@ -52,12 +57,14 @@ export class FacilitatorsController {
   }
 
   @Get('admin/facilitators')
+  @UseGuards(AdminJwtAuthGuard)
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
   async listFacilitators(@Query() query: ListFacilitatorsQueryDto): Promise<any> {
     return this.facilitatorsService.listFacilitatorsAdminFlow(query);
   }
 
   @Get('api/admin/facilitators')
+  @UseGuards(AdminJwtAuthGuard)
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
   async listFacilitatorsApi(@Query() query: ListFacilitatorsQueryDto): Promise<any> {
     return this.facilitatorsService.listFacilitatorsAdminFlow(query);
@@ -65,29 +72,34 @@ export class FacilitatorsController {
 
   @Get('admin/facilitators/:facilitatorId')
   @Get('facilitators/:facilitatorId')
+  @UseGuards(AdminJwtAuthGuard)
   async getFacilitator(@Param('facilitatorId') facilitatorId: string): Promise<any> {
     return this.facilitatorsService.getFacilitatorAdminFlow(facilitatorId);
   }
 
   @Get('api/admin/facilitators/:facilitatorId')
+  @UseGuards(AdminJwtAuthGuard)
   async getFacilitatorApi(@Param('facilitatorId') facilitatorId: string): Promise<any> {
     return this.facilitatorsService.getFacilitatorAdminFlow(facilitatorId);
   }
 
   @Get('api/admin/facilitators/:facilitatorId/profile-data')
   @Get('admin/facilitators/:facilitatorId/profile-data')
+  @UseGuards(AdminJwtAuthGuard)
   async getFacilitatorProfileData(@Param('facilitatorId') facilitatorId: string): Promise<any> {
     return this.facilitatorsService.getFacilitatorAdminFlow(facilitatorId);
   }
 
   @Get('api/admin/facilitators/:facilitatorId/approval-status')
   @Get('admin/facilitators/:facilitatorId/approval-status')
+  @UseGuards(AdminJwtAuthGuard)
   async getFacilitatorApprovalStatus(@Param('facilitatorId') facilitatorId: string): Promise<any> {
     return this.facilitatorsService.getFacilitatorApprovalStatusAdminFlow(facilitatorId);
   }
 
   @Post('api/admin/facilitators/:facilitatorId/approval-status')
   @Post('admin/facilitators/:facilitatorId/approval-status')
+  @UseGuards(AdminJwtAuthGuard)
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
   async updateFacilitatorApproval(
     @Param('facilitatorId') facilitatorId: string,
@@ -104,6 +116,7 @@ export class FacilitatorsController {
 
   @Post('api/admin/facilitators/:facilitatorId/approve')
   @Post('admin/facilitators/:facilitatorId/approve')
+  @UseGuards(AdminJwtAuthGuard)
   async approveFacilitator(@Param('facilitatorId') facilitatorId: string): Promise<any> {
     return this.facilitatorsService.updateFacilitatorApprovalStatusAdminFlow(
       facilitatorId,
@@ -114,6 +127,7 @@ export class FacilitatorsController {
 
   @Post('api/admin/facilitators/:facilitatorId/reject')
   @Post('admin/facilitators/:facilitatorId/reject')
+  @UseGuards(AdminJwtAuthGuard)
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
   async rejectFacilitator(
     @Param('facilitatorId') facilitatorId: string,
@@ -128,6 +142,7 @@ export class FacilitatorsController {
 
   @Post('api/admin/facilitators/:facilitatorId/approval-status/reset')
   @Post('admin/facilitators/:facilitatorId/approval-status/reset')
+  @UseGuards(AdminJwtAuthGuard)
   async resetFacilitatorApprovalStatus(@Param('facilitatorId') facilitatorId: string): Promise<any> {
     return this.facilitatorsService.resetFacilitatorApprovalStatusAdminFlow(facilitatorId);
   }
@@ -138,6 +153,7 @@ export class FacilitatorsController {
    */
   @Post('api/admin/facilitators/:facilitatorId/documents/:documentKey/approval-status')
   @Post('admin/facilitators/:facilitatorId/documents/:documentKey/approval-status')
+  @UseGuards(AdminJwtAuthGuard)
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: false }))
   async updateFacilitatorDocumentApproval(
     @Param('facilitatorId') facilitatorId: string,
@@ -153,6 +169,7 @@ export class FacilitatorsController {
   }
 
   @Post('admin/facilitators/profile')
+  @UseGuards(AdminJwtAuthGuard)
   @UseInterceptors(
     FileFieldsInterceptor(
       [
@@ -224,6 +241,7 @@ export class FacilitatorsController {
   }
 
   @Post('api/admin/facilitators/profile')
+  @UseGuards(AdminJwtAuthGuard)
   @UseInterceptors(
     FileFieldsInterceptor(
       [
@@ -287,6 +305,7 @@ export class FacilitatorsController {
   }
 
   @Post('api/admin/facilitators/profile/upsert')
+  @UseGuards(AdminJwtAuthGuard)
   @UseInterceptors(
     FileFieldsInterceptor(
       [
@@ -363,6 +382,7 @@ export class FacilitatorsController {
   @Put('admin/facilitators/:facilitatorId')
   @Put('facilitators/:facilitatorId/edit')
   @Put('facilitators/:facilitatorId')
+  @UseGuards(AdminJwtAuthGuard)
   @UseInterceptors(
     FileFieldsInterceptor(
       [

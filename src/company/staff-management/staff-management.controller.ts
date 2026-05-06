@@ -1,9 +1,11 @@
-import { Body, Controller, Get, Param, Post, Query, UsePipes, ValidationPipe } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, UseGuards, UsePipes, ValidationPipe } from '@nestjs/common';
 import { StaffManagementService } from './staff-management.service';
 import { CreateStaffDto } from './dto/create-staff.dto';
 import { ListStaffQueryDto } from './dto/list-staff-query.dto';
+import { AdminJwtAuthGuard } from '../company-auth/guards/admin-jwt-auth.guard';
 
 @Controller()
+@UseGuards(AdminJwtAuthGuard)
 export class StaffManagementController {
   constructor(private readonly staffManagementService: StaffManagementService) {}
 

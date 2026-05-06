@@ -8,6 +8,7 @@ import {
   Put,
   Query,
   Res,
+  UseGuards,
   UsePipes,
   ValidationPipe,
 } from '@nestjs/common';
@@ -15,8 +16,10 @@ import type { Response } from 'express';
 import { SectorManagementService } from './sector-management.service';
 import { CreateSectorManagementDto } from './dto/create-sector-management.dto';
 import { ListSectorsQueryDto } from './dto/list-sectors-query.dto';
+import { AdminJwtAuthGuard } from '../company-auth/guards/admin-jwt-auth.guard';
 
 @Controller()
+@UseGuards(AdminJwtAuthGuard)
 export class SectorManagementController {
   constructor(private readonly sectorService: SectorManagementService) {}
 

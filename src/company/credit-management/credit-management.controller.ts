@@ -1,11 +1,13 @@
-import { Body, Controller, Get, Param, Post, Query, Res, UseInterceptors, UsePipes, ValidationPipe } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, Res, UseGuards, UseInterceptors, UsePipes, ValidationPipe } from '@nestjs/common';
 import { AnyFilesInterceptor } from '@nestjs/platform-express';
 import type { Response } from 'express';
 import { CreditManagementService } from './credit-management.service';
 import { CreateCreditManagementDto } from './dto/create-credit-management.dto';
 import { ListCreditManagementQueryDto } from './dto/list-credit-management-query.dto';
+import { AdminJwtAuthGuard } from '../company-auth/guards/admin-jwt-auth.guard';
 
 @Controller()
+@UseGuards(AdminJwtAuthGuard)
 export class CreditManagementController {
   constructor(private readonly creditService: CreditManagementService) {}
 

@@ -71,6 +71,7 @@ export class CompanyProjectsController {
    * GET /api/company/projects/coordinators
    */
   @Get('coordinators')
+  @UseGuards(AdminJwtAuthGuard)
   async listCoordinators(): Promise<any> {
     return this.companyProjectsService.listCoordinators();
   }
@@ -157,6 +158,7 @@ export class CompanyProjectsController {
   }
 
   @Get(':projectId/certificate-document')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   async getCertificateDocument(
     @Param('projectId') projectId: string,
     @Res() res: Response,

@@ -10,6 +10,7 @@ import {
   Query,
   Res,
   UploadedFiles,
+  UseGuards,
   UseInterceptors,
   UsePipes,
   ValidationPipe,
@@ -21,6 +22,7 @@ import type { Response } from 'express';
 import { GroupManagementService } from './group-management.service';
 import { CreateGroupDto } from './dto/create-group.dto';
 import { ListGroupsQueryDto } from './dto/list-groups-query.dto';
+import { AdminJwtAuthGuard } from '../company-auth/guards/admin-jwt-auth.guard';
 
 const normalizeName = (name: string) => String(name || '').replace(/[^a-zA-Z0-9_.-]/g, '_');
 const ALLOWED_CHECKLIST_EXT = new Set(['.xls', '.xlsx', '.csv', '.pdf']);
@@ -54,6 +56,7 @@ const validateChecklistFile = (
 };
 
 @Controller()
+@UseGuards(AdminJwtAuthGuard)
 export class GroupManagementController {
   constructor(private readonly groupService: GroupManagementService) {}
 

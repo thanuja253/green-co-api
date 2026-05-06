@@ -6,6 +6,7 @@ import {
   HttpException,
   Post,
   UnauthorizedException,
+  UseGuards,
   UsePipes,
   ValidationPipe,
 } from '@nestjs/common';
@@ -14,6 +15,7 @@ import { MailService } from '../../mail/mail.service';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { AdminChangePasswordDto } from './dto/admin-change-password.dto';
+import { AdminJwtAuthGuard } from './guards/admin-jwt-auth.guard';
 import { passwordGeneration } from '../../helpers/password.helper';
 
 @Controller('api/admin/auth')
@@ -103,6 +105,7 @@ export class AdminAuthCompatController {
   }
 
   @Get('me')
+  @UseGuards(AdminJwtAuthGuard)
   async me() {
     return {
       status: 'success',
@@ -171,6 +174,7 @@ export class AdminAuthCompatController {
   }
 
   @Post('change-password')
+  @UseGuards(AdminJwtAuthGuard)
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
   async changePassword(@Body() dto: AdminChangePasswordDto) {
     const adminEmail = this.getAdminEmail();

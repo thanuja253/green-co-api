@@ -13,6 +13,7 @@ import {
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../company-auth/guards/jwt-auth.guard';
 import { AccountStatusGuard } from '../company-auth/guards/account-status.guard';
+import { AdminJwtAuthGuard } from '../company-auth/guards/admin-jwt-auth.guard';
 import { HelpDeskService } from './help-desk.service';
 import { CreateTicketDto } from './dto/create-ticket.dto';
 import { UpdateTicketAdminDto } from './dto/update-ticket-admin.dto';
@@ -67,6 +68,7 @@ export class HelpDeskController {
    * TODO: Protect with AdminGuard when admin auth is available.
    */
   @Get('admin/list')
+  @UseGuards(AdminJwtAuthGuard)
   async listAll(
     @Query('status') status?: 'open' | 'in_progress' | 'resolved' | 'closed',
     @Query('company_id') company_id?: string,
@@ -107,6 +109,7 @@ export class HelpDeskController {
    * TODO: Protect with AdminGuard when admin auth is available.
    */
   @Patch(':id/admin')
+  @UseGuards(AdminJwtAuthGuard)
   @UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
   async updateByAdmin(@Param('id') id: string, @Body() dto: UpdateTicketAdminDto) {
     const ticket = await this.helpDeskService.updateByAdmin(id, dto);

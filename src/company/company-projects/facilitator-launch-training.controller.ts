@@ -27,6 +27,7 @@ import { FacilitatorJwtAuthGuard } from '../facilitator-auth/guards/facilitator-
 import { FacilitatorAccountStatusGuard } from '../facilitator-auth/guards/facilitator-account-status.guard';
 
 @Controller(['api/facilitator/projects', 'api/facilitators/projects'])
+@UseGuards(FacilitatorJwtAuthGuard, FacilitatorAccountStatusGuard)
 export class FacilitatorLaunchTrainingController {
   constructor(private readonly companyProjectsService: CompanyProjectsService) {}
 

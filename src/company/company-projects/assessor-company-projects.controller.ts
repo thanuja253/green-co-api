@@ -23,6 +23,7 @@ import { extname, join } from 'path';
 import * as fs from 'fs';
 
 @Controller()
+@UseGuards(AssessorJwtAuthGuard, AssessorAccountStatusGuard)
 export class AssessorCompanyProjectsController {
   constructor(private readonly companyProjectsService: CompanyProjectsService) {}
 
