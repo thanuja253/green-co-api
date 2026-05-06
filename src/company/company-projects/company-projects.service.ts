@@ -612,7 +612,7 @@ export class CompanyProjectsService {
     const normalized = this.toPublicFilePath(path);
     if (!normalized) return '';
     if (normalized.startsWith('http://') || normalized.startsWith('https://')) return normalized;
-    const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(/\/+$/, '');
+    const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-04z5.onrender.com').replace(/\/+$/, '');
     return `${baseUrl}${normalized}`;
   }
 
@@ -2236,7 +2236,7 @@ export class CompanyProjectsService {
     const company = await this.companyModel.findById(project.company_id).lean();
 
     // Convert relative paths to full URLs for frontend
-    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com';
+    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-04z5.onrender.com';
     
     const certificate_document = project.certificate_document_url
       ? project.certificate_document_url.startsWith('http')
@@ -3566,60 +3566,8 @@ export class CompanyProjectsService {
       delete normalizedData.gstin_no;
     }
 
-    // Normalize facilitator field aliases for registration payload
-    const facilitatorIdRaw = String(
-      normalizedData.facilitator_id ??
-        normalizedData.facilitatorId ??
-        '',
-    ).trim();
-    const facilitatorNameRaw = String(
-      normalizedData.facilitator_name ??
-        normalizedData.facilitatorName ??
-        '',
-    ).trim();
-    const facilitatorCodeRaw = String(
-      normalizedData.facilitator_code ??
-        normalizedData.facilitatorCode ??
-        '',
-    ).trim();
-
-    if (facilitatorIdRaw) {
-      normalizedData.facilitator_id = facilitatorIdRaw;
-      if (!facilitatorNameRaw || !facilitatorCodeRaw) {
-        try {
-          const facilitator = await this.facilitatorModel
-            .findById(facilitatorIdRaw)
-            .select('name consultant_id')
-            .lean();
-          if (facilitator) {
-            if (!facilitatorNameRaw) {
-              normalizedData.facilitator_name = String((facilitator as any).name || '').trim();
-            } else {
-              normalizedData.facilitator_name = facilitatorNameRaw;
-            }
-            if (!facilitatorCodeRaw) {
-              normalizedData.facilitator_code = String((facilitator as any).consultant_id || '').trim();
-            } else {
-              normalizedData.facilitator_code = facilitatorCodeRaw;
-            }
-          }
-        } catch {
-          // Keep provided values if facilitator lookup fails.
-          normalizedData.facilitator_name = facilitatorNameRaw;
-          normalizedData.facilitator_code = facilitatorCodeRaw;
-        }
-      } else {
-        normalizedData.facilitator_name = facilitatorNameRaw;
-        normalizedData.facilitator_code = facilitatorCodeRaw;
-      }
-    }
-    delete normalizedData.facilitatorId;
-    delete normalizedData.facilitatorName;
-    delete normalizedData.facilitatorCode;
-
-    // Registration files → GridFS (persistent on MongoDB; not Render ephemeral disk)
-    const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(/\/+$/, '');
-    const prevReg = (project.registration_info || {}) as Record<string, any>;
+    // Handle file uploads
+    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-04z5.onrender.com';
     console.log('[Registration Info Service] Processing files:', {
       hasFiles: !!files,
       company_brief_profile: files?.company_brief_profile?.[0]?.originalname,
@@ -3890,7 +3838,7 @@ export class CompanyProjectsService {
       });
     }
 
-    const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(/\/+$/, '');
+    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-04z5.onrender.com';
     const registrationInfo = project.registration_info || {};
 
     const responseData: any = { ...omitRegistrationFileBinaries(registrationInfo) };
@@ -5141,7 +5089,7 @@ export class CompanyProjectsService {
     };
 
     // Base URL for document URLs
-    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com';
+    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-04z5.onrender.com';
 
     // Tab visibility: after Assessor Visit (14) → show Certificate; after Certificate (15+) → show Recertification.
     // Don't return 15+ until certificate is uploaded (so Recertification stays hidden until certificate phase is done).
@@ -5531,10 +5479,7 @@ export class CompanyProjectsService {
       });
     }
 
-    const hadExistingProposal = Boolean(
-      String((project as any).proposal_document || '').trim(),
-    );
-
+    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-04z5.onrender.com';
     // Use Laravel-compatible path: uploads/company/{projectId}/
     const relativePath = `uploads/company/${projectId}/${file.filename}`;
 
@@ -6122,7 +6067,7 @@ export class CompanyProjectsService {
       });
     }
 
-    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com';
+    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-04z5.onrender.com';
     const relativePath = `uploads/resources/${projectId}/${file.filename}`;
     const fullUrl = `${baseUrl}/${relativePath}`;
 
@@ -6319,10 +6264,7 @@ export class CompanyProjectsService {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
 
-    const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(
-      /\/+$/,
-      '',
-    );
+    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-04z5.onrender.com';
     const response: any = { proposal_document: null, work_order: null };
     const projectAny = project as any;
     const workOrderAny = workOrder as any;
@@ -7048,15 +6990,7 @@ export class CompanyProjectsService {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
     const projectAny = project as any;
-    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com';
-    const coordCount = await this.countCoordinatorsForProject(companyId, projectId);
-    const sessionsRaw = Array.isArray(projectAny.launch_training_sessions)
-      ? projectAny.launch_training_sessions
-      : [];
-    const sessions = sessionsRaw.map((s: any, i: number) =>
-      this.formatLaunchTrainingSessionForResponse(s, i + 1, baseUrl),
-    );
-
+    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-04z5.onrender.com';
     const docPath = projectAny.launch_training_document;
     const legacyDocumentUrl = docPath
       ? docPath.startsWith('http')
@@ -7345,7 +7279,7 @@ export class CompanyProjectsService {
     const group = sectorDoc?.group_name ?? '';
     const sectorName = sectorDoc?.name ?? '';
 
-    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com';
+    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-04z5.onrender.com';
 
     const toUrl = (path: string | undefined): string | null => {
       if (!path) return null;
@@ -8570,7 +8504,7 @@ export class CompanyProjectsService {
       .sort({ createdAt: -1 })
       .lean();
 
-    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com';
+    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-04z5.onrender.com';
     const toUrl = (path: string | undefined) => {
       if (!path) return null;
       return path.startsWith('http') ? path : `${baseUrl}/${path.replace(/^\//, '')}`;
@@ -9321,7 +9255,7 @@ export class CompanyProjectsService {
       this.mailService.sendInvoiceRaisedEmail(company.email, company.name || 'Company', invoiceLabel, projectCode).catch((e) => console.error('Invoice email to company failed:', e));
     }
 
-    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com';
+    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-04z5.onrender.com';
     const documentUrl = relativePath.startsWith('http') ? relativePath : `${baseUrl}/${relativePath.replace(/^\//, '')}`;
 
     return {
@@ -9592,7 +9526,7 @@ export class CompanyProjectsService {
       })
       .sort({ createdAt: -1 });
 
-    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com';
+    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-04z5.onrender.com';
     // Use Laravel-compatible path: uploads/companyproject/{projectId}/
     const relativePath = `uploads/companyproject/${projectId}/${file.filename}`;
     const fullUrl = `${baseUrl}/${relativePath}`;
@@ -9714,7 +9648,7 @@ export class CompanyProjectsService {
       });
     }
 
-    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com';
+    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-04z5.onrender.com';
     const relativePath = `uploads/companyproject/launchAndTraining/${companyId}/${file.filename}`;
     const fullUrl = `${baseUrl}/${relativePath}`;
 
@@ -10494,7 +10428,7 @@ export class CompanyProjectsService {
     // Handle contract document upload if provided
     let contractDocumentPath = null;
     if (contractDocument) {
-      const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com';
+      const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-04z5.onrender.com';
       const relativePath = `uploads/facilitator-contracts/${projectId}/${contractDocument.filename}`;
       contractDocumentPath = `${baseUrl}/${relativePath}`;
       console.log('[Assign Facilitator] Contract document saved:', contractDocumentPath);

@@ -57,7 +57,7 @@ export class FacilitatorsService {
     const normalized = this.toPublicFilePath(path);
     if (!normalized) return '';
     if (normalized.startsWith('http://') || normalized.startsWith('https://')) return normalized;
-    const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(/\/+$/, '');
+    const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-04z5.onrender.com').replace(/\/+$/, '');
     return `${baseUrl}${normalized}`;
   }
 
