@@ -564,6 +564,8 @@ export class CompanyProjectsService {
     if (!companyId || toStep <= fromStep) return;
     const fromLabel = WORKFLOW_STEP_LABELS[fromStep] || `Step ${fromStep}`;
     const toLabel = WORKFLOW_STEP_LABELS[toStep] || `Step ${toStep}`;
+  const company = await this.companyModel.findById(companyId).lean();
+  const companyName = company?.name || 'Company';
     await this.notificationsService
       .create(
         `Workflow moved: ${fromLabel} -> ${toLabel}`,
@@ -577,8 +579,8 @@ export class CompanyProjectsService {
       );
     await this.notificationsService
       .create(
-        `Workflow moved: ${fromLabel} -> ${toLabel}`,
-        `Project ${projectId}: ${fromLabel} -> ${toLabel}. ${reason}.`,
+      `${companyName}: Workflow moved: ${fromLabel} -> ${toLabel}`,
+      `Company: ${companyName}. Project ${projectId}: ${fromLabel} -> ${toLabel}. ${reason}.`,
         'A',
         undefined,
         'update',
@@ -4769,10 +4771,12 @@ export class CompanyProjectsService {
         .catch((e) =>
           console.error('[Complete Milestone] Notification failed:', e?.message || e),
         );
+      const company = await this.companyModel.findById(project.company_id).lean();
+      const companyName = company?.name || 'Company';
       this.notificationsService
         .create(
-          `Step ${dto.milestone_flow} completed`,
-          `Project ${projectId}: ${dto.description || `Milestone ${dto.milestone_flow} has been completed.`}`,
+          `${companyName}: Step ${dto.milestone_flow} completed`,
+          `Company: ${companyName}. Project ${projectId}: ${dto.description || `Milestone ${dto.milestone_flow} has been completed.`}`,
           'A',
           undefined,
           'update',
@@ -6248,11 +6252,12 @@ export class CompanyProjectsService {
     // In-app + email when not accepted (status 2)
     if (updates.document_status === 2) {
       const company = await this.companyModel.findById(companyId).lean();
+      const companyName = company?.name || 'Company';
       const cf = await this.companyFacilitatorModel.findOne({ company_id: companyId, project_id: projectId }).populate('facilitator_id').lean();
       const docDetails = (doc as any).description || (doc as any).document_type || 'Assessment submittal';
       const remarks = updates.document_remarks || (doc as any).document_remarks || '';
-      const detail = `Document: ${docDetails}. ${remarks ? `Remarks: ${remarks}` : ''}`;
-      this.notificationsService.create('Assessment submittal not accepted (Admin alert)', detail, 'A').catch((e) =>
+      const detail = `Company: ${companyName}. Document: ${docDetails}. ${remarks ? `Remarks: ${remarks}` : ''}`;
+      this.notificationsService.create(`${companyName}: Assessment submittal not accepted (Admin alert)`, detail, 'A').catch((e) =>
         console.error('Checklist not-accepted notification to admin failed:', e),
       );
       this.notificationsService.create('Assessment submittal not accepted', detail, 'C', companyId).catch((e) => console.error('Checklist not-accepted notification failed:', e));
@@ -7213,10 +7218,11 @@ export class CompanyProjectsService {
         companyId,
       )
       .catch((err) => console.error('Launch & training notification failed:', err));
+    const companyName = company?.name || 'Company';
     this.notificationsService
       .create(
-        'Launch & Training document uploaded (Admin alert)',
-        `Project ${projectId}: session ${existing.length}/${CompanyProjectsService.MAX_LAUNCH_TRAINING_SESSIONS} uploaded.`,
+        `${companyName}: Launch & Training document uploaded (Admin alert)`,
+        `Company: ${companyName}. Project ${projectId}: session ${existing.length}/${CompanyProjectsService.MAX_LAUNCH_TRAINING_SESSIONS} uploaded.`,
         'A',
       )
       .catch((err) => console.error('Launch & training admin notification failed:', err));
@@ -9382,10 +9388,12 @@ export class CompanyProjectsService {
     invoice.payment_status = 1; // Mark as paid/submitted
     invoice.approval_status = 0; // Pending approval when submitted
     await invoice.save();
+    const company = await this.companyModel.findById(companyId).lean();
+    const companyName = company?.name || 'Company';
     this.notificationsService
       .create(
-        'Payment submitted by company',
-        `Project ${projectId}: ${invoice.payment_for === PAYMENT_FOR_PROFORMA ? 'Proforma' : 'Tax'} invoice payment submitted and pending admin review.`,
+        `${companyName}: Payment submitted by company`,
+        `Company: ${companyName}. Project ${projectId}: ${invoice.payment_for === PAYMENT_FOR_PROFORMA ? 'Proforma' : 'Tax'} invoice payment submitted and pending admin review.`,
         'A',
       )
       .catch((e) => console.error('Payment submission notification to admin failed:', e));
@@ -9528,10 +9536,10 @@ export class CompanyProjectsService {
         ? `Proforma Invoice ${status}`
         : `GreenCo Team has ${status} the payment from company`;
       const content = isProforma
-        ? `Proforma Invoice has been ${status.toLowerCase()} for company ${companyName}. ${approvalStatus === 1 ? 'Next: Site Visit document upload, then Primary Data Form.' : ''}`
-        : `GreenCo Team has ${status} the payment from company ${companyName}`;
+        ? `Company: ${companyName}. Proforma Invoice has been ${status.toLowerCase()} for this company. ${approvalStatus === 1 ? 'Next: Site Visit document upload, then Primary Data Form.' : ''}`
+        : `Company: ${companyName}. GreenCo Team has ${status} the payment from this company.`;
       this.notificationsService
-        .create(`${isProforma ? 'Proforma' : 'Invoice'} ${status} (Admin alert)`, content, 'A')
+        .create(`${companyName}: ${isProforma ? 'Proforma' : 'Invoice'} ${status} (Admin alert)`, content, 'A')
         .catch((e) => console.error('Payment status notification to admin failed:', e));
       this.notificationsService
         .create(title, content, 'C', companyId)
@@ -9973,10 +9981,12 @@ export class CompanyProjectsService {
     // Notify the company that owns the project (user_id must be project's company_id, notify_type 'C')
     const projectCompanyId = (project.company_id || workOrder.company_id)?.toString?.() || companyId;
     if (dto.wo_status === 1 && projectCompanyId) {
+      const company = await this.companyModel.findById(projectCompanyId).lean();
+      const companyName = company?.name || 'Company';
       this.notificationsService
         .create(
-          'Work order approved (Admin alert)',
-          `Project ${projectId}: Work order approved by CII.`,
+          `${companyName}: Work order approved (Admin alert)`,
+          `Company: ${companyName}. Project ${projectId}: Work order approved by CII.`,
           'A',
         )
         .catch((e) =>
@@ -10008,10 +10018,12 @@ export class CompanyProjectsService {
           );
       }
     } else if (dto.wo_status === 2 && projectCompanyId) {
+      const company = await this.companyModel.findById(projectCompanyId).lean();
+      const companyName = company?.name || 'Company';
       this.notificationsService
         .create(
-          'Work order rejected (Admin alert)',
-          `Project ${projectId}: Work order rejected by CII.${dto.wo_remarks ? ` Remarks: ${dto.wo_remarks}` : ''}`,
+          `${companyName}: Work order rejected (Admin alert)`,
+          `Company: ${companyName}. Project ${projectId}: Work order rejected by CII.${dto.wo_remarks ? ` Remarks: ${dto.wo_remarks}` : ''}`,
           'A',
         )
         .catch((e) =>
