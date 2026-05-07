@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { SectorManagementController } from './sector-management.controller';
+import { SectorPublicController } from './sector-public.controller';
 import { SectorManagementService } from './sector-management.service';
 import { Sector, SectorSchema } from '../schemas/sector.schema';
 import { GroupManagement, GroupManagementSchema } from '../schemas/group-management.schema';
@@ -16,7 +17,7 @@ import { CompanyWorkOrder, CompanyWorkOrderSchema } from '../schemas/company-wor
       { name: CompanyWorkOrder.name, schema: CompanyWorkOrderSchema },
     ]),
   ],
-  controllers: [SectorManagementController],
+  controllers: [SectorManagementController, SectorPublicController],
   providers: [SectorManagementService],
 })
 export class SectorManagementModule {}
