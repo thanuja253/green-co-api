@@ -175,40 +175,21 @@ export class CompanyProjectsController {
   }
 
   @Get(':projectId/feedback-document')
-  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   async getFeedbackDocument(
-    @Request() req,
     @Param('projectId') projectId: string,
     @Res() res: Response,
   ) {
-    const project = await this.companyProjectsService.getProject(
-      req.user.userId,
+    const file = await this.companyProjectsService.getFeedbackDocumentDownloadByProjectId(
       projectId,
     );
-
-    if (!project.feedback_document_url) {
-      throw new NotFoundException({
-        status: 'error',
-        message: 'Feedback document not found',
-      });
-    }
-
-    const filePath = join(process.cwd(), project.feedback_document_url);
-
-    if (!fs.existsSync(filePath)) {
-      throw new NotFoundException({
-        status: 'error',
-        message: 'Feedback file not found on server',
-      });
-    }
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader(
       'Content-Disposition',
-      `inline; filename="${project.feedback_document_filename || 'feedback.pdf'}"`,
+      `inline; filename="${file.filename}"`,
     );
 
-    return res.sendFile(filePath);
+    return res.sendFile(file.absolutePath);
   }
 
   @Get(':projectId/certificate')

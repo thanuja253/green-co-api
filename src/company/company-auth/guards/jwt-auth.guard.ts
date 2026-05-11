@@ -15,6 +15,14 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
       return true;
     }
 
+    const isFeedbackDocumentRead =
+      method === 'GET' &&
+      /\/api\/company\/projects\/[^/]+\/feedback-document$/.test(path);
+
+    if (isFeedbackDocumentRead) {
+      return true;
+    }
+
     return super.canActivate(context);
   }
 }

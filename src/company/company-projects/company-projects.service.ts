@@ -2403,6 +2403,73 @@ export class CompanyProjectsService {
     };
   }
 
+  /**
+   * Admin/public compatibility helper:
+   * get feedback document file path by project id only.
+   */
+  async getFeedbackDocumentDownloadByProjectId(projectId: string): Promise<{
+    absolutePath: string;
+    filename: string;
+  }> {
+    const project = await this.projectModel.findById(projectId).lean();
+    if (!project) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Project not found',
+      });
+    }
+
+    const relativePath = String((project as any).feedback_document_url || '').trim();
+    if (relativePath) {
+      const absolutePath = join(process.cwd(), relativePath);
+      if (fs.existsSync(absolutePath)) {
+        return {
+          absolutePath,
+          filename: String((project as any).feedback_document_filename || 'feedback.pdf'),
+        };
+      }
+    }
+
+    // Legacy fallback: in reverted flows, file may exist on disk but DB path can be blank/stale.
+    const legacyDirs = [
+      join(process.cwd(), 'uploads', 'company_feedback', projectId),
+      join(process.cwd(), 'uploads', 'company', projectId),
+    ];
+    let latestPdfPath: string | null = null;
+    let latestMtime = 0;
+
+    for (const dir of legacyDirs) {
+      if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) continue;
+      const files = fs.readdirSync(dir);
+      for (const name of files) {
+        if (!name.toLowerCase().endsWith('.pdf')) continue;
+        const fullPath = join(dir, name);
+        const stat = fs.statSync(fullPath);
+        if (!stat.isFile()) continue;
+        const isLikelyFeedback =
+          dir.includes('company_feedback') || name.toLowerCase().includes('feedback');
+        if (!isLikelyFeedback) continue;
+        const mtime = stat.mtimeMs || 0;
+        if (mtime >= latestMtime) {
+          latestMtime = mtime;
+          latestPdfPath = fullPath;
+        }
+      }
+    }
+
+    if (latestPdfPath) {
+      return {
+        absolutePath: latestPdfPath,
+        filename: latestPdfPath.split('/').pop() || 'feedback.pdf',
+      };
+    }
+
+    throw new NotFoundException({
+      status: 'error',
+      message: 'Feedback document not found',
+    });
+  }
+
   async getScoreBandPdfPath(companyId: string, projectId: string): Promise<string> {
     const project = await this.projectModel.findOne({
       _id: projectId,
@@ -4771,8 +4838,6 @@ export class CompanyProjectsService {
         .catch((e) =>
           console.error('[Complete Milestone] Notification failed:', e?.message || e),
         );
-      this.notificationsService
-        .create(
       const company = await this.companyModel.findById(project.company_id).lean();
       const companyName = company?.name || 'Company';
       this.notificationsService
