@@ -53,6 +53,15 @@ export class CompanyProject {
   @Prop()
   feedback_upload_date?: Date;
 
+  @Prop({ default: '' })
+  coordinator_remarks?: string;
+
+  @Prop({ type: [Date], default: [] })
+  coordinator_target_dates?: Date[];
+
+  @Prop({ default: false })
+  coordinator_target_dates_locked?: boolean;
+
   // Score band metadata
   @Prop({ default: 0 }) // 0 = not available, 1 = available
   score_band_status: number;

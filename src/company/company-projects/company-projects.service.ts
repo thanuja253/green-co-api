@@ -11459,6 +11459,64 @@ export class CompanyProjectsService {
   }
 
   /**
+   * Shared primary-data confirmation + editability for all section APIs (GI, EE, full form).
+   * Includes flat keys for legacy admin UIs that do not read nested `primary_data_confirmation`.
+   */
+  private buildPrimaryDataConfirmationFields(rows: any[]): Record<string, any> {
+    const list = Array.isArray(rows) ? rows : [];
+    const finalSubmitCount = list.filter((r) => Number(r?.final_submit) === 1).length;
+    const confirmationRemarks =
+      [...list]
+        .sort((a, b) => {
+          const aTs = new Date(a?.updatedAt ?? a?.createdAt ?? 0).getTime();
+          const bTs = new Date(b?.updatedAt ?? b?.createdAt ?? 0).getTime();
+          return bTs - aTs;
+        })
+        .map((r) => String(r?.document_remarks ?? '').trim())
+        .find((s) => s.length > 0) ?? '';
+    const hasAccepted = list.some(
+      (r) => Number(r?.document_status) === PRIMARY_DATA_DOC_STATUS.ACCEPTED,
+    );
+    const hasRejected = list.some(
+      (r) => Number(r?.document_status) === PRIMARY_DATA_DOC_STATUS.NOT_ACCEPTED,
+    );
+    const hasUnderReview = list.some(
+      (r) => Number(r?.document_status) === PRIMARY_DATA_DOC_STATUS.UNDER_REVIEW,
+    );
+    const confirmationStatusCode = hasAccepted
+      ? PRIMARY_DATA_DOC_STATUS.ACCEPTED
+      : hasRejected
+        ? PRIMARY_DATA_DOC_STATUS.NOT_ACCEPTED
+        : hasUnderReview
+          ? PRIMARY_DATA_DOC_STATUS.UNDER_REVIEW
+          : PRIMARY_DATA_DOC_STATUS.PENDING;
+    const confirmationStatusLabel =
+      this.getPrimaryDataDocStatusLabels()[confirmationStatusCode] ?? 'Pending';
+
+    return {
+      primary_data_confirmation: {
+        approval_status_code: confirmationStatusCode,
+        approval_status_label: confirmationStatusLabel,
+        remarks: confirmationRemarks,
+      },
+      primary_data_editability: {
+        provided: true,
+        can_edit: finalSubmitCount === 0,
+        final_submit_docs: finalSubmitCount,
+      },
+      /** @deprecated Flat keys for older admin clients (e.g. companies primary-data tabs). */
+      approval_status: confirmationStatusCode,
+      approval_status_label: confirmationStatusLabel,
+      remarks: confirmationRemarks,
+      primary_data_remarks: confirmationRemarks,
+      confirmation_remarks: confirmationRemarks,
+      editability_status_provided: true,
+      can_edit_primary_data: finalSubmitCount === 0,
+      is_primary_data_editable: finalSubmitCount === 0,
+    };
+  }
+
+  /**
    * Get Primary Data Form (company): master checklist + saved data grouped by info_type.
    * Sections and info_type keys are derived dynamically from master_primary_data_checklist.
    */
@@ -11497,6 +11555,7 @@ export class CompanyProjectsService {
 
     const finalSubmitCount = (savedRows as any[]).filter((r) => r.final_submit === 1).length;
     const approvalCount = (savedRows as any[]).filter((r) => r.document_status === PRIMARY_DATA_DOC_STATUS.ACCEPTED).length;
+    const confirmationFields = this.buildPrimaryDataConfirmationFields(savedRows as any[]);
 
     // Merged rows: for each master row, attach saved values so Reference Unit (and FY) come from saved when present.
     // primary_data_rows is keyed by info_type (gi, ee, wc, ...) so the UI can use primary_data_rows[activeSection].
@@ -11522,6 +11581,7 @@ export class CompanyProjectsService {
         additional_details: saved?.additional_details ?? master.additional_details,
         document: saved?.document,
         document_status: saved?.document_status,
+        document_remarks: saved?.document_remarks ?? '',
         final_submit: saved?.final_submit,
       };
     });
@@ -11543,6 +11603,7 @@ export class CompanyProjectsService {
         primary_data_rows,
         final_submit_docs: finalSubmitCount,
         primary_data_approval_count: approvalCount,
+        ...confirmationFields,
         document_status_labels: this.getPrimaryDataDocStatusLabels(),
         sections,
       },
@@ -11592,6 +11653,12 @@ export class CompanyProjectsService {
     const topLevelEquivalent =
       (giRows as any[]).find((r: any) => String(r?.reference_unit ?? '').trim() !== '')?.reference_unit ?? '';
 
+    const allPrimaryForConfirmation = await this.primaryDataFormModel
+      .find({ company_id: cId, project_id: pId })
+      .select('document_status document_remarks final_submit updatedAt createdAt')
+      .lean();
+    const confirmationFields = this.buildPrimaryDataConfirmationFields(allPrimaryForConfirmation as any[]);
+
     const legacyGi: Record<string, any> = {};
     const pushField = (obj: Record<string, any>, field: string, value: any) => {
       if (obj[field] === undefined) {
@@ -11632,6 +11699,19 @@ export class CompanyProjectsService {
         equivalent_product: topLevelEquivalent,
         gi_rows: giRows,
         gi: legacyGi,
+        ...confirmationFields,
+        // Legacy frontend compatibility keys used by old CII/facilitator screens.
+        submitted_remarks: confirmationFields?.confirmation_remarks ?? '',
+        approval_one:
+          Number(confirmationFields?.approval_status ?? 0) === PRIMARY_DATA_DOC_STATUS.ACCEPTED
+            ? 'accepted'
+            : Number(confirmationFields?.approval_status ?? 0) ===
+                PRIMARY_DATA_DOC_STATUS.NOT_ACCEPTED
+              ? 'not accepted'
+              : Number(confirmationFields?.approval_status ?? 0) ===
+                  PRIMARY_DATA_DOC_STATUS.UNDER_REVIEW
+                ? 'under review'
+                : 'pending',
       },
     };
   }
@@ -11698,6 +11778,12 @@ export class CompanyProjectsService {
       };
     }
 
+    const allPrimaryForConfirmation = await this.primaryDataFormModel
+      .find({ company_id: cId, project_id: pId })
+      .select('document_status document_remarks final_submit updatedAt createdAt')
+      .lean();
+    const confirmationFields = this.buildPrimaryDataConfirmationFields(allPrimaryForConfirmation as any[]);
+
     return {
       status: 'success',
       message: 'EE data loaded',
@@ -11705,6 +11791,19 @@ export class CompanyProjectsService {
         form_type: 'ee',
         ee_rows: eeRows,
         ee,
+        ...confirmationFields,
+        // Legacy frontend compatibility keys used by old CII/facilitator screens.
+        submitted_remarks: confirmationFields?.confirmation_remarks ?? '',
+        approval_one:
+          Number(confirmationFields?.approval_status ?? 0) === PRIMARY_DATA_DOC_STATUS.ACCEPTED
+            ? 'accepted'
+            : Number(confirmationFields?.approval_status ?? 0) ===
+                PRIMARY_DATA_DOC_STATUS.NOT_ACCEPTED
+              ? 'not accepted'
+              : Number(confirmationFields?.approval_status ?? 0) ===
+                  PRIMARY_DATA_DOC_STATUS.UNDER_REVIEW
+                ? 'under review'
+                : 'pending',
       },
     };
   }
@@ -12049,17 +12148,58 @@ export class CompanyProjectsService {
 
     const companyObjectId = new Types.ObjectId(String(resolved.company_id));
     const projectObjectId = new Types.ObjectId(String(resolved._id));
+    const touchedObjectIds = touchedDataIds.map((id) => new Types.ObjectId(id));
+    const existingApprovalByDataId = new Map<
+      string,
+      { document_status: number; document_remarks: string; final_submit: number }
+    >();
+    if (touchedObjectIds.length) {
+      const existingRows = await this.primaryDataFormModel
+        .find({
+          company_id: companyObjectId,
+          project_id: projectObjectId,
+          info_type: 'gi',
+          data_id: { $in: touchedObjectIds },
+        })
+        .select('data_id document_status document_remarks final_submit')
+        .lean();
+
+      for (const row of existingRows as any[]) {
+        const key = String(row?.data_id ?? '');
+        if (!key) continue;
+        const current = existingApprovalByDataId.get(key);
+        const candidate = {
+          document_status: Number(row?.document_status ?? PRIMARY_DATA_DOC_STATUS.PENDING),
+          document_remarks: String(row?.document_remarks ?? ''),
+          final_submit: Number(row?.final_submit ?? 0),
+        };
+        // Prefer non-pending status / non-empty remarks so resave doesn't wipe review decisions.
+        if (
+          !current ||
+          (current.document_status === PRIMARY_DATA_DOC_STATUS.PENDING &&
+            candidate.document_status !== PRIMARY_DATA_DOC_STATUS.PENDING) ||
+          (!current.document_remarks && candidate.document_remarks)
+        ) {
+          existingApprovalByDataId.set(key, candidate);
+        }
+      }
+    }
     if (touchedDataIds.length) {
       await this.primaryDataFormModel.deleteMany({
         company_id: companyObjectId,
         project_id: projectObjectId,
         info_type: 'gi',
-        data_id: { $in: touchedDataIds.map((id) => new Types.ObjectId(id)) },
+        data_id: { $in: touchedObjectIds },
       });
     }
     if (doc.length) {
       await this.primaryDataFormModel.insertMany(
         doc.map((item) => ({
+          ...(existingApprovalByDataId.get(String(item.data_id)) ?? {
+            document_status: PRIMARY_DATA_DOC_STATUS.PENDING,
+            document_remarks: null,
+            final_submit: 0,
+          }),
           company_id: companyObjectId,
           project_id: projectObjectId,
           data_id: new Types.ObjectId(String(item.data_id)),
@@ -12073,8 +12213,6 @@ export class CompanyProjectsService {
           fy4: item.fy4,
           fy5: item.fy5 ?? 0,
           extrapolated: item.extrapolated,
-          document_status: PRIMARY_DATA_DOC_STATUS.PENDING,
-          final_submit: 0,
         })),
       );
     }
@@ -12090,8 +12228,66 @@ export class CompanyProjectsService {
 
   async updatePrimaryDataGiLegacyByProjectId(
     projectId: string,
-    body: { form_type?: string; gi?: Record<string, any> },
+    body: {
+      form_type?: string;
+      gi?: Record<string, any>;
+      info_type?: string;
+      status?: string | number;
+      remarks?: string;
+      remark?: string;
+    },
   ) {
+    const infoType = String(body?.info_type ?? '').trim().toLowerCase();
+    const statusRaw = body?.status;
+    if (infoType && statusRaw !== undefined && statusRaw !== null && String(statusRaw).trim() !== '') {
+      const resolved = await this.resolveProjectForAdmin(projectId);
+      if (!resolved?.company_id) {
+        throw new NotFoundException({ status: 'error', message: 'Project not found' });
+      }
+      const companyId = String(resolved.company_id);
+      const normalized = String(statusRaw).trim().toLowerCase();
+      const statusMap: Record<string, number> = {
+        accepted: PRIMARY_DATA_DOC_STATUS.ACCEPTED,
+        approved: PRIMARY_DATA_DOC_STATUS.ACCEPTED,
+        'not accepted': PRIMARY_DATA_DOC_STATUS.NOT_ACCEPTED,
+        rejected: PRIMARY_DATA_DOC_STATUS.NOT_ACCEPTED,
+        'under review': PRIMARY_DATA_DOC_STATUS.UNDER_REVIEW,
+        pending: PRIMARY_DATA_DOC_STATUS.PENDING,
+      };
+      const parsedFromMap = statusMap[normalized];
+      const parsedNumeric = Number(statusRaw);
+      const parsedStatusCode =
+        parsedFromMap !== undefined
+          ? parsedFromMap
+          : Number.isFinite(parsedNumeric)
+            ? parsedNumeric
+            : NaN;
+      if (
+        parsedStatusCode !== PRIMARY_DATA_DOC_STATUS.PENDING &&
+        parsedStatusCode !== PRIMARY_DATA_DOC_STATUS.ACCEPTED &&
+        parsedStatusCode !== PRIMARY_DATA_DOC_STATUS.NOT_ACCEPTED &&
+        parsedStatusCode !== PRIMARY_DATA_DOC_STATUS.UNDER_REVIEW
+      ) {
+        throw new BadRequestException({
+          status: 'error',
+          message: 'status must be accepted, not accepted, under review, pending, or 0/1/2/3',
+        });
+      }
+      const statusCode = parsedStatusCode as 0 | 1 | 2 | 3;
+
+      const remark = String(body?.remarks ?? body?.remark ?? '').trim();
+      const result = await this.primaryDataFormApproval(
+        companyId,
+        projectId,
+        infoType,
+        statusCode,
+        remark,
+      );
+      return {
+        ...result,
+        message: 'Primary Data approval updated successfully',
+      };
+    }
     return this.savePrimaryDataGiLegacyByProjectId(projectId, body);
   }
 
@@ -12409,10 +12605,39 @@ export class CompanyProjectsService {
         fy4: this.toFiniteNumberOrZero(row.fy4),
         extrapolated: this.toFiniteNumberOrZero(row.exp),
         fy5: this.toFiniteNumberOrZero(row.exp),
-        document_status: PRIMARY_DATA_DOC_STATUS.PENDING,
-        final_submit: 0,
       };
     });
+
+    const existingApprovalByDataId = new Map<
+      string,
+      { document_status: number; document_remarks: string; final_submit: number }
+    >();
+    const existingRows = await this.primaryDataFormModel
+      .find({
+        company_id: companyObjectId,
+        project_id: projectObjectId,
+        info_type: 'ee',
+      })
+      .select('data_id document_status document_remarks final_submit')
+      .lean();
+    for (const row of existingRows as any[]) {
+      const key = String(row?.data_id ?? '');
+      if (!key) continue;
+      const current = existingApprovalByDataId.get(key);
+      const candidate = {
+        document_status: Number(row?.document_status ?? PRIMARY_DATA_DOC_STATUS.PENDING),
+        document_remarks: String(row?.document_remarks ?? ''),
+        final_submit: Number(row?.final_submit ?? 0),
+      };
+      if (
+        !current ||
+        (current.document_status === PRIMARY_DATA_DOC_STATUS.PENDING &&
+          candidate.document_status !== PRIMARY_DATA_DOC_STATUS.PENDING) ||
+        (!current.document_remarks && candidate.document_remarks)
+      ) {
+        existingApprovalByDataId.set(key, candidate);
+      }
+    }
 
     await this.primaryDataFormModel.deleteMany({
       company_id: companyObjectId,
@@ -12420,7 +12645,16 @@ export class CompanyProjectsService {
       info_type: 'ee',
     });
     if (docs.length) {
-      await this.primaryDataFormModel.insertMany(docs);
+      await this.primaryDataFormModel.insertMany(
+        docs.map((item) => ({
+          ...(existingApprovalByDataId.get(String(item.data_id)) ?? {
+            document_status: PRIMARY_DATA_DOC_STATUS.PENDING,
+            document_remarks: null,
+            final_submit: 0,
+          }),
+          ...item,
+        })),
+      );
     }
 
     return {
@@ -12656,6 +12890,7 @@ export class CompanyProjectsService {
     }
 
     const approvalCount = (savedRows as any[]).filter((r) => r.document_status === PRIMARY_DATA_DOC_STATUS.ACCEPTED).length;
+    const confirmationFields = this.buildPrimaryDataConfirmationFields(savedRows as any[]);
 
     return {
       status: 'success',
@@ -12666,6 +12901,7 @@ export class CompanyProjectsService {
         master_primary_data: masterList,
         saved_by_info_type: byInfoType,
         primary_data_approval_count: approvalCount,
+        ...confirmationFields,
         document_status_labels: this.getPrimaryDataDocStatusLabels(),
         sections,
       },
@@ -12691,10 +12927,40 @@ export class CompanyProjectsService {
     const mongoose = require('mongoose');
     const pId = new mongoose.Types.ObjectId(projectId);
 
-    await this.primaryDataFormModel.updateMany(
+    const updateResult = await this.primaryDataFormModel.updateMany(
       { company_id: companyId, project_id: pId, info_type: formType },
       { $set: { document_status: status, document_remarks: remark || null } },
     );
+    if (Number(updateResult?.matchedCount ?? 0) === 0) {
+      const masterRows = await this.masterPrimaryDataChecklistModel
+        .find({ info_type: formType, is_active: 1 })
+        .select('_id info_type parameter reference_unit')
+        .lean();
+      for (const m of masterRows as any[]) {
+        const dataId = m?._id ? new Types.ObjectId(String(m._id)) : null;
+        if (!dataId) continue;
+        await this.primaryDataFormModel.updateOne(
+          {
+            company_id: companyId,
+            project_id: pId,
+            data_id: dataId,
+          },
+          {
+            $setOnInsert: {
+              info_type: String(m?.info_type ?? formType),
+              parameter: String(m?.parameter ?? ''),
+              reference_unit: String(m?.reference_unit ?? ''),
+              final_submit: 1,
+            },
+            $set: {
+              document_status: status,
+              document_remarks: remark || null,
+            },
+          },
+          { upsert: true },
+        );
+      }
+    }
 
     const company = await this.companyModel.findById(companyId).lean();
     const cf = await this.companyFacilitatorModel.findOne({ company_id: companyId, project_id: projectId }).populate('facilitator_id').lean();
@@ -13015,6 +13281,492 @@ export class CompanyProjectsService {
       await this.projectModel.updateOne({ _id: proj._id }, { $set: { sustenance_mail_sent: 1 } });
     }
     return { sent, message: `Sustenance reminders sent: ${sent}` };
+  }
+
+  private deriveCoordinatorPerformanceStatus(flags: {
+    feedback_report_uploaded: boolean;
+    all_parameter_scoring_completed: boolean;
+    assessor_selected: boolean;
+    assessment_submittals_uploaded: boolean;
+    primary_data_form_uploaded: boolean;
+    primary_data_form_approved: boolean;
+    site_visit_report_uploaded: boolean;
+  }): string {
+    if (flags.feedback_report_uploaded) return 'completed';
+    if (flags.all_parameter_scoring_completed) return 'rated';
+    if (flags.assessor_selected && flags.assessment_submittals_uploaded) return 'scoring_pending';
+    if (flags.assessor_selected) return 'assessment_pending';
+    if (flags.primary_data_form_uploaded && flags.primary_data_form_approved) return 'pre_assessment_pending';
+    if (flags.site_visit_report_uploaded) return 'launch_pending';
+    return 'launch_pending';
+  }
+
+  private toDateOnly(input: string | undefined): Date | null {
+    const value = String(input || '').trim();
+    if (!value) return null;
+    const parsed = new Date(`${value}T00:00:00.000Z`);
+    if (Number.isNaN(parsed.getTime())) return null;
+    return parsed;
+  }
+
+  async getCoordinatorPerformanceDashboard(
+    query: Record<string, any>,
+    options: { role: 'admin' | 'coordinator'; tokenCoordinatorId?: string },
+  ): Promise<any> {
+    const coordinatorIdFilter = String(
+      query?.coordinator_id || query?.coordinatorId || options.tokenCoordinatorId || '',
+    ).trim();
+    const yearFilter = String(query?.year || '').trim();
+    const statusFilter = String(query?.status || '').trim().toLowerCase();
+    const sectorFilter = String(query?.sector || '').trim().toLowerCase();
+    const fromDate = this.toDateOnly(query?.from_date);
+    const toDateBase = this.toDateOnly(query?.to_date);
+    const toDate = toDateBase ? new Date(toDateBase.getTime() + 24 * 60 * 60 * 1000 - 1) : null;
+    const page = Math.max(Number.parseInt(String(query?.page || '1'), 10) || 1, 1);
+    const limit = Math.min(Math.max(Number.parseInt(String(query?.limit || '20'), 10) || 20, 1), 1000);
+    const skip = (page - 1) * limit;
+
+    const coordinatorWhere: any = {};
+    if (coordinatorIdFilter && Types.ObjectId.isValid(coordinatorIdFilter)) {
+      coordinatorWhere.coordinator_id = new Types.ObjectId(coordinatorIdFilter);
+    }
+
+    const assignments = await this.companyCoordinatorModel
+      .find(coordinatorWhere)
+      .select('project_id coordinator_id createdAt')
+      .lean();
+
+    if (!assignments.length) {
+      return {
+        status: 'success',
+        message: 'Coordinator performance dashboard fetched successfully',
+        data: {
+          summary: {
+            total_projects: 0,
+            rated_companies: 0,
+            completed_projects: 0,
+            payment_received_proforma: 0,
+            carryover_projects: 0,
+            progress_percent: 0,
+            ongoing_counts: {
+              launch_pending: 0,
+              pre_assessment_pending: 0,
+              assessment_pending: 0,
+              scoring_pending: 0,
+            },
+            total_proforma_payment_received: 0,
+          },
+          coordinators: [],
+          projects: [],
+          pagination: { page, limit, total: 0, total_pages: 0 },
+        },
+      };
+    }
+
+    const projectIds = [...new Set(assignments.map((a: any) => String(a.project_id)).filter(Boolean))];
+    const coordinatorIds = [...new Set(assignments.map((a: any) => String(a.coordinator_id)).filter(Boolean))];
+
+    const [projects, coordinators, primaryDataAgg, assessorAssignments, proformaAgg, workOrders] = await Promise.all([
+      this.projectModel
+        .find({ _id: { $in: projectIds.map((id) => new Types.ObjectId(id)) } })
+        .select(
+          '_id company_id registration_info next_activities_id launch_training_document launch_training_report_date launch_training_sessions score_band_status total_score percentage_score max_points feedback_document_url coordinator_remarks coordinator_target_dates coordinator_target_dates_locked createdAt updatedAt',
+        )
+        .lean(),
+      this.coordinatorModel
+        .find({ _id: { $in: coordinatorIds.map((id) => new Types.ObjectId(id)) } })
+        .select('_id name email mobile')
+        .lean(),
+      this.primaryDataFormModel.aggregate([
+        { $match: { project_id: { $in: projectIds.map((id) => new Types.ObjectId(id)) } } },
+        {
+          $group: {
+            _id: '$project_id',
+            total: { $sum: 1 },
+            approved: {
+              $sum: {
+                $cond: [{ $eq: ['$document_status', PRIMARY_DATA_DOC_STATUS.ACCEPTED] }, 1, 0],
+              },
+            },
+          },
+        },
+      ]),
+      this.companyAssessorModel
+        .find({ project_id: { $in: projectIds.map((id) => new Types.ObjectId(id)) } })
+        .select('project_id')
+        .lean(),
+      this.companyInvoiceModel.aggregate([
+        {
+          $match: {
+            project_id: { $in: projectIds.map((id) => new Types.ObjectId(id)) },
+            payment_status: 1,
+            $or: [{ payment_for: PAYMENT_FOR_PROFORMA }, { invoice_type: 'proforma' }],
+          },
+        },
+        {
+          $group: {
+            _id: '$project_id',
+            total: {
+              $sum: {
+                $ifNull: ['$total_amount', { $ifNull: ['$payable_amount', 0] }],
+              },
+            },
+          },
+        },
+      ]),
+      this.companyWorkOrderModel
+        .find({ project_id: { $in: projectIds.map((id) => new Types.ObjectId(id)) } })
+        .select('project_id wo_status wo_acceptance_date wo_doc_status_updated_at')
+        .lean(),
+    ]);
+
+    const companyIds = [...new Set(projects.map((p: any) => String(p.company_id)).filter(Boolean))];
+    const companies = await this.companyModel
+      .find({ _id: { $in: companyIds.map((id) => new Types.ObjectId(id)) } })
+      .select('_id name')
+      .lean();
+
+    const checklistProjectIds = await this.mongoConnection
+      .collection('assessment_checklist_documents')
+      .distinct('project_id', {
+        project_id: { $in: projectIds },
+        is_active: { $ne: false },
+      });
+
+    const assignmentByProject = new Map<string, any>();
+    for (const row of assignments as any[]) {
+      assignmentByProject.set(String(row.project_id), row);
+    }
+    const coordinatorMap = new Map<string, any>(
+      (coordinators as any[]).map((c: any) => [String(c._id), c]),
+    );
+    const companyMap = new Map<string, any>((companies as any[]).map((c: any) => [String(c._id), c]));
+    const primaryDataMap = new Map<string, any>(
+      (primaryDataAgg as any[]).map((r: any) => [String(r._id), r]),
+    );
+    const assessorSet = new Set((assessorAssignments as any[]).map((r: any) => String(r.project_id)));
+    const checklistSet = new Set((checklistProjectIds as string[]).map((id) => String(id)));
+    const proformaMap = new Map<string, number>(
+      (proformaAgg as any[]).map((r: any) => [String(r._id), Number(r.total || 0)]),
+    );
+    const workOrderMap = new Map<string, any>();
+    for (const wo of workOrders as any[]) {
+      const key = String(wo.project_id);
+      const existing = workOrderMap.get(key);
+      if (!existing) {
+        workOrderMap.set(key, wo);
+        continue;
+      }
+      const existingTs = new Date(existing.wo_acceptance_date || existing.wo_doc_status_updated_at || 0).getTime();
+      const currentTs = new Date(wo.wo_acceptance_date || wo.wo_doc_status_updated_at || 0).getTime();
+      if (currentTs >= existingTs) workOrderMap.set(key, wo);
+    }
+
+    const allRows = (projects as any[])
+      .map((project: any) => {
+        const projectId = String(project._id);
+        const assignment = assignmentByProject.get(projectId);
+        const coordinator = assignment
+          ? coordinatorMap.get(String(assignment.coordinator_id))
+          : null;
+        const company = companyMap.get(String(project.company_id));
+        const workOrder = workOrderMap.get(projectId);
+        const primary = primaryDataMap.get(projectId) || { total: 0, approved: 0 };
+        const flags = {
+          site_visit_report_uploaded:
+            Boolean(project.launch_training_document) ||
+            Boolean(project.launch_training_report_date) ||
+            (Array.isArray(project.launch_training_sessions) &&
+              project.launch_training_sessions.length > 0),
+          primary_data_form_uploaded: Number(primary.total || 0) > 0,
+          primary_data_form_approved:
+            Number(primary.total || 0) > 0 &&
+            Number(primary.approved || 0) >= Number(primary.total || 0),
+          assessment_submittals_uploaded: checklistSet.has(projectId),
+          assessor_selected: assessorSet.has(projectId),
+          all_parameter_scoring_completed:
+            Number(project.score_band_status || 0) === 1 || Number(project.total_score || 0) > 0,
+          feedback_report_uploaded: Boolean(project.feedback_document_url),
+        };
+        const status = this.deriveCoordinatorPerformanceStatus(flags);
+        const sectorValue = String(
+          project?.registration_info?.sector ||
+            project?.registration_info?.sector_name ||
+            project?.registration_info?.sector_id ||
+            '',
+        ).trim();
+        const nextStep = Number(project.next_activities_id || 0) > 0
+          ? `step_${Number(project.next_activities_id)}`
+          : '';
+        const yearOfRegistration = new Date(project.createdAt).getUTCFullYear();
+        const assignmentDate = assignment?.createdAt ? new Date(assignment.createdAt) : null;
+        const poApprovedDateRaw = workOrder?.wo_acceptance_date || workOrder?.wo_doc_status_updated_at || null;
+        const poApprovedDate = poApprovedDateRaw ? new Date(poApprovedDateRaw) : null;
+        const leadTimeMonths =
+          assignmentDate && poApprovedDate
+            ? Number(
+                (
+                  (poApprovedDate.getTime() - assignmentDate.getTime()) /
+                  (1000 * 60 * 60 * 24 * 30)
+                ).toFixed(2),
+              )
+            : null;
+        const certificationLevel =
+          Number(project.percentage_score || 0) > 0
+            ? this.calculateTentativeLevel(Number(project.percentage_score || 0))
+            : '';
+        return {
+          project_id: projectId,
+          company_id: String(project.company_id),
+          company_name: String(company?.name || ''),
+          coordinator_id: assignment ? String(assignment.coordinator_id) : '',
+          coordinator_name: String(coordinator?.name || ''),
+          coordinator_email: String(coordinator?.email || ''),
+          coordinator_mobile: String(coordinator?.mobile || ''),
+          sector: sectorValue,
+          status,
+          next_step: nextStep,
+          year_of_registration: Number.isFinite(yearOfRegistration) ? yearOfRegistration : null,
+          assignment_date: assignmentDate,
+          po_approved_date: poApprovedDate,
+          lead_time_months: leadTimeMonths,
+          certification_level: certificationLevel,
+          coordinator_remarks: String(project.coordinator_remarks || ''),
+          coordinator_target_dates: Array.isArray(project.coordinator_target_dates)
+            ? project.coordinator_target_dates
+            : [],
+          coordinator_target_dates_locked: Boolean(project.coordinator_target_dates_locked),
+          remarks: String(project.coordinator_remarks || ''),
+          target_dates: Array.isArray(project.coordinator_target_dates)
+            ? project.coordinator_target_dates
+            : [],
+          rated: status === 'rated' || status === 'completed',
+          completed: status === 'completed',
+          proforma_payment_received: Number(proformaMap.get(projectId) || 0),
+          created_at: project.createdAt,
+          updated_at: project.updatedAt,
+          ...flags,
+        };
+      })
+      .filter((row) => {
+        if (options.role === 'coordinator') {
+          const requiredId = coordinatorIdFilter || options.tokenCoordinatorId || '';
+          if (!requiredId) return false;
+          if (String(row.coordinator_id) !== String(requiredId)) return false;
+        }
+        if (coordinatorIdFilter && String(row.coordinator_id) !== coordinatorIdFilter) return false;
+        if (yearFilter) {
+          const y = Number(yearFilter);
+          if (Number.isFinite(y)) {
+            const rowYear = new Date(row.created_at).getUTCFullYear();
+            if (rowYear !== y) return false;
+          }
+        }
+        if (statusFilter && row.status !== statusFilter) return false;
+        if (sectorFilter && String(row.sector || '').toLowerCase() !== sectorFilter) return false;
+        if (fromDate || toDate) {
+          const createdAt = new Date(row.created_at).getTime();
+          if (fromDate && createdAt < fromDate.getTime()) return false;
+          if (toDate && createdAt > toDate.getTime()) return false;
+        }
+        return true;
+      });
+
+    const total = allRows.length;
+    const rows = allRows.slice(skip, skip + limit);
+    const coordinatorSummaryMap = new Map<
+      string,
+      {
+        coordinator_id: string;
+        coordinator_name: string;
+        coordinator_email: string;
+        coordinator_mobile: string;
+        total_projects: number;
+        status_counts: Record<string, number>;
+        proforma_payment_received: number;
+      }
+    >();
+
+    for (const row of allRows) {
+      const key = String(row.coordinator_id || 'unassigned');
+      const existing =
+        coordinatorSummaryMap.get(key) ||
+        {
+          coordinator_id: row.coordinator_id || '',
+          coordinator_name: row.coordinator_name || 'Unassigned',
+          coordinator_email: row.coordinator_email || '',
+          coordinator_mobile: row.coordinator_mobile || '',
+          total_projects: 0,
+          status_counts: {},
+          proforma_payment_received: 0,
+        };
+      existing.total_projects += 1;
+      existing.status_counts[row.status] = Number(existing.status_counts[row.status] || 0) + 1;
+      existing.proforma_payment_received += Number(row.proforma_payment_received || 0);
+      coordinatorSummaryMap.set(key, existing);
+    }
+
+    const totalPayment = allRows.reduce(
+      (sum, row) => sum + Number(row.proforma_payment_received || 0),
+      0,
+    );
+    const ratedCompanies = allRows.filter((r) => r.status === 'rated' || r.status === 'completed').length;
+    const completedProjects = allRows.filter((r) => r.status === 'completed').length;
+    const carryoverProjects = allRows.filter((r) => r.status !== 'completed').length;
+    const progressPercent = total > 0 ? Number(((completedProjects / total) * 100).toFixed(2)) : 0;
+    const ongoingCounts = {
+      launch_pending: allRows.filter((r) => r.status === 'launch_pending').length,
+      pre_assessment_pending: allRows.filter((r) => r.status === 'pre_assessment_pending').length,
+      assessment_pending: allRows.filter((r) => r.status === 'assessment_pending').length,
+      scoring_pending: allRows.filter((r) => r.status === 'scoring_pending').length,
+    };
+
+    return {
+      status: 'success',
+      message: 'Coordinator performance dashboard fetched successfully',
+      data: {
+        summary: {
+          total_projects: total,
+          rated_companies: ratedCompanies,
+          completed_projects: completedProjects,
+          payment_received_proforma: totalPayment,
+          carryover_projects: carryoverProjects,
+          progress_percent: progressPercent,
+          ongoing_counts: ongoingCounts,
+          total_proforma_payment_received: totalPayment,
+        },
+        coordinators: Array.from(coordinatorSummaryMap.values()),
+        projects: rows,
+        pagination: {
+          page,
+          limit,
+          total,
+          total_pages: total > 0 ? Math.ceil(total / limit) : 0,
+        },
+      },
+    };
+  }
+
+  async updateCoordinatorProjectRemarks(
+    projectId: string,
+    remarksRaw: unknown,
+  ): Promise<{ status: string; message: string; data: any }> {
+    const remarks = String(remarksRaw ?? '').trim();
+    const project = await this.projectModel.findById(projectId);
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    (project as any).coordinator_remarks = remarks;
+    await project.save();
+    return {
+      status: 'success',
+      message: 'Coordinator remarks updated successfully',
+      data: {
+        project_id: String(project._id),
+        remarks,
+      },
+    };
+  }
+
+  async createCoordinatorProjectTargetDates(
+    projectId: string,
+    body: Record<string, any>,
+  ): Promise<{ status: string; message: string; data: any }> {
+    const project = await this.projectModel.findById(projectId);
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const alreadyLocked = Boolean((project as any).coordinator_target_dates_locked);
+    const existingDates = Array.isArray((project as any).coordinator_target_dates)
+      ? ((project as any).coordinator_target_dates as Date[])
+      : [];
+    if (alreadyLocked || existingDates.length > 0) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Target dates are locked and cannot be edited.',
+      });
+    }
+
+    const fromBody = Array.isArray(body?.target_dates)
+      ? body.target_dates
+      : [body?.target_date || body?.date].filter(Boolean);
+    const dateValues = fromBody
+      .map((v: unknown) => new Date(String(v)))
+      .filter((d: Date) => !Number.isNaN(d.getTime()));
+
+    if (!dateValues.length) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'At least one valid target date is required.',
+      });
+    }
+    if (dateValues.length > 3) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Maximum 3 target dates are allowed.',
+      });
+    }
+
+    (project as any).coordinator_target_dates = dateValues;
+    (project as any).coordinator_target_dates_locked = true;
+    await project.save();
+
+    return {
+      status: 'success',
+      message: 'Target dates saved and locked successfully',
+      data: {
+        project_id: String(project._id),
+        target_dates: dateValues,
+        locked: true,
+      },
+    };
+  }
+
+  async freezeCoordinatorPerformanceYear(
+    year: string,
+    freezeDate: string,
+  ): Promise<{ status: string; message: string; data: any }> {
+    const yearNum = Number(year);
+    if (!Number.isFinite(yearNum)) {
+      throw new BadRequestException({ status: 'error', message: 'year must be numeric.' });
+    }
+    const freezeDateObj = new Date(freezeDate);
+    if (Number.isNaN(freezeDateObj.getTime())) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'freeze_date must be a valid date (YYYY-MM-DD).',
+      });
+    }
+
+    await this.mongoConnection.collection('coordinator_performance_year_freezes').updateOne(
+      { year: String(yearNum) },
+      {
+        $set: {
+          year: String(yearNum),
+          freeze_date: freezeDateObj,
+          updated_at: new Date(),
+        },
+        $setOnInsert: { created_at: new Date() },
+      },
+      { upsert: true },
+    );
+
+    const carryoverCount = await this.projectModel.countDocuments({
+      next_activities_id: { $lt: 24 },
+      $expr: { $lte: [{ $year: '$createdAt' }, yearNum] },
+    });
+
+    return {
+      status: 'success',
+      message: 'Coordinator performance year freeze completed successfully',
+      data: {
+        year: String(yearNum),
+        freeze_date: freezeDateObj,
+        previous_year_read_only: true,
+        yearly_counters_reset_for: String(yearNum + 1),
+        carried_over_incomplete_projects: carryoverCount,
+      },
+    };
   }
 }
 

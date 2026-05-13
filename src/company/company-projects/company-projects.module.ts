@@ -6,12 +6,16 @@ import { AdminLaunchTrainingController } from './admin-launch-training.controlle
 import { AssessorCompanyProjectsController } from './assessor-company-projects.controller';
 import { FacilitatorFinanceV2Controller } from './facilitator-finance-v2.controller';
 import { FacilitatorLaunchTrainingController } from './facilitator-launch-training.controller';
+import { CoordinatorPerformanceController } from './coordinator-performance.controller';
+import { AdminGreencoDashboardController } from './admin-greenco-dashboard.controller';
 import { CompanyProjectsService } from './company-projects.service';
+import { AdminGreencoDashboardService } from './admin-greenco-dashboard.service';
 import {
   CompanyProject,
   CompanyProjectSchema,
 } from '../schemas/company-project.schema';
 import { Company, CompanySchema } from '../schemas/company.schema';
+import { LegacyData, LegacyDataSchema } from '../schemas/legacy-data.schema';
 import {
   CompanyFacilitator,
   CompanyFacilitatorSchema,
@@ -80,6 +84,7 @@ import { MailModule } from '../../mail/mail.module';
     MongooseModule.forFeature([
       { name: CompanyProject.name, schema: CompanyProjectSchema },
       { name: Company.name, schema: CompanySchema },
+      { name: LegacyData.name, schema: LegacyDataSchema },
       { name: CompanyFacilitator.name, schema: CompanyFacilitatorSchema },
       { name: CompanyCoordinator.name, schema: CompanyCoordinatorSchema },
       { name: CompanyAssessor.name, schema: CompanyAssessorSchema },
@@ -105,8 +110,10 @@ import { MailModule } from '../../mail/mail.module';
     AssessorCompanyProjectsController,
     FacilitatorFinanceV2Controller,
     FacilitatorLaunchTrainingController,
+    CoordinatorPerformanceController,
+    AdminGreencoDashboardController,
   ],
-  providers: [CompanyProjectsService],
+  providers: [CompanyProjectsService, AdminGreencoDashboardService],
   exports: [CompanyProjectsService],
 })
 export class CompanyProjectsModule {}

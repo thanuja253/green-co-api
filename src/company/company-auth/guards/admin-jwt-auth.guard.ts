@@ -46,6 +46,13 @@ export class AdminJwtAuthGuard implements CanActivate {
     if (/^\/?admin\/projects\/[^/]+\/certificate(-document)?$/i.test(path)) {
       return true;
     }
+    // Keep facilitators list endpoint public for CII flow compatibility.
+    if (/^\/?api\/admin\/facilitators$/i.test(path)) {
+      return true;
+    }
+    if (/^\/?admin\/facilitators$/i.test(path)) {
+      return true;
+    }
     const authHeader = req.headers?.authorization || req.headers?.Authorization;
     const token = this.extractBearerToken(authHeader);
 
