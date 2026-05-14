@@ -60,6 +60,48 @@ import {
   launchTrainingSessionUploadInterceptor,
 } from './launch-training-session-upload.config';
 
+/**
+ * Multer may receive multiple file fields; prefer the first **non-empty** part in
+ * `proposal_document` → `proposalDocument` → `file` order so an empty stub in
+ * `proposal_document` does not win over real bytes in `file`.
+ */
+function pickProposalMultipartPdf(files?: {
+  proposal_document?: Express.Multer.File[];
+  proposalDocument?: Express.Multer.File[];
+  file?: Express.Multer.File[];
+}): Express.Multer.File | undefined {
+  const ordered = [
+    files?.proposal_document?.[0],
+    files?.proposalDocument?.[0],
+    files?.file?.[0],
+  ];
+  for (const f of ordered) {
+    if (f && (f.size ?? 0) > 0) {
+      return f;
+    }
+  }
+  return ordered.find((f) => !!f);
+}
+
+function assertNonEmptyProposalPdf(file: Express.Multer.File): void {
+  if ((file.size ?? 0) > 0) {
+    return;
+  }
+  const diskPath = (file as Express.Multer.File & { path?: string }).path;
+  if (diskPath && fs.existsSync(diskPath)) {
+    try {
+      fs.unlinkSync(diskPath);
+    } catch {
+      /* ignore */
+    }
+  }
+  throw new BadRequestException({
+    status: 'error',
+    message:
+      'Uploaded PDF is empty (0 bytes). Send real file bytes, e.g. curl -F "proposal_document=@/path/to/document.pdf" …/proposal-document/reupload — copying multipart from DevTools often drops the binary body.',
+  });
+}
+
 @Controller(['api/company/projects', 'api/companyproject', 'api/companyprojects'])
 export class CompanyProjectsController {
   constructor(
@@ -623,16 +665,14 @@ export class CompanyProjectsController {
       file?: Express.Multer.File[];
     },
   ): Promise<any> {
-    const file =
-      files?.proposal_document?.[0] ||
-      files?.proposalDocument?.[0] ||
-      files?.file?.[0];
+    const file = pickProposalMultipartPdf(files);
     if (!file) {
       throw new BadRequestException({
         status: 'error',
         message: 'No file uploaded. Use proposal_document, proposalDocument, or file.',
       });
     }
+    assertNonEmptyProposalPdf(file);
     return this.companyProjectsService.replaceProposalDocumentByProjectId(projectId, file);
   }
 
@@ -697,10 +737,7 @@ export class CompanyProjectsController {
       file?: Express.Multer.File[];
     },
   ): Promise<any> {
-    const file =
-      files?.proposal_document?.[0] ||
-      files?.proposalDocument?.[0] ||
-      files?.file?.[0];
+    const file = pickProposalMultipartPdf(files);
 
     if (!file) {
       throw new BadRequestException({
@@ -708,6 +745,7 @@ export class CompanyProjectsController {
         message: 'No file uploaded. Use proposal_document, proposalDocument, or file.',
       });
     }
+    assertNonEmptyProposalPdf(file);
 
     console.log('[Proposal Document Controller] Upload request:', {
       projectId,
