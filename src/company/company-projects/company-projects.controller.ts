@@ -362,6 +362,8 @@ export class CompanyProjectsController {
   }
 
   @Get(':projectId/quickview')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+  @Header('Pragma', 'no-cache')
   async getQuickview(
     @Request() req,
     @Param('projectId') projectId: string,
@@ -1282,11 +1284,7 @@ export class CompanyProjectsController {
    * GET /api/company/projects/:projectId/primary-data/approval
    */
   @Get(':projectId/primary-data/approval')
-  @UseGuards(JwtAuthGuard, AccountStatusGuard)
-  async getPrimaryDataForApproval(
-    @Request() req,
-    @Param('projectId') projectId: string,
-  ): Promise<any> {
+  async getPrimaryDataForApproval(@Param('projectId') projectId: string): Promise<any> {
     return this.companyProjectsService.getPrimaryDataForApproval(projectId);
   }
 
@@ -1295,19 +1293,16 @@ export class CompanyProjectsController {
    * POST /api/company/projects/:projectId/primary-data/approval
    */
   @Post(':projectId/primary-data/approval')
-  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   @UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
   async primaryDataFormApproval(
-    @Request() req,
     @Param('projectId') projectId: string,
     @Body() dto: PrimaryDataFormApprovalDto,
   ): Promise<any> {
     return this.companyProjectsService.primaryDataFormApproval(
-      req.user.userId,
       projectId,
       dto.form_type,
       dto.status,
-      dto.remark,
+      dto.remark ?? dto.remarks,
     );
   }
 

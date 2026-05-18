@@ -42,6 +42,7 @@ import { UpsertPlaqueDetailsDto } from './dto/upsert-plaque-details.dto';
 import { UpsertOutstandingDetailsDto } from './dto/upsert-outstanding-details.dto';
 import { OutstandingDuePaymentDto } from './dto/outstanding-due-payment.dto';
 import { ScoreBandStatusDto } from './dto/score-band-status.dto';
+import { PrimaryDataFormApprovalDto } from './dto/primary-data-approval.dto';
 import {
   REGISTRATION_INFO_FILE_FIELDS,
   createRegistrationInfoValidationPipe,
@@ -104,6 +105,48 @@ export class AdminCompanyFlowController {
     return this.companyProjectsService.updateRegistrationInfoForAdmin(projectId, dto, mergedFiles);
   }
 
+  /**
+   * Primary data form (same as company GET …/primary-data): primary_data_rows, document_status per tab.
+   * GET /api/admin/projects/:projectId/primary-data
+   */
+  @Get('api/admin/projects/:projectId/primary-data')
+  @Get('admin/projects/:projectId/primary-data')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+  async getPrimaryDataForAdmin(@Param('projectId') projectId: string): Promise<any> {
+    return this.companyProjectsService.getPrimaryDataForAdmin(projectId);
+  }
+
+  /**
+   * Primary data approval (same payload as GET/POST …/api/company/projects/:id/primary-data/approval).
+   * GET /api/admin/projects/:projectId/primary-data/approval
+   */
+  @Get('api/admin/projects/:projectId/primary-data/approval')
+  @Get('admin/projects/:projectId/primary-data/approval')
+  async getPrimaryDataApprovalForAdmin(
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.getPrimaryDataForApproval(projectId);
+  }
+
+  /**
+   * POST /api/admin/projects/:projectId/primary-data/approval
+   * Body: { form_type, status (1|2|3), remark? }
+   */
+  @Post('api/admin/projects/:projectId/primary-data/approval')
+  @Post('admin/projects/:projectId/primary-data/approval')
+  @UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
+  async postPrimaryDataApprovalForAdmin(
+    @Param('projectId') projectId: string,
+    @Body() dto: PrimaryDataFormApprovalDto,
+  ): Promise<any> {
+    return this.companyProjectsService.primaryDataFormApproval(
+      projectId,
+      dto.form_type,
+      dto.status,
+      dto.remark ?? dto.remarks,
+    );
+  }
+
   @Get([
     'api/admin/projects/:projectId/quickview',
     'admin/projects/:projectId/quickview',
@@ -112,6 +155,8 @@ export class AdminCompanyFlowController {
     'api/admin/projects/:projectId/p_details',
     'admin/projects/:projectId/p_details',
   ])
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+  @Header('Pragma', 'no-cache')
   async getQuickviewForAdmin(
     @Param('projectId') projectId: string,
   ): Promise<any> {
@@ -309,6 +354,8 @@ export class AdminCompanyFlowController {
 
   @Get('api/admin/projects/:projectId/workflow-status')
   @Get('admin/projects/:projectId/workflow-status')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+  @Header('Pragma', 'no-cache')
   async getWorkflowStatusForAdmin(
     @Param('projectId') projectId: string,
   ): Promise<any> {

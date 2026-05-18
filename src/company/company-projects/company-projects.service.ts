@@ -4669,6 +4669,10 @@ export class CompanyProjectsService {
       data: {
         latest_step: latestStep,
         next_step: nextStep,
+        quickview_phase: qd.quickview_phase ?? 'normal',
+        primary_data_reacceptance: qd.primary_data_reacceptance ?? null,
+        primary_data_reupload_accepted: qd.primary_data_reupload_accepted ?? null,
+        resolved_project_id: qd.id_resolution?.resolved_project_id ?? null,
         next_activity: nextStep?.name || qd?.current_activity_data?.activity || null,
         next_activities_id:
           typeof nextStep?.id === 'number'
@@ -4943,6 +4947,20 @@ export class CompanyProjectsService {
       throw new NotFoundException({ status: 'error', message: 'Company not found.' });
     }
 
+    const primaryDataReacceptance = await this.getPrimaryDataReacceptanceQuickviewState(
+      String(cid),
+      String(pid),
+      allActivities as any[],
+    );
+    const primaryDataReuploadAccepted = primaryDataReacceptance
+      ? null
+      : await this.getPrimaryDataReuploadAcceptedQuickviewState(
+          String(cid),
+          String(pid),
+          allActivities as any[],
+          project,
+        );
+
     const sector = company.mst_sector_id
       ? await this.sectorModel.findById(company.mst_sector_id).lean()
       : null;
@@ -5199,7 +5217,11 @@ export class CompanyProjectsService {
         ? 3
         : proposalRevisionAwaitingCiiWoReview
           ? 5
-          : rawNextIdBase;
+          : primaryDataReacceptance
+            ? primaryDataReacceptance.nextId
+            : primaryDataReuploadAccepted
+              ? primaryDataReuploadAccepted.nextId
+              : rawNextIdBase;
     const hasCertificate = !!(project as any).certificate_document_url;
     const effectiveNextId = !hasCertificate && rawNextId >= 15 ? 14 : rawNextId;
 
@@ -5215,15 +5237,21 @@ export class CompanyProjectsService {
         ? milestoneSteps[3].name
         : proposalRevisionAwaitingCiiWoReview
           ? ciiWoReviewStepName
-          : isRecertifiedAndAtCloseOut
-            ? 'Recertification started – open your new project'
-            : isAtCloseOutNoRecertify
-              ? 'Certificate created'
-              : nextActivityInfo.name;
+          : primaryDataReacceptance
+            ? primaryDataReacceptance.nextName
+            : primaryDataReuploadAccepted
+              ? primaryDataReuploadAccepted.nextName
+              : isRecertifiedAndAtCloseOut
+              ? 'Recertification started – open your new project'
+              : isAtCloseOutNoRecertify
+                ? 'Certificate created'
+                : nextActivityInfo.name;
     const nextStepDisplayStatus =
       proposalRevisionAfterWoReject ||
       proposalWaitingForCiiProposalReupload ||
-      proposalRevisionAwaitingCiiWoReview
+      proposalRevisionAwaitingCiiWoReview ||
+      primaryDataReacceptance ||
+      primaryDataReuploadAccepted
         ? 'Pending'
         : isRecertifiedAndAtCloseOut
           ? 'Recertification'
@@ -5236,9 +5264,13 @@ export class CompanyProjectsService {
         ? milestoneSteps[3].responsibility
         : proposalRevisionAwaitingCiiWoReview
           ? 'CII'
-          : isAtCloseOutNoRecertify
-            ? 'CII'
-            : nextActivityInfo.responsibility;
+          : primaryDataReacceptance
+            ? primaryDataReacceptance.nextResp
+            : primaryDataReuploadAccepted
+              ? primaryDataReuploadAccepted.nextResp
+              : isAtCloseOutNoRecertify
+                ? 'CII'
+                : nextActivityInfo.responsibility;
 
     // Build profile object
     const projectCodeStr =
@@ -5311,7 +5343,19 @@ export class CompanyProjectsService {
               activity_status: 'Completed',
               responsibility: 'Company',
             }
-          : latestCompletedMilestoneName
+          : primaryDataReacceptance
+            ? {
+                activity: primaryDataReacceptance.latestName,
+                activity_status: 'Completed',
+                responsibility: primaryDataReacceptance.latestResp,
+              }
+            : primaryDataReuploadAccepted
+              ? {
+                  activity: primaryDataReuploadAccepted.latestName,
+                  activity_status: 'Completed',
+                  responsibility: primaryDataReuploadAccepted.latestResp,
+                }
+              : latestCompletedMilestoneName
           ? {
               activity: latestCompletedMilestoneName,
               activity_status: 'Completed',
@@ -5413,12 +5457,26 @@ export class CompanyProjectsService {
             status: 'Pending',
             responsibility: 'CII',
           }
-        : {
-            id: effectiveNextId,
-            name: nextStepDisplayName,
-            status: nextStepDisplayStatus,
-            responsibility: nextStepDisplayResponsibility,
-          };
+        : primaryDataReacceptance
+          ? {
+              id: primaryDataReacceptance.nextId,
+              name: primaryDataReacceptance.nextName,
+              status: 'Pending',
+              responsibility: primaryDataReacceptance.nextResp,
+            }
+          : primaryDataReuploadAccepted
+            ? {
+                id: primaryDataReuploadAccepted.nextId,
+                name: primaryDataReuploadAccepted.nextName,
+                status: 'Pending',
+                responsibility: primaryDataReuploadAccepted.nextResp,
+              }
+            : {
+                id: effectiveNextId,
+                name: nextStepDisplayName,
+                status: nextStepDisplayStatus,
+                responsibility: nextStepDisplayResponsibility,
+              };
     const latest_step = proposalRevisionAfterWoReject
       ? {
           id: 3,
@@ -5440,17 +5498,37 @@ export class CompanyProjectsService {
             status: 'Completed',
             responsibility: 'Company',
           }
-        : {
-            id: latestCompletedMilestoneNumber || 0,
-            name: latestCompletedMilestoneName || currentActivityData.activity,
-            status:
-              latestCompletedMilestoneNumber != null && latestCompletedMilestoneNumber > 0
-                ? 'Completed'
-                : currentActivityData.activity_status === 'Done'
-                  ? 'Done'
-                  : 'Pending',
-            responsibility: currentActivityData.responsibility,
-          };
+        : primaryDataReacceptance
+          ? {
+              id: primaryDataReacceptance.latestId,
+              name: primaryDataReacceptance.latestName,
+              status: 'Completed',
+              responsibility: primaryDataReacceptance.latestResp,
+            }
+          : primaryDataReuploadAccepted
+            ? {
+                id: primaryDataReuploadAccepted.latestId,
+                name: primaryDataReuploadAccepted.latestName,
+                status: 'Completed',
+                responsibility: primaryDataReuploadAccepted.latestResp,
+              }
+            : {
+                id: latestCompletedMilestoneNumber || 0,
+                name: latestCompletedMilestoneName || currentActivityData.activity,
+              status:
+                latestCompletedMilestoneNumber != null && latestCompletedMilestoneNumber > 0
+                  ? 'Completed'
+                  : currentActivityData.activity_status === 'Done'
+                    ? 'Done'
+                    : 'Pending',
+              responsibility: currentActivityData.responsibility,
+            };
+
+    const quickviewPhase = primaryDataReacceptance
+      ? 'awaiting_cii_review'
+      : primaryDataReuploadAccepted
+        ? 'reupload_accepted'
+        : 'normal';
 
     return {
       status: 'success',
@@ -5459,6 +5537,30 @@ export class CompanyProjectsService {
         profile,
         next_step,
         latest_step,
+        /** Use this on admin + company quickview UIs (do not derive from companies_activty[0]). */
+        quickview_phase: quickviewPhase,
+        quickview_display: {
+          phase: quickviewPhase,
+          latest: latest_step.name,
+          next: next_step.name,
+        },
+        ...(primaryDataReacceptance
+          ? {
+              primary_data_reacceptance: {
+                pending_sections: primaryDataReacceptance.pending_sections,
+                latest_step_label: primaryDataReacceptance.latestName,
+                next_step_label: primaryDataReacceptance.nextName,
+              },
+            }
+          : {}),
+        ...(primaryDataReuploadAccepted
+          ? {
+              primary_data_reupload_accepted: {
+                latest_step_label: primaryDataReuploadAccepted.latestName,
+                next_step_label: primaryDataReuploadAccepted.nextName,
+              },
+            }
+          : {}),
         ...(recertificationNewProjectId ? { recertification_new_project_id: recertificationNewProjectId } : {}),
         sector: sectorData,
         current_activity_data: currentActivityData,
@@ -11412,6 +11514,390 @@ export class CompanyProjectsService {
 
   // ---------- Primary Data Form ----------
 
+  /** Human label for activity / quickview (e.g. ee → Energy Efficiency). */
+  private async getPrimaryDataSectionLabel(formType: string): Promise<string> {
+    const key = String(formType || '').trim().toLowerCase();
+    if (!key) return '';
+    const row = await this.masterPrimaryDataChecklistModel
+      .findOne({ info_type: key, is_active: 1 })
+      .select('checklist_name info_type')
+      .lean();
+    const name = String((row as any)?.checklist_name ?? '').trim();
+    return name || key.toUpperCase();
+  }
+
+  private async logPrimaryDataSectionResubmit(
+    companyId: string,
+    projectId: string,
+    formType: string,
+  ): Promise<void> {
+    const label = await this.getPrimaryDataSectionLabel(formType);
+    const sectionPart = label ? ` (${label})` : ` (${String(formType).toUpperCase()})`;
+    await this.companyActivityModel.create({
+      company_id: companyId,
+      project_id: projectId,
+      description: `Company Re-Uploaded Primary Data${sectionPart}`,
+      activity_type: 'company',
+      milestone_flow: 11,
+      milestone_completed: true,
+    });
+  }
+
+  /**
+   * After company saves a section that CII rejected, reset that section to Pending and log resubmit activity.
+   */
+  private async handlePrimaryDataSectionResubmitAfterRejection(
+    companyId: string,
+    projectId: string,
+    formType: string,
+    cId?: Types.ObjectId,
+    pId?: Types.ObjectId,
+  ): Promise<boolean> {
+    const infoType = String(formType || 'gi').trim().toLowerCase();
+    const companyObjectId = cId ?? new Types.ObjectId(companyId);
+    const projectObjectId = pId ?? new Types.ObjectId(projectId);
+
+    const rejectedCount = await this.primaryDataFormModel.countDocuments({
+      company_id: companyObjectId,
+      project_id: projectObjectId,
+      info_type: infoType,
+      document_status: PRIMARY_DATA_DOC_STATUS.NOT_ACCEPTED,
+    });
+    if (rejectedCount === 0) return false;
+
+    await this.primaryDataFormModel.updateMany(
+      { company_id: companyObjectId, project_id: projectObjectId, info_type: infoType },
+      {
+        $set: {
+          document_status: PRIMARY_DATA_DOC_STATUS.PENDING,
+        },
+      },
+    );
+    await this.logPrimaryDataSectionResubmit(companyId, projectId, infoType);
+    return true;
+  }
+
+  /**
+   * Map activity parenthetical (section label or code) to info_type (gi, gge, …).
+   * Exact label match first, then fuzzy label / known aliases — avoids wrong tokens like
+   * "greenhouse gas emissions" when checklist_name differs slightly from the activity text.
+   */
+  private resolveResubmitActivityTokenToInfoType(
+    token: string,
+    sections: Array<{ info_type: string; label?: string }>,
+  ): string | null {
+    const raw = String(token || '').trim().toLowerCase();
+    if (!raw) return null;
+
+    for (const s of sections) {
+      const it = String(s.info_type || '').trim().toLowerCase();
+      const label = String(s.label || '').trim().toLowerCase();
+      if (raw === it || (label && raw === label)) return it;
+    }
+
+    for (const s of sections) {
+      const it = String(s.info_type || '').trim().toLowerCase();
+      const label = String(s.label || '').trim().toLowerCase();
+      if (label && (label.includes(raw) || raw.includes(label))) return it;
+    }
+
+    const aliases: Record<string, string> = {
+      'greenhouse gas emissions': 'gge',
+      'greenhouse gas emission': 'gge',
+      ghg: 'gge',
+      'energy efficiency': 'ee',
+      'water conservation': 'wc',
+      'general information': 'gi',
+    };
+    if (aliases[raw]) return aliases[raw];
+
+    for (const s of sections) {
+      const it = String(s.info_type || '').trim().toLowerCase();
+      if (raw === it) return it;
+    }
+    return null;
+  }
+
+  /** Match section from full activity description when parenthetical is missing or non-standard. */
+  private matchResubmitInfoTypesInDescription(
+    description: string,
+    sections: Array<{ info_type: string; label?: string }>,
+  ): string[] {
+    const d = String(description || '').toLowerCase();
+    const matched: string[] = [];
+    for (const s of sections) {
+      const it = String(s.info_type || '').trim().toLowerCase();
+      const label = String(s.label || '').trim().toLowerCase();
+      if (it && new RegExp(`\\b${it.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(d)) {
+        matched.push(it);
+        continue;
+      }
+      if (label && label.length > 2 && d.includes(label)) matched.push(it);
+    }
+    return matched;
+  }
+
+  /**
+   * info_types for sections that had a "Company Re-Uploaded Primary Data (…)" activity.
+   */
+  private async getResubmittedInfoTypesFromActivities(allActivities: any[]): Promise<Set<string>> {
+    const resubmitted = new Set<string>();
+    const sections = await this.getSectionsFromMaster();
+
+    for (const a of allActivities as any[]) {
+      if (a?.activity_type !== 'company' || typeof a?.description !== 'string') continue;
+      if (!/Company Re-Uploaded Primary Data/i.test(a.description)) continue;
+
+      const m = a.description.match(/Company Re-Uploaded Primary Data\s*\(([^)]+)\)/i);
+      if (m?.[1]) {
+        const infoType = this.resolveResubmitActivityTokenToInfoType(m[1], sections);
+        if (infoType) resubmitted.add(infoType);
+        continue;
+      }
+
+      for (const it of this.matchResubmitInfoTypesInDescription(a.description, sections)) {
+        resubmitted.add(it);
+      }
+    }
+    return resubmitted;
+  }
+
+  /**
+   * Latest / next step for primary-data screens (same rules as GET …/quickview).
+   * Admin UIs that only load primary-data can bind workflow_banner instead of approval_status.
+   */
+  private async buildPrimaryDataWorkflowBanner(
+    companyId: string,
+    projectId: string,
+    project: any,
+  ): Promise<{
+    quickview_phase: 'awaiting_cii_review' | 'reupload_accepted' | 'normal';
+    latest_step: {
+      id: number;
+      name: string;
+      status: string;
+      responsibility: string;
+    } | null;
+    next_step: {
+      id: number;
+      name: string;
+      status: string;
+      responsibility: string;
+    } | null;
+    primary_data_reacceptance?: { pending_sections: string[] };
+  }> {
+    const cid =
+      project?.company_id instanceof Types.ObjectId
+        ? project.company_id
+        : new Types.ObjectId(companyId);
+    const pid =
+      project?._id instanceof Types.ObjectId ? project._id : new Types.ObjectId(projectId);
+
+    const activities = await this.companyActivityModel
+      .find({ company_id: cid, project_id: pid })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const reaccept = await this.getPrimaryDataReacceptanceQuickviewState(
+      companyId,
+      projectId,
+      activities as any[],
+    );
+    if (reaccept) {
+      return {
+        quickview_phase: 'awaiting_cii_review',
+        latest_step: {
+          id: reaccept.latestId,
+          name: reaccept.latestName,
+          status: 'Completed',
+          responsibility: reaccept.latestResp,
+        },
+        next_step: {
+          id: reaccept.nextId,
+          name: reaccept.nextName,
+          status: 'Pending',
+          responsibility: reaccept.nextResp,
+        },
+        primary_data_reacceptance: { pending_sections: reaccept.pending_sections },
+      };
+    }
+
+    const reupload = await this.getPrimaryDataReuploadAcceptedQuickviewState(
+      companyId,
+      projectId,
+      activities as any[],
+      project,
+    );
+    if (reupload) {
+      return {
+        quickview_phase: 'reupload_accepted',
+        latest_step: {
+          id: reupload.latestId,
+          name: reupload.latestName,
+          status: 'Completed',
+          responsibility: reupload.latestResp,
+        },
+        next_step: {
+          id: reupload.nextId,
+          name: reupload.nextName,
+          status: 'Pending',
+          responsibility: reupload.nextResp,
+        },
+      };
+    }
+
+    return {
+      quickview_phase: 'normal',
+      latest_step: null,
+      next_step: null,
+    };
+  }
+
+  /** Per-section rows with final_submit; status is worst code in section (rejected > pending > accepted). */
+  private getSubmittedSectionStatusMap(
+    rows: any[],
+  ): Map<string, { pending: boolean; rejected: boolean; accepted: boolean }> {
+    const map = new Map<string, { pending: boolean; rejected: boolean; accepted: boolean }>();
+    for (const r of rows) {
+      if (Number(r?.final_submit) !== 1) continue;
+      const t = String(r?.info_type || 'gi').toLowerCase();
+      const cur = map.get(t) ?? { pending: false, rejected: false, accepted: false };
+      const st = Number(r?.document_status ?? PRIMARY_DATA_DOC_STATUS.PENDING);
+      if (st === PRIMARY_DATA_DOC_STATUS.NOT_ACCEPTED) cur.rejected = true;
+      else if (st === PRIMARY_DATA_DOC_STATUS.PENDING) cur.pending = true;
+      else if (st === PRIMARY_DATA_DOC_STATUS.ACCEPTED) cur.accepted = true;
+      else cur.pending = true;
+      map.set(t, cur);
+    }
+    return map;
+  }
+
+  /**
+   * Quickview override when company re-uploaded primary data after rejection and CII must re-approve.
+   * Only sections that were re-uploaded count — other tabs still on first review do not block this state.
+   */
+  private async getPrimaryDataReacceptanceQuickviewState(
+    companyId: string,
+    projectId: string,
+    allActivities: any[],
+  ): Promise<{
+    latestId: number;
+    nextId: number;
+    latestName: string;
+    nextName: string;
+    latestResp: string;
+    nextResp: string;
+    pending_sections: string[];
+  } | null> {
+    const resubmittedTypes = await this.getResubmittedInfoTypesFromActivities(allActivities);
+    if (!resubmittedTypes.size) return null;
+
+    const cId = new Types.ObjectId(companyId);
+    const pId = new Types.ObjectId(projectId);
+    const rows = await this.primaryDataFormModel
+      .find({ company_id: cId, project_id: pId })
+      .select('info_type document_status final_submit')
+      .lean();
+    if (!rows.length) return null;
+
+    const pendingSections = new Set<string>();
+    for (const infoType of resubmittedTypes) {
+      const sectionRows = (rows as any[]).filter(
+        (r) =>
+          Number(r?.final_submit) === 1 &&
+          String(r?.info_type || 'gi').toLowerCase() === infoType,
+      );
+      if (!sectionRows.length) {
+        pendingSections.add(infoType);
+        continue;
+      }
+      if (
+        !sectionRows.every(
+          (r) => Number(r?.document_status) === PRIMARY_DATA_DOC_STATUS.ACCEPTED,
+        )
+      ) {
+        pendingSections.add(infoType);
+      }
+    }
+    if (!pendingSections.size) return null;
+
+    const sectionList = [...pendingSections];
+    const labels = await Promise.all(sectionList.map((s) => this.getPrimaryDataSectionLabel(s)));
+    const sectionSuffix =
+      sectionList.length === 1 && labels[0]
+        ? ` (${labels[0]})`
+        : sectionList.length === 1
+          ? ` (${sectionList[0].toUpperCase()})`
+          : '';
+
+    return {
+      latestId: 11,
+      nextId: 12,
+      latestName: `Company Re-Uploaded Primary Data${sectionSuffix}`,
+      nextName: 'CII to Approve or Reject Re-Uploaded Primary Data',
+      latestResp: 'Company',
+      nextResp: 'CII',
+      pending_sections: sectionList,
+    };
+  }
+
+  /**
+   * After CII accepts re-uploaded primary data (no tab still pending / rejected), quickview shows
+   * CII approved re-upload → assessment submittals pending.
+   */
+  private async getPrimaryDataReuploadAcceptedQuickviewState(
+    companyId: string,
+    projectId: string,
+    allActivities: any[],
+    project: any,
+  ): Promise<{
+    latestId: number;
+    nextId: number;
+    latestName: string;
+    nextName: string;
+    latestResp: string;
+    nextResp: string;
+  } | null> {
+    const storedNext = Number((project as any)?.next_activities_id ?? 0);
+    if (storedNext >= 13) return null;
+
+    const resubmittedTypes = await this.getResubmittedInfoTypesFromActivities(allActivities);
+    if (!resubmittedTypes.size) return null;
+
+    const cId = new Types.ObjectId(companyId);
+    const pId = new Types.ObjectId(projectId);
+    const rows = await this.primaryDataFormModel
+      .find({ company_id: cId, project_id: pId })
+      .select('document_status final_submit info_type')
+      .lean();
+    if (!rows.length) return null;
+
+    for (const infoType of resubmittedTypes) {
+      const sectionRows = (rows as any[]).filter(
+        (r) =>
+          Number(r?.final_submit) === 1 &&
+          String(r?.info_type || 'gi').toLowerCase() === infoType,
+      );
+      if (!sectionRows.length) return null;
+      if (
+        !sectionRows.every(
+          (r) => Number(r?.document_status) === PRIMARY_DATA_DOC_STATUS.ACCEPTED,
+        )
+      ) {
+        return null;
+      }
+    }
+
+    return {
+      latestId: 12,
+      nextId: 13,
+      latestName: 'CII Approved the Re-Uploaded Primary Data Documents',
+      nextName: 'Assessment Submittals Pending',
+      latestResp: 'CII',
+      nextResp: 'Company',
+    };
+  }
+
   /**
    * Get sections dynamically from master_primary_data_checklist only (distinct info_type + label).
    * All section values come from DB; no static list. Run seed-primary-data-master.js if empty.
@@ -11456,6 +11942,88 @@ export class CompanyProjectsService {
       [PRIMARY_DATA_DOC_STATUS.NOT_ACCEPTED]: 'Not Accepted',
       [PRIMARY_DATA_DOC_STATUS.UNDER_REVIEW]: 'Under Review',
     };
+  }
+
+  /**
+   * Per-tab approval for admin/company UIs (use this for re-upload accept/reject display).
+   * Top-level approval_status / primary_data_confirmation is whole-form only — not per tab.
+   */
+  private buildSectionApprovalSummary(
+    savedRows: any[],
+    sections: Array<{ info_type: string; label?: string }>,
+  ): Record<
+    string,
+    {
+      document_status: number | null;
+      document_status_label: string;
+      document_remarks: string | null;
+      final_submit: number;
+    }
+  > {
+    const labels = this.getPrimaryDataDocStatusLabels();
+    const byType: Record<string, any[]> = {};
+    for (const r of savedRows) {
+      const t = String(r?.info_type || 'gi').toLowerCase();
+      if (!byType[t]) byType[t] = [];
+      byType[t].push(r);
+    }
+
+    const pickSectionStatus = (rows: any[]): number | null => {
+      if (!rows.length) return null;
+      const codes = rows.map((r) => Number(r?.document_status ?? PRIMARY_DATA_DOC_STATUS.PENDING));
+      if (codes.some((c) => c === PRIMARY_DATA_DOC_STATUS.NOT_ACCEPTED)) {
+        return PRIMARY_DATA_DOC_STATUS.NOT_ACCEPTED;
+      }
+      if (codes.some((c) => c === PRIMARY_DATA_DOC_STATUS.PENDING)) {
+        return PRIMARY_DATA_DOC_STATUS.PENDING;
+      }
+      if (codes.some((c) => c === PRIMARY_DATA_DOC_STATUS.UNDER_REVIEW)) {
+        return PRIMARY_DATA_DOC_STATUS.UNDER_REVIEW;
+      }
+      if (codes.every((c) => c === PRIMARY_DATA_DOC_STATUS.ACCEPTED)) {
+        return PRIMARY_DATA_DOC_STATUS.ACCEPTED;
+      }
+      return codes[0] ?? PRIMARY_DATA_DOC_STATUS.PENDING;
+    };
+
+    const out: Record<string, any> = {};
+    const keys = new Set<string>([
+      ...sections.map((s) => String(s.info_type || '').toLowerCase()).filter(Boolean),
+      ...Object.keys(byType),
+    ]);
+
+    for (const infoType of keys) {
+      const rows = byType[infoType] ?? [];
+      const submitted = rows.filter((r) => Number(r?.final_submit) === 1);
+      const pool = submitted.length ? submitted : rows;
+      if (!pool.length) {
+        out[infoType] = {
+          document_status: null,
+          document_status_label: 'Not submitted',
+          document_remarks: null,
+          final_submit: 0,
+        };
+        continue;
+      }
+      const code = pickSectionStatus(pool);
+      const remarks =
+        [...pool]
+          .sort((a, b) => {
+            const aTs = new Date(a?.updatedAt ?? a?.createdAt ?? 0).getTime();
+            const bTs = new Date(b?.updatedAt ?? b?.createdAt ?? 0).getTime();
+            return bTs - aTs;
+          })
+          .map((r) => String(r?.document_remarks ?? '').trim())
+          .find((s) => s.length > 0) ?? null;
+      out[infoType] = {
+        document_status: code,
+        document_status_label:
+          code != null ? labels[code] ?? 'Pending' : 'Not submitted',
+        document_remarks: remarks,
+        final_submit: submitted.length ? 1 : 0,
+      };
+    }
+    return out;
   }
 
   /**
@@ -11556,6 +12124,13 @@ export class CompanyProjectsService {
     const finalSubmitCount = (savedRows as any[]).filter((r) => r.final_submit === 1).length;
     const approvalCount = (savedRows as any[]).filter((r) => r.document_status === PRIMARY_DATA_DOC_STATUS.ACCEPTED).length;
     const confirmationFields = this.buildPrimaryDataConfirmationFields(savedRows as any[]);
+    const documentStatusLabels = this.getPrimaryDataDocStatusLabels();
+    const sectionApproval = this.buildSectionApprovalSummary(savedRows as any[], sections);
+    const workflowBanner = await this.buildPrimaryDataWorkflowBanner(
+      resolvedCompanyId,
+      projectId,
+      project,
+    );
 
     // Merged rows: for each master row, attach saved values so Reference Unit (and FY) come from saved when present.
     // primary_data_rows is keyed by info_type (gi, ee, wc, ...) so the UI can use primary_data_rows[activeSection].
@@ -11604,7 +12179,14 @@ export class CompanyProjectsService {
         final_submit_docs: finalSubmitCount,
         primary_data_approval_count: approvalCount,
         ...confirmationFields,
-        document_status_labels: this.getPrimaryDataDocStatusLabels(),
+        document_status_labels: documentStatusLabels,
+        /** Per tab (gi, ee, gge, …) — use for confirmation / badge on active section. */
+        section_approval: sectionApproval,
+        /**
+         * Latest / next step for re-upload workflow (bind UI banner here).
+         * quickview_phase: awaiting_cii_review | reupload_accepted | normal
+         */
+        workflow_banner: workflowBanner,
         sections,
       },
     };
@@ -12173,17 +12755,21 @@ export class CompanyProjectsService {
           document_remarks: String(row?.document_remarks ?? ''),
           final_submit: Number(row?.final_submit ?? 0),
         };
-        // Prefer non-pending status / non-empty remarks so resave doesn't wipe review decisions.
+        // Preserve accepted / under review; rejected → pending on company resave.
         if (
           !current ||
           (current.document_status === PRIMARY_DATA_DOC_STATUS.PENDING &&
-            candidate.document_status !== PRIMARY_DATA_DOC_STATUS.PENDING) ||
+            candidate.document_status !== PRIMARY_DATA_DOC_STATUS.PENDING &&
+            candidate.document_status !== PRIMARY_DATA_DOC_STATUS.NOT_ACCEPTED) ||
           (!current.document_remarks && candidate.document_remarks)
         ) {
           existingApprovalByDataId.set(key, candidate);
         }
       }
     }
+    const giHadRejected = [...existingApprovalByDataId.values()].some(
+      (v) => v.document_status === PRIMARY_DATA_DOC_STATUS.NOT_ACCEPTED,
+    );
     if (touchedDataIds.length) {
       await this.primaryDataFormModel.deleteMany({
         company_id: companyObjectId,
@@ -12194,26 +12780,41 @@ export class CompanyProjectsService {
     }
     if (doc.length) {
       await this.primaryDataFormModel.insertMany(
-        doc.map((item) => ({
-          ...(existingApprovalByDataId.get(String(item.data_id)) ?? {
-            document_status: PRIMARY_DATA_DOC_STATUS.PENDING,
-            document_remarks: null,
-            final_submit: 0,
-          }),
-          company_id: companyObjectId,
-          project_id: projectObjectId,
-          data_id: new Types.ObjectId(String(item.data_id)),
-          info_type: 'gi',
-          parameter: item.parameter,
-          reference_unit: item.reference_unit,
-          details: item.details,
-          fy1: item.fy1,
-          fy2: item.fy2,
-          fy3: item.fy3,
-          fy4: item.fy4,
-          fy5: item.fy5 ?? 0,
-          extrapolated: item.extrapolated,
-        })),
+        doc.map((item) => {
+          const preserved = existingApprovalByDataId.get(String(item.data_id));
+          let document_status =
+            preserved?.document_status ?? PRIMARY_DATA_DOC_STATUS.PENDING;
+          let document_remarks = preserved?.document_remarks ?? null;
+          if (document_status === PRIMARY_DATA_DOC_STATUS.NOT_ACCEPTED) {
+            document_status = PRIMARY_DATA_DOC_STATUS.PENDING;
+            document_remarks = null;
+          }
+          return {
+            document_status,
+            document_remarks,
+            final_submit: preserved?.final_submit ?? 0,
+            company_id: companyObjectId,
+            project_id: projectObjectId,
+            data_id: new Types.ObjectId(String(item.data_id)),
+            info_type: 'gi',
+            parameter: item.parameter,
+            reference_unit: item.reference_unit,
+            details: item.details,
+            fy1: item.fy1,
+            fy2: item.fy2,
+            fy3: item.fy3,
+            fy4: item.fy4,
+            fy5: item.fy5 ?? 0,
+            extrapolated: item.extrapolated,
+          };
+        }),
+      );
+    }
+    if (giHadRejected) {
+      await this.logPrimaryDataSectionResubmit(
+        String(resolved.company_id),
+        String(resolved._id),
+        'gi',
       );
     }
     return {
@@ -12277,7 +12878,6 @@ export class CompanyProjectsService {
 
       const remark = String(body?.remarks ?? body?.remark ?? '').trim();
       const result = await this.primaryDataFormApproval(
-        companyId,
         projectId,
         infoType,
         statusCode,
@@ -12632,12 +13232,17 @@ export class CompanyProjectsService {
       if (
         !current ||
         (current.document_status === PRIMARY_DATA_DOC_STATUS.PENDING &&
-          candidate.document_status !== PRIMARY_DATA_DOC_STATUS.PENDING) ||
+          candidate.document_status !== PRIMARY_DATA_DOC_STATUS.PENDING &&
+          candidate.document_status !== PRIMARY_DATA_DOC_STATUS.NOT_ACCEPTED) ||
         (!current.document_remarks && candidate.document_remarks)
       ) {
         existingApprovalByDataId.set(key, candidate);
       }
     }
+
+    const eeHadRejected = [...existingApprovalByDataId.values()].some(
+      (v) => v.document_status === PRIMARY_DATA_DOC_STATUS.NOT_ACCEPTED,
+    );
 
     await this.primaryDataFormModel.deleteMany({
       company_id: companyObjectId,
@@ -12646,14 +13251,29 @@ export class CompanyProjectsService {
     });
     if (docs.length) {
       await this.primaryDataFormModel.insertMany(
-        docs.map((item) => ({
-          ...(existingApprovalByDataId.get(String(item.data_id)) ?? {
-            document_status: PRIMARY_DATA_DOC_STATUS.PENDING,
-            document_remarks: null,
-            final_submit: 0,
-          }),
-          ...item,
-        })),
+        docs.map((item) => {
+          const preserved = existingApprovalByDataId.get(String(item.data_id));
+          let document_status =
+            preserved?.document_status ?? PRIMARY_DATA_DOC_STATUS.PENDING;
+          let document_remarks = preserved?.document_remarks ?? null;
+          if (document_status === PRIMARY_DATA_DOC_STATUS.NOT_ACCEPTED) {
+            document_status = PRIMARY_DATA_DOC_STATUS.PENDING;
+            document_remarks = null;
+          }
+          return {
+            document_status,
+            document_remarks,
+            final_submit: preserved?.final_submit ?? 0,
+            ...item,
+          };
+        }),
+      );
+    }
+    if (eeHadRejected) {
+      await this.logPrimaryDataSectionResubmit(
+        String(resolved.company_id),
+        String(resolved._id),
+        'ee',
       );
     }
 
@@ -12776,6 +13396,20 @@ export class CompanyProjectsService {
       );
     }
 
+    const infoTypesTouched = new Set<string>();
+    for (const item of items) {
+      infoTypesTouched.add(String(item.info_type || 'gi').trim().toLowerCase());
+    }
+    for (const formType of infoTypesTouched) {
+      await this.handlePrimaryDataSectionResubmitAfterRejection(
+        companyId,
+        projectId,
+        formType,
+        cId,
+        pId,
+      );
+    }
+
     return { status: 'success', message: 'Success! Primary Data Updated.' };
   }
 
@@ -12859,20 +13493,31 @@ export class CompanyProjectsService {
   }
 
   /**
+   * Admin: same payload as GET /api/company/projects/:projectId/primary-data (form + primary_data_rows).
+   */
+  async getPrimaryDataForAdmin(projectOrCompanyId: string) {
+    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.getPrimaryData(String(resolved.company_id), String(resolved._id));
+  }
+
+  /**
    * Get Primary Data for Admin approval view (submitted rows only, grouped by info_type).
    * Sections derived dynamically from master.
    */
-  async getPrimaryDataForApproval(projectId: string) {
-    const project = await this.projectModel.findOne({ _id: projectId }).lean();
-    if (!project) {
+  async getPrimaryDataForApproval(projectOrCompanyId: string) {
+    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    if (!resolved?.company_id) {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
-    const projectAny = project as any;
-    const companyId = projectAny.company_id?.toString?.() || projectAny.company_id;
+    const effectiveProjectId = String(resolved._id);
+    const companyId = String(resolved.company_id);
 
     const [savedRows, masterList, sections] = await Promise.all([
       this.primaryDataFormModel
-        .find({ company_id: companyId, project_id: projectId, final_submit: 1 })
+        .find({ company_id: companyId, project_id: effectiveProjectId, final_submit: 1 })
         .lean(),
       this.masterPrimaryDataChecklistModel.find({ is_active: 1 }).sort({ checklist_order: 1 }).lean(),
       this.getSectionsFromMaster(),
@@ -12891,18 +13536,26 @@ export class CompanyProjectsService {
 
     const approvalCount = (savedRows as any[]).filter((r) => r.document_status === PRIMARY_DATA_DOC_STATUS.ACCEPTED).length;
     const confirmationFields = this.buildPrimaryDataConfirmationFields(savedRows as any[]);
+    const documentStatusLabels = this.getPrimaryDataDocStatusLabels();
+    const sectionApproval = this.buildSectionApprovalSummary(savedRows as any[], sections);
+    const project = await this.projectModel.findById(effectiveProjectId).lean();
+    const workflowBanner = project
+      ? await this.buildPrimaryDataWorkflowBanner(companyId, effectiveProjectId, project)
+      : { quickview_phase: 'normal' as const, latest_step: null, next_step: null };
 
     return {
       status: 'success',
       message: 'Primary data for approval',
       data: {
-        project_id: projectId,
+        project_id: effectiveProjectId,
         company_id: companyId,
         master_primary_data: masterList,
         saved_by_info_type: byInfoType,
         primary_data_approval_count: approvalCount,
         ...confirmationFields,
-        document_status_labels: this.getPrimaryDataDocStatusLabels(),
+        document_status_labels: documentStatusLabels,
+        section_approval: sectionApproval,
+        workflow_banner: workflowBanner,
         sections,
       },
     };
@@ -12911,16 +13564,20 @@ export class CompanyProjectsService {
   /**
    * Admin: Approve/reject one section (form_type). Updates document_status and document_remarks for that info_type.
    * When primary_data_approval_count >= 110, runs cii_activity(10).
+   * Company id is taken from the project document (no JWT required on the HTTP route).
    */
   async primaryDataFormApproval(
-    companyId: string,
     projectId: string,
     formType: string,
     status: number,
     remark?: string,
   ) {
-    const project = await this.projectModel.findOne({ _id: projectId, company_id: companyId });
+    const project = await this.projectModel.findById(projectId);
     if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const companyId = String((project as any).company_id ?? '');
+    if (!companyId) {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
 
@@ -13008,6 +13665,42 @@ export class CompanyProjectsService {
       .lean();
     const approvalCount = (updated as any[]).filter((r) => r.document_status === PRIMARY_DATA_DOC_STATUS.ACCEPTED).length;
 
+    if (status === PRIMARY_DATA_DOC_STATUS.ACCEPTED) {
+      const activities = await this.companyActivityModel
+        .find({ company_id: companyId, project_id: projectId })
+        .sort({ createdAt: -1 })
+        .lean();
+      const reuploadAccepted = await this.getPrimaryDataReuploadAcceptedQuickviewState(
+        companyId,
+        projectId,
+        activities as any[],
+        project,
+      );
+      if (reuploadAccepted) {
+        const alreadyLogged = (activities as any[]).some(
+          (a) =>
+            a.activity_type === 'cii' &&
+            typeof a.description === 'string' &&
+            /CII Approved the Re-Uploaded Primary Data Documents/i.test(a.description),
+        );
+        if (!alreadyLogged) {
+          await this.companyActivityModel.create({
+            company_id: companyId,
+            project_id: projectId,
+            description: reuploadAccepted.latestName,
+            activity_type: 'cii',
+            milestone_flow: 12,
+            milestone_completed: true,
+          });
+        }
+        const currentNext = Number((project as any).next_activities_id ?? 0);
+        if (currentNext < 13) {
+          (project as any).next_activities_id = 13;
+          await project.save();
+        }
+      }
+    }
+
     if (approvalCount >= 110) {
       await this.companyActivityModel.create({
         company_id: companyId,
@@ -13021,10 +13714,23 @@ export class CompanyProjectsService {
       await project.save();
     }
 
+    const workflowBanner = await this.buildPrimaryDataWorkflowBanner(
+      companyId,
+      projectId,
+      project,
+    );
+
     return {
       status: 'success',
       message: 'Primary Data save successfully',
-      data: { primary_data_approval_count: approvalCount },
+      data: {
+        primary_data_approval_count: approvalCount,
+        workflow_banner: workflowBanner,
+        section_approval: this.buildSectionApprovalSummary(
+          updated as any[],
+          await this.getSectionsFromMaster(),
+        ),
+      },
     };
   }
 

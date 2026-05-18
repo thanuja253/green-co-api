@@ -12,4 +12,9 @@ export class PrimaryDataFormApprovalDto {
   @IsOptional()
   @IsString()
   remark?: string;
+
+  /** Alias used by some admin UIs (same as `remark`). */
+  @IsOptional()
+  @IsString()
+  remarks?: string;
 }
