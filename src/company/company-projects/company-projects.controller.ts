@@ -49,6 +49,14 @@ import { PrimaryDataFormApprovalDto } from './dto/primary-data-approval.dto';
 import { UpdateAssessmentSubmittalDto } from './dto/update-assessment-submittal.dto';
 import { ScoreBandStatusDto } from './dto/score-band-status.dto';
 import {
+  ReviewProposalDocumentDto,
+  normalizeProposalReviewAction,
+} from './dto/review-proposal-document.dto';
+import {
+  ReviewWorkOrderDocumentDto,
+  normalizeWorkOrderReviewAction,
+} from './dto/review-work-order-document.dto';
+import {
   REGISTRATION_INFO_FILE_FIELDS,
   createRegistrationInfoValidationPipe,
   parseRegistrationMultipartBody,
@@ -368,11 +376,26 @@ export class CompanyProjectsController {
     @Request() req,
     @Param('projectId') projectId: string,
   ): Promise<any> {
-    const companyId = String(req?.user?.userId || '').trim();
-    if (companyId) {
-      return this.companyProjectsService.getQuickviewData(companyId, projectId);
+    const resolved = await this.companyProjectsService.resolveProjectForQuickview(projectId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Project not found or quickview not available.',
+      });
     }
-    return this.companyProjectsService.getQuickviewDataPublicByProject(projectId);
+    const resolvedCompanyId = String(resolved.company_id);
+    const resolvedProjectId = String(resolved._id);
+    const jwtCompanyId = String(req?.user?.userId || '').trim();
+    if (jwtCompanyId && jwtCompanyId !== resolvedCompanyId) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Project not found or quickview not available.',
+      });
+    }
+    return this.companyProjectsService.getQuickviewData(
+      resolvedCompanyId,
+      resolvedProjectId,
+    );
   }
 
   @Post(':projectId/milestones')
@@ -787,6 +810,56 @@ export class CompanyProjectsController {
     @Param('projectId') projectId: string,
   ): Promise<any> {
     return this.companyProjectsService.getProposalDocumentByProjectId(projectId);
+  }
+
+  /**
+   * Company dashboard Latest / Next for proposal (use after CII re-upload).
+   * GET /api/company/projects/:projectId/proposal-document/workflow
+   */
+  @Get(':projectId/proposal-document/workflow')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+  async getProposalDocumentWorkflow(
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.getProposalDocumentWorkflowByProjectId(projectId);
+  }
+
+  /**
+   * Company accepts or rejects the proposal PDF (before work-order upload).
+   * PATCH|POST /api/company/projects/:projectId/proposal-document/review
+   * Body: `{ "action": "accept" }` or `{ "status": "accept" }` (also `1` / `2`, `remark` / `remarks`).
+   */
+  @Patch(':projectId/proposal-document/review')
+  @Post(':projectId/proposal-document/review')
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+  async reviewProposalDocument(
+    @Request() req,
+    @Param('projectId') projectId: string,
+    @Body() dto: ReviewProposalDocumentDto,
+  ): Promise<any> {
+    const action = normalizeProposalReviewAction(dto);
+    if (!action) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Provide action or status as "accept" or "reject" (status 1 = accept, 2 = reject)',
+      });
+    }
+    const remarks = dto.remarks ?? dto.remark;
+    const companyId = String(req?.user?.userId || '').trim();
+    if (companyId) {
+      return this.companyProjectsService.reviewProposalDocument(
+        companyId,
+        projectId,
+        action,
+        remarks,
+      );
+    }
+    return this.companyProjectsService.reviewProposalDocumentByProjectId(
+      projectId,
+      action,
+      remarks,
+    );
   }
 
   @Get(':projectId/proposal-document/file')
@@ -1758,9 +1831,8 @@ export class CompanyProjectsController {
   }
 
   /**
-   * Re-upload work order PDF after CII rejected it (wo_status must be 2).
+   * Company re-uploads work order PDF after **CII/admin rejected** it (`wo_status = 2`).
    * POST /api/company/projects/:projectId/work-order-document/reupload
-   * Same multipart field as first upload: workorderdocument (PDF).
    */
   @Post(':projectId/work-order-document/reupload')
   @UseInterceptors(
@@ -1804,7 +1876,33 @@ export class CompanyProjectsController {
   }
 
   /**
-   * CII/Admin: accept (1) or reject (2) the latest work order for this project.
+   * Disabled — company does not accept/reject work order. Use upload/reupload; admin uses PATCH …/review.
+   */
+  @Patch(':projectId/work-order-document/company-review')
+  @Post(':projectId/work-order-document/company-review')
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+  async reviewWorkOrderDocumentByCompany(
+    @Param('projectId') projectId: string,
+    @Body() dto: ReviewWorkOrderDocumentDto,
+  ): Promise<any> {
+    const action = normalizeWorkOrderReviewAction(dto);
+    if (!action) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Provide action or status as "accept" or "reject" (status 1 = accept, 2 = reject)',
+      });
+    }
+    const remarks = dto.remarks ?? dto.remark;
+    return this.companyProjectsService.reviewWorkOrderDocumentByCompanyByProjectId(
+      projectId,
+      action,
+      remarks,
+    );
+  }
+
+  /**
+   * CII/Admin accept or reject **company-uploaded** work order.
    * PATCH /api/company/projects/:projectId/work-order-document/review
    * Body: { "wo_status": 1 | 2, "wo_remarks": "..." } (remarks required when wo_status is 2)
    */
@@ -1859,8 +1957,9 @@ export class CompanyProjectsController {
   }
 
   /**
-   * Upload Work Order Document (Company uploads; JWT = company account)
+   * Company uploads work order PDF (proposal must be accepted first).
    * POST /api/company/projects/:projectId/work-order-document
+   * Multipart field: workorderdocument (PDF).
    */
   @Post(':projectId/work-order-document')
   @UseInterceptors(
@@ -1918,9 +2017,70 @@ export class CompanyProjectsController {
   }
 
   /**
+   * Alias of POST …/work-order-document (company upload).
+   * POST /api/company/projects/:projectId/work-order-document/company-upload
+   */
+  @Post(':projectId/work-order-document/company-upload')
+  @UseInterceptors(
+    FileInterceptor('workorderdocument', {
+      storage: diskStorage({
+        destination: (req, file, cb) => {
+          const projectId = req.params.projectId;
+          const uploadPath = join(process.cwd(), 'uploads', 'companyproject', projectId);
+          if (!fs.existsSync(uploadPath)) {
+            fs.mkdirSync(uploadPath, { recursive: true });
+          }
+          cb(null, uploadPath);
+        },
+        filename: (req, file, cb) => {
+          const timestamp = Date.now();
+          cb(null, `${timestamp}_${file.originalname}`);
+        },
+      }),
+      limits: { fileSize: 10 * 1024 * 1024 },
+      fileFilter: (req, file, cb) => {
+        if (file.mimetype === 'application/pdf') {
+          cb(null, true);
+        } else {
+          cb(new Error('Invalid file type. Only PDF files are allowed.'), false);
+        }
+      },
+    }),
+  )
+  async uploadWorkOrderDocumentAsCompany(
+    @Param('projectId') projectId: string,
+    @UploadedFile() file: Express.Multer.File,
+  ): Promise<any> {
+    if (!file) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'No file uploaded. Use field workorderdocument (PDF).',
+      });
+    }
+    const resolved = await this.companyProjectsService.resolveProjectForQuickview(projectId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.companyProjectsService.uploadWorkOrderDocument(
+      String(resolved.company_id),
+      String(resolved._id),
+      file,
+    );
+  }
+
+  /**
+   * Company dashboard Latest / Next for work order (refresh after CII upload/re-upload).
+   * GET /api/company/projects/:projectId/work-order-document/workflow
+   */
+  @Get(':projectId/work-order-document/workflow')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+  async getWorkOrderDocumentWorkflow(@Param('projectId') projectId: string): Promise<any> {
+    return this.companyProjectsService.getWorkOrderDocumentWorkflowByProjectId(projectId);
+  }
+
+  /**
    * Latest work order metadata + status for any panel (Mongo project id or company id in path).
    * GET /api/company/projects/:projectId/work-order-document
-   * data: wo_status (0 pending, 1 accepted, 2 rejected), wo_status_label, can_reupload_work_order, awaiting_cii_review, work_order_id, …
    */
   @Get(':projectId/work-order-document')
   async getWorkOrderDocument(@Param('projectId') projectId: string): Promise<any> {

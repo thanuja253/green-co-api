@@ -91,6 +91,16 @@ export class CompanyProject {
   @Prop()
   proposal_document?: string;
 
+  /** 0 = pending company review, 1 = accepted, 2 = rejected (CII must re-upload). */
+  @Prop()
+  proposal_review_status?: number;
+
+  @Prop()
+  proposal_review_remarks?: string;
+
+  @Prop()
+  proposal_review_updated_at?: Date;
+
   @Prop()
   launch_training_document?: string;
 

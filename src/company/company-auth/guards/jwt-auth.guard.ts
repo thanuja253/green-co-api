@@ -1,5 +1,7 @@
 import { ExecutionContext, Injectable } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
+import { isProposalDocumentPublicApiPath } from './proposal-document-public-path.util';
+import { isWorkOrderDocumentPublicApiPath } from './work-order-document-public-path.util';
 
 @Injectable()
 export class JwtAuthGuard extends AuthGuard('jwt') {
@@ -7,11 +9,8 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
     const request = context.switchToHttp().getRequest();
     const method = String(request?.method || '').toUpperCase();
     const path = String(request?.path || request?.url || '');
-    const isProposalWrite =
-      ['POST', 'PUT', 'PATCH'].includes(method) &&
-      /\/api\/company\/projects\/[^/]+\/proposal-document(?:\/reupload)?$/.test(path);
 
-    if (isProposalWrite) {
+    if (isProposalDocumentPublicApiPath(path) || isWorkOrderDocumentPublicApiPath(path)) {
       return true;
     }
 
@@ -26,6 +25,3 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
     return super.canActivate(context);
   }
 }
-
-
-

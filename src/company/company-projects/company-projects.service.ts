@@ -238,6 +238,150 @@ function isWorkOrderRejected(woStatus: unknown): boolean {
   return Number(woStatus) === 2;
 }
 
+/** Company accept/reject on proposal PDF before work-order upload. */
+const PROPOSAL_REVIEW_STATUS = {
+  PENDING: 0,
+  ACCEPTED: 1,
+  REJECTED: 2,
+} as const;
+
+function hasProposalDocumentOnProject(project: { proposal_document?: string | null }): boolean {
+  return !!String(project.proposal_document || '').trim();
+}
+
+function resolveProposalReviewStatus(
+  project: {
+    proposal_review_status?: number | null;
+    proposal_document?: string | null;
+    next_activities_id?: number;
+  },
+  workOrder?: { wo_doc?: string | null; wo_status?: unknown } | null,
+): number | null {
+  if (!hasProposalDocumentOnProject(project)) return null;
+  const stored = (project as { proposal_review_status?: number | null }).proposal_review_status;
+  if (stored !== null && stored !== undefined && !Number.isNaN(Number(stored))) {
+    return Number(stored);
+  }
+  if (workOrder?.wo_doc && !isWorkOrderRejected(workOrder.wo_status)) {
+    return PROPOSAL_REVIEW_STATUS.ACCEPTED;
+  }
+  return PROPOSAL_REVIEW_STATUS.PENDING;
+}
+
+function proposalReviewStatusLabel(
+  reviewStatus: number | null,
+  workOrder?: { wo_status?: unknown } | null,
+): string {
+  if (reviewStatus === null) return 'not_uploaded';
+  if (reviewStatus === PROPOSAL_REVIEW_STATUS.PENDING) return 'pending_company_review';
+  if (reviewStatus === PROPOSAL_REVIEW_STATUS.REJECTED) return 'rejected_by_company';
+  if (reviewStatus === PROPOSAL_REVIEW_STATUS.ACCEPTED) {
+    if (workOrder && isWorkOrderRejected(workOrder.wo_status)) return 'work_order_rejected';
+    return 'accepted_by_company';
+  }
+  return 'not_uploaded';
+}
+
+/** Proposal card only — never fold work-order rejection into proposal status. */
+function proposalOnlyReviewStatusLabel(reviewStatus: number | null): string {
+  if (reviewStatus === null) return 'not_uploaded';
+  if (reviewStatus === PROPOSAL_REVIEW_STATUS.PENDING) return 'pending_company_review';
+  if (reviewStatus === PROPOSAL_REVIEW_STATUS.REJECTED) return 'rejected_by_company';
+  if (reviewStatus === PROPOSAL_REVIEW_STATUS.ACCEPTED) return 'accepted_by_company';
+  return 'not_uploaded';
+}
+
+function activityDescribesCiiProposalReupload(description: unknown): boolean {
+  return typeof description === 'string' && /CII Re-Uploaded Proposal/i.test(description);
+}
+
+/** Company accept/reject on CII-uploaded work order PDF. */
+const WO_COMPANY_REVIEW_STATUS = {
+  PENDING: 0,
+  ACCEPTED: 1,
+  REJECTED: 2,
+} as const;
+
+function isCiiUploadedWorkOrder(workOrder: { wo_uploaded_by?: string | null } | null): boolean {
+  if (!workOrder) return false;
+  const by = String((workOrder as { wo_uploaded_by?: string }).wo_uploaded_by || 'company').toLowerCase();
+  return by === 'cii';
+}
+
+function isCompanyUploadedWorkOrder(workOrder: { wo_uploaded_by?: string | null } | null): boolean {
+  return !!workOrder && !isCiiUploadedWorkOrder(workOrder);
+}
+
+function canCompanyReuploadWorkOrderDocument(
+  workOrder: { wo_status?: unknown; wo_doc?: string | null } | null,
+): boolean {
+  return !!workOrder && hasWorkOrderDocumentOnRow(workOrder) && isWorkOrderRejected(workOrder.wo_status);
+}
+
+function hasWorkOrderDocumentOnRow(workOrder: { wo_doc?: string | null } | null): boolean {
+  return !!String(workOrder?.wo_doc || '').trim();
+}
+
+function resolveWoCompanyReviewStatus(
+  workOrder: {
+    wo_company_review_status?: number | null;
+    wo_doc?: string | null;
+    wo_uploaded_by?: string | null;
+    wo_status?: unknown;
+  } | null,
+): number | null {
+  if (!workOrder || !hasWorkOrderDocumentOnRow(workOrder)) return null;
+  if (!isCiiUploadedWorkOrder(workOrder)) return null;
+  const stored = workOrder.wo_company_review_status;
+  if (stored !== null && stored !== undefined && !Number.isNaN(Number(stored))) {
+    return Number(stored);
+  }
+  return WO_COMPANY_REVIEW_STATUS.PENDING;
+}
+
+function woCompanyReviewStatusLabel(reviewStatus: number | null): string {
+  if (reviewStatus === null) return 'not_uploaded';
+  if (reviewStatus === WO_COMPANY_REVIEW_STATUS.PENDING) return 'pending_company_review';
+  if (reviewStatus === WO_COMPANY_REVIEW_STATUS.REJECTED) return 'rejected_by_company';
+  if (reviewStatus === WO_COMPANY_REVIEW_STATUS.ACCEPTED) return 'accepted_by_company';
+  return 'not_uploaded';
+}
+
+function activityDescribesCiiWorkOrderReupload(description: unknown): boolean {
+  return typeof description === 'string' && /CII Re-Uploaded Work Order/i.test(description);
+}
+
+/** CII/admin rejected via `wo_status = 2` while company review on CII-uploaded WO is still open. */
+function isCiiWorkOrderRejectedByAdmin(
+  workOrder: {
+    wo_status?: unknown;
+    wo_doc?: string | null;
+    wo_uploaded_by?: string | null;
+    wo_company_review_status?: number | null;
+  } | null,
+): boolean {
+  if (!workOrder || !hasWorkOrderDocumentOnRow(workOrder) || !isCiiUploadedWorkOrder(workOrder)) {
+    return false;
+  }
+  const reviewStatus = resolveWoCompanyReviewStatus(workOrder);
+  return (
+    reviewStatus === WO_COMPANY_REVIEW_STATUS.PENDING && isWorkOrderRejected(workOrder.wo_status)
+  );
+}
+
+function canCiiReuploadWorkOrderDocument(
+  workOrder: {
+    wo_status?: unknown;
+    wo_doc?: string | null;
+    wo_uploaded_by?: string | null;
+    wo_company_review_status?: number | null;
+  } | null,
+): boolean {
+  if (!workOrder) return false;
+  if (isCiiWorkOrderRejectedByAdmin(workOrder)) return true;
+  return resolveWoCompanyReviewStatus(workOrder) === WO_COMPANY_REVIEW_STATUS.REJECTED;
+}
+
 /**
  * Viewer URL for proposal PDF. Uses a **relative** `/api/...` path so the browser uses the **current page origin**
  * (e.g. React on :3001 + dev proxy). Absolute URLs from `API_BASE_URL` often point at the dev server without a proxy
@@ -4399,6 +4543,11 @@ export class CompanyProjectsService {
       .lean();
   }
 
+  /** Company/admin quickview: accept Mongo project id or company id (latest project). */
+  async resolveProjectForQuickview(projectOrCompanyId: string): Promise<any | null> {
+    return this.resolveProjectForAdmin(projectOrCompanyId);
+  }
+
   private static readonly MAX_COORDINATORS_PER_PROJECT = 3;
 
   private static readonly MAX_LAUNCH_TRAINING_SESSIONS = 4;
@@ -5058,7 +5207,27 @@ export class CompanyProjectsService {
       24: { name: 'Project close‑out / Sustenance phase', responsibility: 'Company' },
     };
 
-    // WO rejected → CII re-uploads proposal → company re-uploads WO (revision cycle)
+    const proposalReviewQv =
+      primaryDataReacceptance || primaryDataReuploadAccepted
+        ? null
+        : this.getProposalReviewQuickviewState(
+            project,
+            allActivities as any[],
+            workOrder as any,
+          );
+
+    const workOrderReviewQv =
+      primaryDataReacceptance ||
+      primaryDataReuploadAccepted ||
+      proposalReviewQv
+        ? null
+        : this.getWorkOrderReviewQuickviewState(
+            project,
+            workOrder as any,
+            allActivities as any[],
+          );
+
+    // WO rejected → CII re-uploads proposal → company re-uploads WO (revision cycle; after proposal accepted)
     const woEarly = workOrder as any;
     let proposalRevisionAfterWoReject: {
       latestName: string;
@@ -5067,7 +5236,12 @@ export class CompanyProjectsService {
       nextResp: string;
     } | null = null;
     let proposalWaitingForCiiProposalReupload = false;
-    if (isWorkOrderRejected(woEarly?.wo_status) && (project as any).proposal_document) {
+    if (
+      !proposalReviewQv &&
+      !workOrderReviewQv &&
+      isWorkOrderRejected(woEarly?.wo_status) &&
+      (project as any).proposal_document
+    ) {
       const rejectTs = woEarly.wo_doc_status_updated_at || woEarly.updatedAt;
       const reuploadAfterReject = (allActivities as any[]).find(
         (a) =>
@@ -5211,7 +5385,11 @@ export class CompanyProjectsService {
         : project.next_activities_id
           ? parseInt(String(project.next_activities_id), 10)
           : 1;
-    const rawNextId = proposalRevisionAfterWoReject
+    const rawNextId = workOrderReviewQv
+      ? workOrderReviewQv.nextId
+      : proposalReviewQv
+      ? proposalReviewQv.nextId
+      : proposalRevisionAfterWoReject
       ? 4
       : proposalWaitingForCiiProposalReupload
         ? 3
@@ -5231,7 +5409,11 @@ export class CompanyProjectsService {
     const isAtCloseOutNoRecertify = effectiveNextId === 24 && !recertificationNewProjectId;
     const ciiWoReviewStepName =
       'CII to Accept or Reject Work Order Document';
-    const nextStepDisplayName = proposalRevisionAfterWoReject
+    const nextStepDisplayName = workOrderReviewQv
+      ? workOrderReviewQv.nextName
+      : proposalReviewQv
+      ? proposalReviewQv.nextName
+      : proposalRevisionAfterWoReject
       ? proposalRevisionAfterWoReject.nextName
       : proposalWaitingForCiiProposalReupload
         ? milestoneSteps[3].name
@@ -5247,6 +5429,8 @@ export class CompanyProjectsService {
                 ? 'Certificate created'
                 : nextActivityInfo.name;
     const nextStepDisplayStatus =
+      workOrderReviewQv ||
+      proposalReviewQv ||
       proposalRevisionAfterWoReject ||
       proposalWaitingForCiiProposalReupload ||
       proposalRevisionAwaitingCiiWoReview ||
@@ -5258,7 +5442,11 @@ export class CompanyProjectsService {
           : isAtCloseOutNoRecertify
             ? 'Completed'
             : nextActivityInfo.status;
-    const nextStepDisplayResponsibility = proposalRevisionAfterWoReject
+    const nextStepDisplayResponsibility = workOrderReviewQv
+      ? workOrderReviewQv.nextResp
+      : proposalReviewQv
+      ? proposalReviewQv.nextResp
+      : proposalRevisionAfterWoReject
       ? proposalRevisionAfterWoReject.nextResp
       : proposalWaitingForCiiProposalReupload
         ? milestoneSteps[3].responsibility
@@ -5325,7 +5513,19 @@ export class CompanyProjectsService {
 
     // Build current activity data (Latest Step Completed)
     // Show the latest completed milestone, or fallback to latest activity description
-    const currentActivityData = proposalRevisionAfterWoReject
+    const currentActivityData = workOrderReviewQv
+      ? {
+          activity: workOrderReviewQv.latestName,
+          activity_status: 'Completed',
+          responsibility: workOrderReviewQv.latestResp,
+        }
+      : proposalReviewQv
+      ? {
+          activity: proposalReviewQv.latestName,
+          activity_status: 'Completed',
+          responsibility: proposalReviewQv.latestResp,
+        }
+      : proposalRevisionAfterWoReject
       ? {
           activity: proposalRevisionAfterWoReject.latestName,
           activity_status: 'Completed',
@@ -5436,7 +5636,21 @@ export class CompanyProjectsService {
       sustenance: 16,    // Preliminary Scoring – show Recertification when nextActivitiesId >= 16
     };
 
-    const next_step = proposalRevisionAfterWoReject
+    const next_step = workOrderReviewQv
+      ? {
+          id: workOrderReviewQv.nextId,
+          name: workOrderReviewQv.nextName,
+          status: 'Pending',
+          responsibility: workOrderReviewQv.nextResp,
+        }
+      : proposalReviewQv
+      ? {
+          id: proposalReviewQv.nextId,
+          name: proposalReviewQv.nextName,
+          status: 'Pending',
+          responsibility: proposalReviewQv.nextResp,
+        }
+      : proposalRevisionAfterWoReject
       ? {
           id: proposalRevisionAfterWoReject.nextId,
           name: proposalRevisionAfterWoReject.nextName,
@@ -5477,7 +5691,21 @@ export class CompanyProjectsService {
                 status: nextStepDisplayStatus,
                 responsibility: nextStepDisplayResponsibility,
               };
-    const latest_step = proposalRevisionAfterWoReject
+    const latest_step = workOrderReviewQv
+      ? {
+          id: workOrderReviewQv.latestId,
+          name: workOrderReviewQv.latestName,
+          status: 'Completed',
+          responsibility: workOrderReviewQv.latestResp,
+        }
+      : proposalReviewQv
+      ? {
+          id: proposalReviewQv.latestId,
+          name: proposalReviewQv.latestName,
+          status: 'Completed',
+          responsibility: proposalReviewQv.latestResp,
+        }
+      : proposalRevisionAfterWoReject
       ? {
           id: 3,
           name: proposalRevisionAfterWoReject.latestName,
@@ -5528,7 +5756,11 @@ export class CompanyProjectsService {
       ? 'awaiting_cii_review'
       : primaryDataReuploadAccepted
         ? 'reupload_accepted'
-        : 'normal';
+        : workOrderReviewQv
+          ? workOrderReviewQv.phase
+          : proposalReviewQv
+            ? proposalReviewQv.phase
+            : 'normal';
 
     return {
       status: 'success',
@@ -5558,6 +5790,79 @@ export class CompanyProjectsService {
               primary_data_reupload_accepted: {
                 latest_step_label: primaryDataReuploadAccepted.latestName,
                 next_step_label: primaryDataReuploadAccepted.nextName,
+              },
+            }
+          : {}),
+        ...(workOrderReviewQv
+          ? {
+              work_order_review: {
+                phase: workOrderReviewQv.phase,
+                wo_company_review_status: workOrderReviewQv.wo_company_review_status,
+                is_reupload_cycle: workOrderReviewQv.is_reupload_cycle,
+                latest_step_label: workOrderReviewQv.latestName,
+                next_step_label: workOrderReviewQv.nextName,
+                can_company_reupload_work_order:
+                  workOrderReviewQv.phase === 'work_order_rejected_awaiting_company',
+                can_admin_review_work_order:
+                  workOrderReviewQv.phase === 'work_order_pending_cii_review',
+                can_company_review_work_order: false,
+                show_accept_reject_buttons: false,
+                show_admin_accept_reject_buttons:
+                  workOrderReviewQv.phase === 'work_order_pending_cii_review',
+                is_cii_admin_rejected: workOrderReviewQv.is_cii_admin_rejected === true,
+              },
+              company_work_order_workflow: {
+                latest_step_completed: {
+                  activity: workOrderReviewQv.latestName,
+                  status: 'Completed',
+                  responsibility: workOrderReviewQv.latestResp,
+                },
+                next_step: {
+                  activity: workOrderReviewQv.nextName,
+                  status: 'Pending',
+                  responsibility: workOrderReviewQv.nextResp,
+                },
+                is_reupload_cycle: workOrderReviewQv.is_reupload_cycle,
+                show_accept_reject_buttons: false,
+                show_admin_accept_reject_buttons:
+                  workOrderReviewQv.phase === 'work_order_pending_cii_review',
+                instruction: workOrderReviewQv.is_reupload_cycle
+                  ? 'CII has re-uploaded the work order. Please review the new PDF and accept or reject it.'
+                  : 'Please review the work order document and accept or reject it.',
+              },
+            }
+          : {}),
+        ...(proposalReviewQv
+          ? {
+              proposal_review: {
+                phase: proposalReviewQv.phase,
+                proposal_review_status: proposalReviewQv.proposal_review_status,
+                is_reupload_cycle: proposalReviewQv.is_reupload_cycle,
+                latest_step_label: proposalReviewQv.latestName,
+                next_step_label: proposalReviewQv.nextName,
+                can_company_review_proposal:
+                  proposalReviewQv.proposal_review_status === PROPOSAL_REVIEW_STATUS.PENDING,
+                can_cii_reupload_proposal:
+                  proposalReviewQv.proposal_review_status === PROPOSAL_REVIEW_STATUS.REJECTED,
+              },
+              /** Bind company dashboard Latest / Next tables from this (not hardcoded strings). */
+              company_proposal_workflow: {
+                latest_step_completed: {
+                  activity: proposalReviewQv.latestName,
+                  status: 'Completed',
+                  responsibility: proposalReviewQv.latestResp,
+                },
+                next_step: {
+                  activity: proposalReviewQv.nextName,
+                  status: 'Pending',
+                  responsibility: proposalReviewQv.nextResp,
+                },
+                is_reupload_cycle: proposalReviewQv.is_reupload_cycle,
+                show_accept_reject_buttons:
+                  proposalReviewQv.proposal_review_status === PROPOSAL_REVIEW_STATUS.PENDING,
+                instruction: proposalReviewQv.is_reupload_cycle
+                  ? 'CII has re-uploaded the proposal document. Please review the new PDF and accept or reject it.'
+                  : 'Please review the proposal document and accept or reject it.',
               },
             }
           : {}),
@@ -5654,6 +5959,340 @@ export class CompanyProjectsService {
     return this.getQuickviewData(String((project as any).company_id), projectId);
   }
 
+  private hasCiiReuploadedProposalInActivities(activities: Array<{ description?: string }>): boolean {
+    return activities.some((a) => activityDescribesCiiProposalReupload(a.description));
+  }
+
+  private getProposalReviewQuickviewState(
+    project: any,
+    activities: Array<{ description?: string; createdAt?: Date }>,
+    workOrder: { wo_doc?: string | null; wo_status?: unknown } | null,
+  ): {
+    phase:
+      | 'proposal_pending_company'
+      | 'proposal_rejected_awaiting_cii'
+      | 'proposal_reuploaded_pending_company'
+      | 'proposal_accepted_awaiting_wo';
+    latestId: number;
+    latestName: string;
+    latestResp: string;
+    nextId: number;
+    nextName: string;
+    nextResp: string;
+    is_reupload_cycle: boolean;
+    proposal_review_status: number;
+  } | null {
+    if (!hasProposalDocumentOnProject(project)) return null;
+
+    const reviewStatus = resolveProposalReviewStatus(project, workOrder);
+    if (reviewStatus === null) return null;
+
+    const ciiReuploaded = this.hasCiiReuploadedProposalInActivities(activities);
+    const woHasDoc = !!workOrder?.wo_doc;
+
+    if (reviewStatus === PROPOSAL_REVIEW_STATUS.PENDING) {
+      if (ciiReuploaded) {
+        return {
+          phase: 'proposal_reuploaded_pending_company',
+          latestId: 3,
+          latestName: 'CII Re-Uploaded Proposal Document',
+          latestResp: 'CII',
+          nextId: 3,
+          nextName: 'Company to Accept or Reject Re-Uploaded Proposal Document',
+          nextResp: 'Company',
+          is_reupload_cycle: true,
+          proposal_review_status: PROPOSAL_REVIEW_STATUS.PENDING,
+        };
+      }
+      return {
+        phase: 'proposal_pending_company',
+        latestId: 3,
+        latestName: 'CII Uploaded Proposal Document',
+        latestResp: 'CII',
+        nextId: 3,
+        nextName: 'Company to Accept or Reject Proposal Document',
+        nextResp: 'Company',
+        is_reupload_cycle: false,
+        proposal_review_status: PROPOSAL_REVIEW_STATUS.PENDING,
+      };
+    }
+
+    if (reviewStatus === PROPOSAL_REVIEW_STATUS.REJECTED) {
+      return {
+        phase: 'proposal_rejected_awaiting_cii',
+        latestId: 3,
+        latestName: 'Company Rejected Proposal Document',
+        latestResp: 'Company',
+        nextId: 3,
+        nextName: 'CII to Re-Upload Proposal Document',
+        nextResp: 'CII',
+        is_reupload_cycle: true,
+        proposal_review_status: PROPOSAL_REVIEW_STATUS.REJECTED,
+      };
+    }
+
+    if (reviewStatus === PROPOSAL_REVIEW_STATUS.ACCEPTED) {
+      if (workOrder && isWorkOrderRejected(workOrder.wo_status) && woHasDoc) {
+        return null;
+      }
+      if (!woHasDoc && Number(project.next_activities_id || 0) <= 5) {
+        const acceptedAfterReupload = activities.some(
+          (a) =>
+            typeof a.description === 'string' &&
+            /Company Accepted Re-Uploaded Proposal Document/i.test(a.description),
+        );
+        return {
+          phase: 'proposal_accepted_awaiting_wo',
+          latestId: 3,
+          latestName:
+            acceptedAfterReupload || ciiReuploaded
+              ? 'Company Accepted Re-Uploaded Proposal Document'
+              : 'Company Accepted Proposal Document',
+          latestResp: 'Company',
+          nextId: 4,
+          nextName: 'Company Uploaded Work Order Document',
+          nextResp: 'Company',
+          is_reupload_cycle: acceptedAfterReupload || ciiReuploaded,
+          proposal_review_status: PROPOSAL_REVIEW_STATUS.ACCEPTED,
+        };
+      }
+    }
+
+    return null;
+  }
+
+  /** Latest/next for admin + company panels after proposal upload or re-upload. */
+  private async getProposalQuickviewSnippet(companyId: string, projectId: string) {
+    const qv = await this.getQuickviewData(companyId, projectId);
+    const d = qv.data || {};
+    return {
+      quickview_phase: d.quickview_phase ?? 'normal',
+      quickview_display: d.quickview_display ?? null,
+      latest_step: d.latest_step ?? null,
+      next_step: d.next_step ?? null,
+      proposal_review: d.proposal_review ?? null,
+    };
+  }
+
+  private buildProposalReviewUiPayload(
+    project: any,
+    workOrder: { wo_status?: unknown; wo_remarks?: string; wo_doc?: string } | null,
+    activities: Array<{ description?: string }>,
+  ) {
+    const reviewStatus = resolveProposalReviewStatus(project, workOrder);
+    const statusLabel = proposalOnlyReviewStatusLabel(reviewStatus);
+    const ciiReuploaded = this.hasCiiReuploadedProposalInActivities(activities);
+    const qv = this.getProposalReviewQuickviewState(project, activities, workOrder);
+
+    return {
+      proposal_review_status: reviewStatus,
+      proposal_review_status_label: statusLabel,
+      proposal_review_remarks: project.proposal_review_remarks ?? null,
+      proposal_review_updated_at: project.proposal_review_updated_at
+        ? new Date(project.proposal_review_updated_at).toISOString()
+        : null,
+      can_company_review_proposal: reviewStatus === PROPOSAL_REVIEW_STATUS.PENDING,
+      show_accept_reject_buttons: reviewStatus === PROPOSAL_REVIEW_STATUS.PENDING,
+      can_upload_work_order:
+        reviewStatus === PROPOSAL_REVIEW_STATUS.ACCEPTED &&
+        (!workOrder?.wo_doc ||
+          (workOrder && isWorkOrderRejected(workOrder.wo_status))),
+      can_upload_proposal_first_time: !hasProposalDocumentOnProject(project),
+      can_replace_proposal: reviewStatus === PROPOSAL_REVIEW_STATUS.REJECTED,
+      can_cii_reupload_proposal:
+        reviewStatus === PROPOSAL_REVIEW_STATUS.REJECTED ||
+        (workOrder != null &&
+          isWorkOrderRejected(workOrder.wo_status) &&
+          hasProposalDocumentOnProject(project)),
+      is_proposal_reupload_cycle: ciiReuploaded,
+      quickview_phase: qv?.phase ?? null,
+      latest_step_label: qv?.latestName ?? null,
+      next_step_label: qv?.nextName ?? null,
+    };
+  }
+
+  /**
+   * Company accepts or rejects the proposal PDF (no JWT — resolves company from project id).
+   */
+  async reviewProposalDocumentByProjectId(
+    projectId: string,
+    action: 'accept' | 'reject',
+    remarks?: string,
+  ) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.reviewProposalDocument(
+      String(resolved.company_id),
+      String(resolved._id),
+      action,
+      remarks,
+    );
+  }
+
+  /**
+   * Company accepts or rejects the proposal PDF (before work-order upload).
+   */
+  async reviewProposalDocument(
+    companyId: string,
+    projectId: string,
+    action: 'accept' | 'reject',
+    remarks?: string,
+  ) {
+    const project = await this.projectModel.findOne({
+      _id: projectId,
+      company_id: companyId,
+    });
+
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    if (!hasProposalDocumentOnProject(project)) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'No proposal document to review. Wait for CII to upload the proposal.',
+      });
+    }
+
+    const latestWo = await this.companyWorkOrderModel
+      .findOne({ company_id: companyId, project_id: projectId })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const reviewStatus = resolveProposalReviewStatus(project, latestWo);
+    if (reviewStatus !== PROPOSAL_REVIEW_STATUS.PENDING) {
+      throw new BadRequestException({
+        status: 'error',
+        code: 'PROPOSAL_ALREADY_REVIEWED',
+        message:
+          reviewStatus === PROPOSAL_REVIEW_STATUS.ACCEPTED
+            ? 'Proposal is already accepted. Upload your work order document.'
+            : 'Proposal was rejected. CII must re-upload the proposal document.',
+        data: {
+          proposal_review_status: reviewStatus,
+          proposal_review_status_label: proposalReviewStatusLabel(reviewStatus, latestWo),
+        },
+      });
+    }
+
+    const activities = await this.companyActivityModel
+      .find({ company_id: companyId, project_id: projectId })
+      .sort({ createdAt: -1 })
+      .lean();
+    const ciiReuploaded = this.hasCiiReuploadedProposalInActivities(activities as any[]);
+    const now = new Date();
+
+    if (action === 'reject') {
+      const reason = String(remarks || '').trim();
+      if (!reason) {
+        throw new BadRequestException({
+          status: 'error',
+          message: 'remarks is required when rejecting the proposal document',
+        });
+      }
+      (project as any).proposal_review_status = PROPOSAL_REVIEW_STATUS.REJECTED;
+      (project as any).proposal_review_remarks = reason;
+      (project as any).proposal_review_updated_at = now;
+      (project as any).next_activities_id = 3;
+      await project.save();
+
+      await this.companyActivityModel.create({
+        company_id: companyId,
+        project_id: projectId,
+        description: 'Company Rejected Proposal Document',
+        activity_type: 'company',
+        milestone_flow: 3,
+        milestone_completed: false,
+      });
+
+      this.notificationsService
+        .create(
+          'Proposal document rejected',
+          `The company rejected the proposal document for project ${project.project_id || projectId}. Reason: ${reason}. Please re-upload the proposal.`,
+          'A',
+        )
+        .catch((e) =>
+          console.error('[Proposal Review] Reject notification failed:', e?.message || e),
+        );
+
+      const refreshed = await this.getProposalDocument(companyId, projectId);
+      const reviewUi = this.buildProposalReviewUiPayload(
+        project.toObject(),
+        latestWo,
+        activities as any[],
+      );
+      const quickview = await this.getProposalQuickviewSnippet(companyId, projectId);
+      return {
+        status: 'success',
+        message: 'Proposal document rejected',
+        data: {
+          ...refreshed.data,
+          ...reviewUi,
+          action: 'reject',
+          quickview,
+        },
+      };
+    }
+
+    (project as any).proposal_review_status = PROPOSAL_REVIEW_STATUS.ACCEPTED;
+    (project as any).proposal_review_remarks = undefined;
+    (project as any).proposal_review_updated_at = now;
+    const prevNext = Number((project as any).next_activities_id || 0);
+    (project as any).next_activities_id = 4;
+    await project.save();
+    await this.notifyStepTransition(
+      companyId,
+      projectId,
+      prevNext,
+      4,
+      ciiReuploaded ? 'Re-uploaded proposal accepted' : 'Proposal accepted',
+    );
+
+    await this.companyActivityModel.create({
+      company_id: companyId,
+      project_id: projectId,
+      description: ciiReuploaded
+        ? 'Company Accepted Re-Uploaded Proposal Document'
+        : 'Company Accepted Proposal Document',
+      activity_type: 'company',
+      milestone_flow: 3,
+      milestone_completed: true,
+    });
+
+    this.notificationsService
+      .create(
+        'Proposal document accepted',
+        `The company accepted the proposal document for project ${project.project_id || projectId}. They can now upload the work order.`,
+        'A',
+      )
+      .catch((e) =>
+        console.error('[Proposal Review] Accept notification failed:', e?.message || e),
+      );
+
+    const refreshed = await this.getProposalDocument(companyId, projectId);
+    const reviewUi = this.buildProposalReviewUiPayload(
+      project.toObject(),
+      latestWo,
+      activities as any[],
+    );
+    const quickview = await this.getProposalQuickviewSnippet(companyId, projectId);
+    return {
+      status: 'success',
+      message: ciiReuploaded
+        ? 'Re-uploaded proposal document accepted'
+        : 'Proposal document accepted',
+      data: {
+        ...refreshed.data,
+        ...reviewUi,
+        action: 'accept',
+        next_activities_id: 4,
+        quickview,
+      },
+    };
+  }
+
   /**
    * Upload proposal document (Admin function - can be called directly or via MongoDB)
    * This logs milestone 3: "CII Uploaded Proposal Document"
@@ -5680,8 +6319,30 @@ export class CompanyProjectsService {
     const relativePath = `uploads/company/${projectId}/${file.filename}`;
     const hadExistingProposal = !!String((project as any).proposal_document || '').trim();
 
+    const latestWoForGate = await this.companyWorkOrderModel
+      .findOne({ company_id: companyId, project_id: projectId })
+      .sort({ createdAt: -1 })
+      .lean();
+    const reviewBeforeUpload = resolveProposalReviewStatus(project, latestWoForGate);
+
+    if (hadExistingProposal && reviewBeforeUpload !== PROPOSAL_REVIEW_STATUS.REJECTED) {
+      throw new BadRequestException({
+        status: 'error',
+        code: 'PROPOSAL_REPLACE_USE_REUPLOAD',
+        message:
+          'A proposal is already on file. Use POST …/proposal-document/reupload only after the company rejects the proposal, or wait for their review.',
+        data: {
+          proposal_review_status: reviewBeforeUpload,
+          proposal_review_status_label: proposalReviewStatusLabel(reviewBeforeUpload, latestWoForGate),
+        },
+      });
+    }
+
     // Save proposal document as relative path so server can move host/base URL safely.
     project.proposal_document = relativePath;
+    (project as any).proposal_review_status = PROPOSAL_REVIEW_STATUS.PENDING;
+    (project as any).proposal_review_remarks = undefined;
+    (project as any).proposal_review_updated_at = new Date();
     await project.save();
 
     // Generate company registration ID if not exists (similar to Laravel flow)
@@ -5753,17 +6414,19 @@ export class CompanyProjectsService {
         );
     }
 
-    // Update next_activities_id to 4 (Company Will Upload Work order)
+    // Stay on milestone 3 until company accepts; then they move to work-order upload (4).
     const prevNextActivity = Number((project as any).next_activities_id || 0);
-    project.next_activities_id = 4;
+    project.next_activities_id = 3;
     await project.save();
-    await this.notifyStepTransition(
-      String(project.company_id),
-      String(project._id),
-      prevNextActivity,
-      4,
-      hadExistingProposal ? 'Proposal document reuploaded' : 'Proposal document uploaded',
-    );
+    if (prevNextActivity !== 3) {
+      await this.notifyStepTransition(
+        String(project.company_id),
+        String(project._id),
+        prevNextActivity,
+        3,
+        hadExistingProposal ? 'Proposal document reuploaded' : 'Proposal document uploaded',
+      );
+    }
 
     const refreshed = await this.getProposalDocument(companyId, projectId);
     const proposalWorkorder = await this.getProposalWorkOrderDocuments(companyId, projectId);
@@ -5775,6 +6438,7 @@ export class CompanyProjectsService {
     });
 
     const pw = proposalWorkorder.data as { proposal_document?: unknown; work_order?: unknown };
+    const quickview = await this.getProposalQuickviewSnippet(companyId, projectId);
     return {
       status: 'success',
       message: hadExistingProposal
@@ -5789,6 +6453,7 @@ export class CompanyProjectsService {
         project_id: projectId,
         next_activities_id: project.next_activities_id,
         reuploaded: hadExistingProposal,
+        quickview,
       },
     };
   }
@@ -5838,20 +6503,24 @@ export class CompanyProjectsService {
       .findOne({ company_id: companyId, project_id: projectId })
       .sort({ createdAt: -1 });
 
+    const reviewStatus = resolveProposalReviewStatus(project, latestWo);
     const woRejected = latestWo != null && isWorkOrderRejected(latestWo.wo_status);
-    /** No WO row yet, or WO row exists but status not set (e.g. proposal rejected before WO flow) — still allow CII to replace the PDF. */
     const noWorkOrderRow = latestWo == null;
     const woStatusUnset =
       latestWo != null &&
       (latestWo.wo_status === null || latestWo.wo_status === undefined);
+    const proposalRejectedByCompany = reviewStatus === PROPOSAL_REVIEW_STATUS.REJECTED;
+    const legacyWoReuploadGate = woRejected || noWorkOrderRow || woStatusUnset;
 
-    if (!woRejected && !noWorkOrderRow && !woStatusUnset) {
+    if (!proposalRejectedByCompany && !legacyWoReuploadGate) {
       throw new BadRequestException({
         status: 'error',
         code: 'PROPOSAL_REUPLOAD_NOT_ALLOWED',
         message:
-          'Proposal reupload is allowed when there is no work order yet, work order status is unset, or the latest work order is rejected (wo_status = 2). If a work order is pending review, use POST …/proposal-document instead.',
+          'Proposal reupload is allowed after the company rejects the proposal, or when there is no work order / work order is rejected (legacy).',
         data: {
+          proposal_review_status: reviewStatus,
+          proposal_review_status_label: proposalReviewStatusLabel(reviewStatus, latestWo),
           latest_wo_status: latestWo?.wo_status ?? null,
           documents_path: `GET /api/company/projects/${projectId}/proposal-workorder-documents`,
         },
@@ -5883,8 +6552,10 @@ export class CompanyProjectsService {
       }
     }
     project.proposal_document = relativePath;
-    // Company’s turn again: re-upload work order against the revised proposal (same cycle as first time after proposal).
-    project.next_activities_id = 4;
+    (project as any).proposal_review_status = PROPOSAL_REVIEW_STATUS.PENDING;
+    (project as any).proposal_review_remarks = undefined;
+    (project as any).proposal_review_updated_at = new Date();
+    project.next_activities_id = 3;
     await project.save();
 
     await this.companyActivityModel.create({
@@ -5915,7 +6586,7 @@ export class CompanyProjectsService {
       this.notificationsService
         .create(
           'Proposal document reuploaded',
-          `Proposal document has been reuploaded for your project ${projLabel}. Please review it and re-upload your work order if needed.`,
+          `Proposal document has been reuploaded for your project ${projLabel}. Please review and accept or reject it.`,
           notifyType,
           notifyUserId,
         )
@@ -5928,6 +6599,7 @@ export class CompanyProjectsService {
     const proposalWorkorder = await this.getProposalWorkOrderDocuments(companyId, projectId);
     const pw = proposalWorkorder.data as { proposal_document?: unknown; work_order?: unknown };
     const { work_order: _woRoot, ...refreshedProposalOnly } = refreshed.data as Record<string, unknown>;
+    const quickview = await this.getProposalQuickviewSnippet(companyId, projectId);
     return {
       status: 'success',
       message: 'Proposal document replaced successfully',
@@ -5939,8 +6611,9 @@ export class CompanyProjectsService {
           proposal_document: pw?.proposal_document ?? null,
         },
         project_id: projectId,
-        next_activities_id: 4,
+        next_activities_id: 3,
         replaced: true,
+        quickview,
       },
     };
   }
@@ -5983,12 +6656,24 @@ export class CompanyProjectsService {
     const woStatus = woAny != null ? (woAny.wo_status ?? null) : null;
     const woRemarks = woAny?.wo_remarks ?? null;
     const woRejected = isWorkOrderRejected(woStatus);
-    const noWorkOrderRow = latestWoLean == null;
-    const woStatusUnset =
-      latestWoLean != null &&
-      (woAny?.wo_status === null || woAny?.wo_status === undefined);
-    const canReplaceProposalPdf =
-      woRejected || noWorkOrderRow || woStatusUnset;
+    const adminRejectedWo =
+      latestWoLean != null && isCiiWorkOrderRejectedByAdmin(latestWoLean as any);
+    const reviewStatus = resolveProposalReviewStatus(project, latestWoLean);
+    const reviewStatusLabel = proposalOnlyReviewStatusLabel(reviewStatus);
+    const activities = await this.companyActivityModel
+      .find({ company_id: companyId, project_id: projectId })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean();
+    const reviewUi = this.buildProposalReviewUiPayload(
+      project.toObject(),
+      latestWoLean,
+      activities as any[],
+    );
+    const workOrderUi =
+      latestWoLean && hasWorkOrderDocumentOnRow(latestWoLean as any)
+        ? this.buildWorkOrderReviewUiPayload(latestWoLean as any, activities as any[])
+        : null;
 
     if (!project.proposal_document) {
       return {
@@ -6016,44 +6701,25 @@ export class CompanyProjectsService {
               }
             : null,
           can_replace_proposal: false,
+          ...reviewUi,
         },
       };
     }
 
-    // Proposal is considered "approved by company" once company uploads work order for this project.
     const workOrder = latestWoLean;
-    const proposalAcceptedByCompany = !!workOrder && !woRejected;
-
-    let proposalStatus: number;
-    let proposalStatusLabel: string;
-    let proposalRemarks: string | null;
-    let proposalStatusUpdatedAt: string | null;
-
-    if (woRejected) {
-      proposalStatus = 2;
-      proposalStatusLabel = 'work_order_rejected';
-      proposalRemarks = woRemarks ?? null;
-      proposalStatusUpdatedAt =
-        (workOrder as any)?.wo_doc_status_updated_at?.toISOString?.() ??
-        (workOrder as any)?.updatedAt?.toISOString?.() ??
-        null;
-    } else if (proposalAcceptedByCompany) {
-      proposalStatus = 1;
-      proposalStatusLabel = 'accepted_by_company';
-      proposalRemarks = null;
-      proposalStatusUpdatedAt =
-        (workOrder as any).createdAt?.toISOString?.() ??
-        (workOrder as any).updatedAt?.toISOString?.() ??
-        null;
-    } else {
-      proposalStatus = 0;
-      proposalStatusLabel = 'pending_by_company';
-      proposalRemarks = null;
-      proposalStatusUpdatedAt =
-        (project as any).updatedAt?.toISOString?.() ??
-        (project as any).createdAt?.toISOString?.() ??
-        null;
-    }
+    const proposalStatus = reviewStatus ?? PROPOSAL_REVIEW_STATUS.PENDING;
+    const proposalStatusLabel = reviewStatusLabel;
+    const proposalRemarks =
+      reviewStatus === PROPOSAL_REVIEW_STATUS.REJECTED
+        ? (project as any).proposal_review_remarks ?? null
+        : null;
+    const proposalStatusUpdatedAt =
+      (project as any).proposal_review_updated_at?.toISOString?.() ??
+      (workOrder as any)?.wo_doc_status_updated_at?.toISOString?.() ??
+      (project as any).updatedAt?.toISOString?.() ??
+      (project as any).createdAt?.toISOString?.() ??
+      null;
+    const canReplaceProposalPdf = reviewUi.can_cii_reupload_proposal;
 
     const proposalRaw = String(project.proposal_document || '');
     const filename = proposalRaw.split('/').pop() || 'proposal.pdf';
@@ -6079,10 +6745,9 @@ export class CompanyProjectsService {
          */
         proposal_status: proposalStatusLabel,
         proposal_status_label: proposalStatusLabel,
-        /** Numeric workflow: 0 = pending company / WO, 1 = accepted, 2 = WO rejected. */
+        /** Numeric proposal review: 0 = pending, 1 = accepted, 2 = rejected by company. */
         proposal_status_code: proposalStatus,
         proposal_remarks: proposalRemarks,
-        /** Last change to workflow / WO relative to proposal review (may differ from file upload time). */
         proposal_status_updated_at: proposalStatusUpdatedAt,
         /** When the PDF on disk was last modified (best for showing “latest file” after reupload). */
         proposal_file_updated_at,
@@ -6099,10 +6764,16 @@ export class CompanyProjectsService {
                 woAny?.updatedAt?.toISOString?.() ??
                 woAny?.createdAt?.toISOString?.() ??
                 null,
+              ...this.workOrderStatusExtras(woAny),
+              ...(workOrderUi || {}),
             }
           : null,
-        /** True when CII may call POST/PUT/PATCH …/proposal-document/reupload (no WO / unset WO status / WO rejected). */
+        /** Use for work-order panel — do not reuse proposal_status / proposal_remarks when CII rejected WO. */
+        work_order_review: workOrderUi,
+        work_order_rejected_by_cii: adminRejectedWo,
+        work_order_status_label: workOrderUi?.wo_company_review_status_label ?? null,
         can_replace_proposal: canReplaceProposalPdf,
+        ...reviewUi,
       },
     };
   }
@@ -6117,6 +6788,75 @@ export class CompanyProjectsService {
     }
     const effectiveProjectId = String(project._id);
     return this.getProposalDocument(String(project.company_id), effectiveProjectId);
+  }
+
+  /**
+   * Company dashboard: latest/next proposal steps only (refresh after CII re-upload).
+   * GET …/proposal-document/workflow
+   */
+  async getProposalDocumentWorkflowByProjectId(projectOrCompanyId: string) {
+    const resolved = await this.resolveProjectForQuickview(projectOrCompanyId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const companyId = String(resolved.company_id);
+    const projectId = String(resolved._id);
+    const [project, activities, latestWo] = await Promise.all([
+      this.projectModel.findById(projectId).lean(),
+      this.companyActivityModel
+        .find({ company_id: companyId, project_id: projectId })
+        .sort({ createdAt: -1 })
+        .limit(50)
+        .lean(),
+      this.companyWorkOrderModel
+        .findOne({ company_id: companyId, project_id: projectId })
+        .sort({ createdAt: -1 })
+        .lean(),
+    ]);
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const qv = this.getProposalReviewQuickviewState(
+      project,
+      activities as any[],
+      latestWo as any,
+    );
+    const reviewUi = this.buildProposalReviewUiPayload(
+      project,
+      latestWo as any,
+      activities as any[],
+    );
+    const quickview = await this.getProposalQuickviewSnippet(companyId, projectId);
+    return {
+      status: 'success',
+      message: 'Proposal workflow loaded successfully',
+      data: {
+        project_id: projectId,
+        company_id: companyId,
+        ...reviewUi,
+        quickview,
+        company_proposal_workflow: qv
+          ? {
+              latest_step_completed: {
+                activity: qv.latestName,
+                status: 'Completed',
+                responsibility: qv.latestResp,
+              },
+              next_step: {
+                activity: qv.nextName,
+                status: 'Pending',
+                responsibility: qv.nextResp,
+              },
+              is_reupload_cycle: qv.is_reupload_cycle,
+              show_accept_reject_buttons:
+                qv.proposal_review_status === PROPOSAL_REVIEW_STATUS.PENDING,
+              instruction: qv.is_reupload_cycle
+                ? 'CII has re-uploaded the proposal document. Please review the new PDF and accept or reject it.'
+                : 'Please review the proposal document and accept or reject it.',
+            }
+          : null,
+      },
+    };
   }
 
   /**
@@ -6155,10 +6895,15 @@ export class CompanyProjectsService {
     const woStatusUnset =
       latestWoLean != null &&
       (woAny?.wo_status === null || woAny?.wo_status === undefined);
+    const reviewStatus = resolveProposalReviewStatus(project, latestWoLean);
 
     const proposalRaw = String((project as any).proposal_document || '').trim();
     const reupload_allowed =
-      Boolean(proposalRaw) && (woRejected || noWorkOrderRow || woStatusUnset);
+      Boolean(proposalRaw) &&
+      (reviewStatus === PROPOSAL_REVIEW_STATUS.REJECTED ||
+        woRejected ||
+        noWorkOrderRow ||
+        woStatusUnset);
 
     if (!proposalRaw) {
       return {
@@ -6481,15 +7226,37 @@ export class CompanyProjectsService {
     const woStatusUnset =
       workOrderAny != null &&
       (workOrderAny.wo_status === null || workOrderAny.wo_status === undefined);
+    const reviewStatus = resolveProposalReviewStatus(projectAny, workOrderAny);
+    const proposalRejectedByCompany = reviewStatus === PROPOSAL_REVIEW_STATUS.REJECTED;
     const proposalReuploadEligible =
-      Boolean(hasProposalDoc) && (woRejected || noWorkOrderRow || woStatusUnset);
-    const proposal_badge_label =
-      hasProposalDoc && woRejected ? 'Rejected by company' : null;
+      Boolean(hasProposalDoc) &&
+      (proposalRejectedByCompany || woRejected || noWorkOrderRow || woStatusUnset);
+    const proposal_badge_label = !hasProposalDoc
+      ? null
+      : proposalRejectedByCompany
+        ? 'Proposal rejected by company'
+        : reviewStatus === PROPOSAL_REVIEW_STATUS.PENDING
+          ? 'Awaiting company review'
+          : null;
     const proposalReuploadPath = `/api/company/projects/${projectId}/proposal-document/reupload`;
+    const woActivities = await this.companyActivityModel
+      .find({ company_id: companyId, project_id: projectId })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean();
+    const workOrderReviewUi = workOrderAny
+      ? this.buildWorkOrderReviewUiPayload(workOrderAny, woActivities as any[])
+      : {};
+    const reviewUi = this.buildProposalReviewUiPayload(
+      projectAny,
+      workOrderAny,
+      woActivities as any[],
+    );
     const proposalUploadHints = {
       proposal_badge_label,
       /** When set, use POST|PUT|PATCH on this path with multipart PDF (single proposal reupload API). */
       proposal_reupload_path: proposalReuploadEligible ? proposalReuploadPath : null,
+      ...reviewUi,
     };
 
     if (hasProposalDoc) {
@@ -6537,6 +7304,7 @@ export class CompanyProjectsService {
         uploaded_at: workOrderAny.createdAt?.toISOString?.() ?? new Date().toISOString(),
         ...woExtras,
         ...woAccept,
+        ...workOrderReviewUi,
       };
     } else if (workOrderAny) {
       const woExtras = this.workOrderStatusExtras(workOrderAny);
@@ -6551,10 +7319,16 @@ export class CompanyProjectsService {
         uploaded_at: workOrderAny.createdAt?.toISOString?.() ?? null,
         ...woExtras,
         ...woAccept,
+        ...workOrderReviewUi,
       };
     } else {
       response.work_order = null;
     }
+
+    response.work_order_review = workOrderAny ? workOrderReviewUi : null;
+    response.work_order_rejected_by_cii = workOrderAny
+      ? isCiiWorkOrderRejectedByAdmin(workOrderAny)
+      : false;
 
     return {
       status: 'success',
@@ -6663,6 +7437,595 @@ export class CompanyProjectsService {
     };
   }
 
+  private hasCiiReuploadedWorkOrderInActivities(activities: Array<{ description?: string }>): boolean {
+    return activities.some((a) => activityDescribesCiiWorkOrderReupload(a.description));
+  }
+
+  /** Company-uploaded WO — CII reviews via legacy `wo_status`. */
+  private getLegacyCompanyUploadWoQuickviewState(workOrder: any): {
+    phase:
+      | 'work_order_pending_cii_review'
+      | 'work_order_rejected_awaiting_company'
+      | 'work_order_accepted';
+    latestId: number;
+    latestName: string;
+    latestResp: string;
+    nextId: number;
+    nextName: string;
+    nextResp: string;
+    is_reupload_cycle: boolean;
+    wo_company_review_status: number;
+  } | null {
+    const st = Number(workOrder.wo_status ?? 0);
+    if (st === 1) return null;
+    if (st === 2) {
+      return {
+        phase: 'work_order_rejected_awaiting_company',
+        latestId: 4,
+        latestName: 'CII Rejected Work Order Document',
+        latestResp: 'CII',
+        nextId: 4,
+        nextName: 'Company to Re-Upload Work Order Document',
+        nextResp: 'Company',
+        is_reupload_cycle: true,
+        wo_company_review_status: WO_COMPANY_REVIEW_STATUS.REJECTED,
+      };
+    }
+    return {
+      phase: 'work_order_pending_cii_review',
+      latestId: 4,
+      latestName: 'Company Uploaded Work Order Document',
+      latestResp: 'Company',
+      nextId: 5,
+      nextName: 'CII to Accept or Reject Work Order Document',
+      nextResp: 'CII',
+      is_reupload_cycle: false,
+      wo_company_review_status: WO_COMPANY_REVIEW_STATUS.PENDING,
+    };
+  }
+
+  private getWorkOrderReviewQuickviewState(
+    project: any,
+    workOrder: any | null,
+    activities: Array<{ description?: string }>,
+  ): {
+    phase:
+      | 'work_order_pending_company'
+      | 'work_order_rejected_awaiting_cii'
+      | 'work_order_reuploaded_pending_company'
+      | 'work_order_accepted'
+      | 'work_order_pending_cii_review'
+      | 'work_order_rejected_awaiting_company';
+    latestId: number;
+    latestName: string;
+    latestResp: string;
+    nextId: number;
+    nextName: string;
+    nextResp: string;
+    is_reupload_cycle: boolean;
+    wo_company_review_status: number;
+    is_cii_admin_rejected?: boolean;
+  } | null {
+    if (!workOrder || !hasWorkOrderDocumentOnRow(workOrder)) {
+      return null;
+    }
+    if (!isCiiUploadedWorkOrder(workOrder)) {
+      return this.getLegacyCompanyUploadWoQuickviewState(workOrder);
+    }
+    const reviewStatus = resolveWoCompanyReviewStatus(workOrder);
+    if (reviewStatus === null) return null;
+    const ciiReuploaded = this.hasCiiReuploadedWorkOrderInActivities(activities);
+
+    if (reviewStatus === WO_COMPANY_REVIEW_STATUS.PENDING) {
+      if (isCiiWorkOrderRejectedByAdmin(workOrder)) {
+        return {
+          phase: 'work_order_rejected_awaiting_cii',
+          latestId: 4,
+          latestName: 'CII Rejected Work Order Document',
+          latestResp: 'CII',
+          nextId: 4,
+          nextName: 'CII to Re-Upload Work Order Document',
+          nextResp: 'CII',
+          is_reupload_cycle: true,
+          wo_company_review_status: WO_COMPANY_REVIEW_STATUS.REJECTED,
+          is_cii_admin_rejected: true,
+        };
+      }
+      if (ciiReuploaded) {
+        return {
+          phase: 'work_order_reuploaded_pending_company',
+          latestId: 4,
+          latestName: 'CII Re-Uploaded Work Order Document',
+          latestResp: 'CII',
+          nextId: 4,
+          nextName: 'Company to Accept or Reject Re-Uploaded Work Order Document',
+          nextResp: 'Company',
+          is_reupload_cycle: true,
+          wo_company_review_status: WO_COMPANY_REVIEW_STATUS.PENDING,
+        };
+      }
+      return {
+        phase: 'work_order_pending_company',
+        latestId: 4,
+        latestName: 'CII Uploaded Work Order Document',
+        latestResp: 'CII',
+        nextId: 4,
+        nextName: 'Company to Accept or Reject Work Order Document',
+        nextResp: 'Company',
+        is_reupload_cycle: false,
+        wo_company_review_status: WO_COMPANY_REVIEW_STATUS.PENDING,
+      };
+    }
+
+    if (reviewStatus === WO_COMPANY_REVIEW_STATUS.REJECTED) {
+      return {
+        phase: 'work_order_rejected_awaiting_cii',
+        latestId: 4,
+        latestName: 'Company Rejected Work Order Document',
+        latestResp: 'Company',
+        nextId: 4,
+        nextName: 'CII to Re-Upload Work Order Document',
+        nextResp: 'CII',
+        is_reupload_cycle: true,
+        wo_company_review_status: WO_COMPANY_REVIEW_STATUS.REJECTED,
+      };
+    }
+
+    if (reviewStatus === WO_COMPANY_REVIEW_STATUS.ACCEPTED) {
+      const acceptedAfterReupload = activities.some(
+        (a) =>
+          typeof a.description === 'string' &&
+          /Company Accepted Re-Uploaded Work Order Document/i.test(a.description),
+      );
+      return {
+        phase: 'work_order_accepted',
+        latestId: 4,
+        latestName:
+          acceptedAfterReupload || ciiReuploaded
+            ? 'Company Accepted Re-Uploaded Work Order Document'
+            : 'Company Accepted Work Order Document',
+        latestResp: 'Company',
+        nextId: 5,
+        nextName: 'CII to provide Project Code',
+        nextResp: 'CII',
+        is_reupload_cycle: acceptedAfterReupload || ciiReuploaded,
+        wo_company_review_status: WO_COMPANY_REVIEW_STATUS.ACCEPTED,
+      };
+    }
+
+    return null;
+  }
+
+  private buildWorkOrderReviewUiPayload(
+    workOrder: any | null,
+    activities: Array<{ description?: string }>,
+  ) {
+    const qv = workOrder
+      ? this.getWorkOrderReviewQuickviewState({} as any, workOrder, activities)
+      : null;
+
+    /** Standard flow: company uploads → CII/admin accept/reject (`wo_status`). */
+    if (!workOrder || isCompanyUploadedWorkOrder(workOrder)) {
+      const st = workOrder ? Number(workOrder.wo_status ?? 0) : null;
+      const hasDoc = hasWorkOrderDocumentOnRow(workOrder);
+      const extras = this.workOrderStatusExtras(workOrder);
+      const rejected = workOrder != null && isWorkOrderRejected(workOrder.wo_status);
+      return {
+        work_order_flow: 'company_upload_cii_review',
+        wo_uploaded_by: 'company',
+        wo_status: st,
+        wo_status_label: extras.wo_status_label,
+        work_order_rejection_by: rejected ? 'cii' : null,
+        cii_admin_rejection_remarks: rejected ? workOrder?.wo_remarks ?? null : null,
+        show_cii_rejection_notice: rejected,
+        show_company_submitted_remarks: false,
+        work_order_badge_label: !hasDoc
+          ? null
+          : rejected
+            ? 'Rejected by CII — please re-upload your work order'
+            : st === 1
+              ? 'Work order accepted by CII'
+              : 'Awaiting CII review',
+        can_company_upload_work_order: !hasDoc,
+        can_company_reupload_work_order: canCompanyReuploadWorkOrderDocument(workOrder),
+        can_company_review_work_order: false,
+        show_accept_reject_buttons: false,
+        can_admin_review_work_order: hasDoc && st === 0,
+        show_admin_accept_reject_buttons: hasDoc && st === 0,
+        awaiting_cii_review: extras.awaiting_cii_review,
+        can_cii_upload_work_order: false,
+        can_cii_reupload_work_order: false,
+        quickview_phase: qv?.phase ?? null,
+        latest_step_label: qv?.latestName ?? null,
+        next_step_label: qv?.nextName ?? null,
+      };
+    }
+
+    /** Deprecated: CII-uploaded WO + company accept/reject. */
+    const reviewStatus = resolveWoCompanyReviewStatus(workOrder);
+    const adminRejectedCiiWo = isCiiWorkOrderRejectedByAdmin(workOrder);
+    const statusLabel = adminRejectedCiiWo
+      ? 'rejected_by_cii'
+      : woCompanyReviewStatusLabel(reviewStatus);
+    const ciiReuploaded = this.hasCiiReuploadedWorkOrderInActivities(activities);
+    const companyRejected =
+      reviewStatus === WO_COMPANY_REVIEW_STATUS.REJECTED && !adminRejectedCiiWo;
+
+    return {
+      work_order_flow: 'cii_upload_company_review_deprecated',
+      wo_company_review_status: reviewStatus,
+      wo_company_review_status_label: statusLabel,
+      work_order_rejection_by: adminRejectedCiiWo ? 'cii' : companyRejected ? 'company' : null,
+      company_review_remarks: companyRejected ? workOrder?.wo_company_review_remarks ?? null : null,
+      cii_admin_rejection_remarks: adminRejectedCiiWo ? workOrder?.wo_remarks ?? null : null,
+      show_company_submitted_remarks: companyRejected,
+      show_cii_rejection_notice: adminRejectedCiiWo,
+      work_order_badge_label: adminRejectedCiiWo
+        ? 'Work order rejected by CII — awaiting re-upload'
+        : companyRejected
+          ? 'Work order rejected by you — CII will re-upload'
+          : reviewStatus === WO_COMPANY_REVIEW_STATUS.PENDING
+            ? 'Awaiting your review'
+            : reviewStatus === WO_COMPANY_REVIEW_STATUS.ACCEPTED
+              ? 'Work order accepted'
+              : null,
+      can_company_upload_work_order: false,
+      can_company_reupload_work_order: false,
+      can_company_review_work_order:
+        reviewStatus === WO_COMPANY_REVIEW_STATUS.PENDING && !adminRejectedCiiWo,
+      show_accept_reject_buttons:
+        reviewStatus === WO_COMPANY_REVIEW_STATUS.PENDING && !adminRejectedCiiWo,
+      can_admin_review_work_order: false,
+      show_admin_accept_reject_buttons: false,
+      can_cii_upload_work_order: !hasWorkOrderDocumentOnRow(workOrder),
+      can_cii_reupload_work_order: canCiiReuploadWorkOrderDocument(workOrder),
+      is_work_order_reupload_cycle: ciiReuploaded,
+      wo_uploaded_by: workOrder?.wo_uploaded_by ?? 'cii',
+      quickview_phase: qv?.phase ?? null,
+      latest_step_label: qv?.latestName ?? null,
+      next_step_label: qv?.nextName ?? null,
+    };
+  }
+
+  private async getWorkOrderQuickviewSnippet(companyId: string, projectId: string) {
+    const qv = await this.getQuickviewData(companyId, projectId);
+    const d = qv.data || {};
+    return {
+      quickview_phase: d.quickview_phase ?? 'normal',
+      quickview_display: d.quickview_display ?? null,
+      latest_step: d.latest_step ?? null,
+      next_step: d.next_step ?? null,
+      work_order_review: d.work_order_review ?? null,
+    };
+  }
+
+  /**
+   * CII uploads work order PDF (company must have accepted proposal first).
+   */
+  async uploadWorkOrderDocumentByCii(companyId: string, projectId: string, file: Express.Multer.File) {
+    const project = await this.projectModel.findOne({ _id: projectId, company_id: companyId });
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    const proposalReview = resolveProposalReviewStatus(project, null);
+    if (proposalReview !== PROPOSAL_REVIEW_STATUS.ACCEPTED) {
+      throw new BadRequestException({
+        status: 'error',
+        code: 'PROPOSAL_NOT_ACCEPTED',
+        message: 'Company must accept the proposal before CII uploads the work order document.',
+      });
+    }
+
+    const existing = await this.companyWorkOrderModel
+      .findOne({ company_id: companyId, project_id: projectId })
+      .sort({ createdAt: -1 });
+
+    const hadDoc = existing && hasWorkOrderDocumentOnRow(existing);
+    const reviewBefore = resolveWoCompanyReviewStatus(existing);
+    const canReplaceExisting =
+      reviewBefore === WO_COMPANY_REVIEW_STATUS.REJECTED ||
+      isCiiWorkOrderRejectedByAdmin(existing);
+    if (hadDoc && !canReplaceExisting && isCiiUploadedWorkOrder(existing)) {
+      throw new BadRequestException({
+        status: 'error',
+        code: 'WORK_ORDER_REPLACE_USE_REUPLOAD',
+        message:
+          'Work order already on file. Use POST …/work-order-document/reupload after company rejects it.',
+      });
+    }
+
+    const relativePath = `uploads/companyproject/${projectId}/${file.filename}`;
+    let workOrder;
+    if (existing && canReplaceExisting) {
+      existing.wo_doc = relativePath;
+      (existing as any).wo_uploaded_by = 'cii';
+      (existing as any).wo_company_review_status = WO_COMPANY_REVIEW_STATUS.PENDING;
+      (existing as any).wo_company_review_remarks = undefined;
+      (existing as any).wo_company_review_updated_at = new Date();
+      existing.wo_status = 0;
+      existing.wo_remarks = null;
+      await existing.save();
+      workOrder = existing;
+    } else {
+      workOrder = await this.companyWorkOrderModel.create({
+        company_id: companyId,
+        project_id: projectId,
+        wo_doc: relativePath,
+        wo_uploaded_by: 'cii',
+        wo_company_review_status: WO_COMPANY_REVIEW_STATUS.PENDING,
+        wo_company_review_updated_at: new Date(),
+        wo_status: 0,
+        wo_remarks: null,
+      });
+    }
+
+    const hadReupload = hadDoc && canReplaceExisting;
+    await this.companyActivityModel.create({
+      company_id: companyId,
+      project_id: projectId,
+      description: hadReupload
+        ? 'CII Re-Uploaded Work Order Document'
+        : 'CII Uploaded Work Order Document',
+      activity_type: 'cii',
+      milestone_flow: 4,
+      milestone_completed: true,
+    });
+
+    (project as any).next_activities_id = 4;
+    await project.save();
+
+    this.notificationsService
+      .create(
+        hadReupload ? 'Work order reuploaded' : 'Work order uploaded',
+        `CII has ${hadReupload ? 're-uploaded' : 'uploaded'} the work order for your project. Please review and accept or reject it.`,
+        'C',
+        companyId,
+      )
+      .catch((e) => console.error('[WO CII Upload] Notification failed:', e?.message || e));
+
+    const refreshed = await this.getWorkOrderDocument(companyId, projectId);
+    const quickview = await this.getWorkOrderQuickviewSnippet(companyId, projectId);
+    return {
+      status: 'success',
+      message: hadReupload
+        ? 'Work order document reuploaded successfully'
+        : 'Work order document uploaded successfully',
+      data: { ...refreshed.data, quickview, project_id: projectId, next_activities_id: 4 },
+    };
+  }
+
+  async uploadWorkOrderDocumentByCiiByProjectId(projectOrCompanyId: string, file: Express.Multer.File) {
+    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.uploadWorkOrderDocumentByCii(
+      String(resolved.company_id),
+      String(resolved._id),
+      file,
+    );
+  }
+
+  async replaceWorkOrderDocumentByCii(companyId: string, projectId: string, file: Express.Multer.File) {
+    const project = await this.projectModel.findOne({ _id: projectId, company_id: companyId });
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const latest = await this.companyWorkOrderModel
+      .findOne({ company_id: companyId, project_id: projectId })
+      .sort({ createdAt: -1 });
+    if (!latest || !hasWorkOrderDocumentOnRow(latest)) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'No work order on file. Use POST …/work-order-document for first upload.',
+      });
+    }
+    if (!canCiiReuploadWorkOrderDocument(latest)) {
+      const reviewStatus = resolveWoCompanyReviewStatus(latest);
+      throw new BadRequestException({
+        status: 'error',
+        code: 'WORK_ORDER_REUPLOAD_NOT_ALLOWED',
+        message:
+          'Work order reupload is allowed only after the company or CII rejects the work order document.',
+        data: { wo_company_review_status: reviewStatus, wo_status: latest.wo_status },
+      });
+    }
+    return this.uploadWorkOrderDocumentByCii(companyId, projectId, file);
+  }
+
+  async replaceWorkOrderDocumentByCiiByProjectId(projectOrCompanyId: string, file: Express.Multer.File) {
+    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.replaceWorkOrderDocumentByCii(
+      String(resolved.company_id),
+      String(resolved._id),
+      file,
+    );
+  }
+
+  async reviewWorkOrderDocumentByCompany(
+    companyId: string,
+    projectId: string,
+    action: 'accept' | 'reject',
+    remarks?: string,
+  ) {
+    throw new BadRequestException({
+      status: 'error',
+      code: 'WORK_ORDER_COMPANY_REVIEW_DISABLED',
+      message:
+        'Company cannot accept or reject the work order. Upload or re-upload the PDF; CII/Admin approves via PATCH …/work-order-document/review with wo_status 1 or 2.',
+    });
+
+    const project = await this.projectModel.findOne({ _id: projectId, company_id: companyId });
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const workOrder = await this.companyWorkOrderModel
+      .findOne({ company_id: companyId, project_id: projectId })
+      .sort({ createdAt: -1 });
+    if (!workOrder || !hasWorkOrderDocumentOnRow(workOrder) || !isCiiUploadedWorkOrder(workOrder)) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'No CII-uploaded work order document to review.',
+      });
+    }
+    const reviewStatus = resolveWoCompanyReviewStatus(workOrder);
+    if (reviewStatus !== WO_COMPANY_REVIEW_STATUS.PENDING) {
+      throw new BadRequestException({
+        status: 'error',
+        code: 'WORK_ORDER_ALREADY_REVIEWED',
+        message:
+          reviewStatus === WO_COMPANY_REVIEW_STATUS.ACCEPTED
+            ? 'Work order already accepted.'
+            : 'Work order was rejected. CII must re-upload.',
+      });
+    }
+
+    const activities = await this.companyActivityModel
+      .find({ company_id: companyId, project_id: projectId })
+      .sort({ createdAt: -1 })
+      .lean();
+    const ciiReuploaded = this.hasCiiReuploadedWorkOrderInActivities(activities as any[]);
+    const now = new Date();
+
+    if (action === 'reject') {
+      const reason = String(remarks || '').trim();
+      if (!reason) {
+        throw new BadRequestException({
+          status: 'error',
+          message: 'remarks is required when rejecting the work order document',
+        });
+      }
+      (workOrder as any).wo_company_review_status = WO_COMPANY_REVIEW_STATUS.REJECTED;
+      (workOrder as any).wo_company_review_remarks = reason;
+      (workOrder as any).wo_company_review_updated_at = now;
+      await workOrder.save();
+      await this.companyActivityModel.create({
+        company_id: companyId,
+        project_id: projectId,
+        description: 'Company Rejected Work Order Document',
+        activity_type: 'company',
+        milestone_flow: 4,
+        milestone_completed: false,
+      });
+      this.notificationsService
+        .create('Work order rejected', `Company rejected work order. Reason: ${reason}`, 'A')
+        .catch(() => undefined);
+    } else {
+      (workOrder as any).wo_company_review_status = WO_COMPANY_REVIEW_STATUS.ACCEPTED;
+      (workOrder as any).wo_company_review_remarks = undefined;
+      (workOrder as any).wo_company_review_updated_at = now;
+      workOrder.wo_status = 1;
+      workOrder.wo_doc_status_updated_at = now;
+      await workOrder.save();
+      const prevNext = Number((project as any).next_activities_id || 0);
+      (project as any).next_activities_id = 5;
+      await project.save();
+      await this.notifyStepTransition(companyId, projectId, prevNext, 5, 'Work order accepted by company');
+      await this.companyActivityModel.create({
+        company_id: companyId,
+        project_id: projectId,
+        description: ciiReuploaded
+          ? 'Company Accepted Re-Uploaded Work Order Document'
+          : 'Company Accepted Work Order Document',
+        activity_type: 'company',
+        milestone_flow: 4,
+        milestone_completed: true,
+      });
+      this.notificationsService
+        .create('Work order accepted', 'Company accepted the work order document.', 'A')
+        .catch(() => undefined);
+    }
+
+    const refreshed = await this.getWorkOrderDocument(companyId, projectId);
+    const reviewUi = this.buildWorkOrderReviewUiPayload(workOrder.toObject(), activities as any[]);
+    const quickview = await this.getWorkOrderQuickviewSnippet(companyId, projectId);
+    return {
+      status: 'success',
+      message: action === 'accept' ? 'Work order accepted' : 'Work order rejected',
+      data: { ...refreshed.data, ...reviewUi, action, quickview },
+    };
+  }
+
+  async reviewWorkOrderDocumentByCompanyByProjectId(
+    projectOrCompanyId: string,
+    action: 'accept' | 'reject',
+    remarks?: string,
+  ) {
+    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.reviewWorkOrderDocumentByCompany(
+      String(resolved.company_id),
+      String(resolved._id),
+      action,
+      remarks,
+    );
+  }
+
+  async getWorkOrderDocumentWorkflowByProjectId(projectOrCompanyId: string) {
+    const resolved = await this.resolveProjectForQuickview(projectOrCompanyId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const companyId = String(resolved.company_id);
+    const projectId = String(resolved._id);
+    const [activities, workOrder] = await Promise.all([
+      this.companyActivityModel
+        .find({ company_id: companyId, project_id: projectId })
+        .sort({ createdAt: -1 })
+        .limit(50)
+        .lean(),
+      this.companyWorkOrderModel
+        .findOne({ company_id: companyId, project_id: projectId })
+        .sort({ createdAt: -1 })
+        .lean(),
+    ]);
+    const qv = this.getWorkOrderReviewQuickviewState({} as any, workOrder as any, activities as any[]);
+    const reviewUi = this.buildWorkOrderReviewUiPayload(workOrder as any, activities as any[]);
+    const quickview = await this.getWorkOrderQuickviewSnippet(companyId, projectId);
+    return {
+      status: 'success',
+      message: 'Work order workflow loaded successfully',
+      data: {
+        project_id: projectId,
+        company_id: companyId,
+        ...reviewUi,
+        quickview,
+        company_work_order_workflow: qv
+          ? {
+              latest_step_completed: {
+                activity: qv.latestName,
+                status: 'Completed',
+                responsibility: qv.latestResp,
+              },
+              next_step: {
+                activity: qv.nextName,
+                status: 'Pending',
+                responsibility: qv.nextResp,
+              },
+              is_reupload_cycle: qv.is_reupload_cycle,
+              show_accept_reject_buttons: false,
+              show_admin_accept_reject_buttons:
+                qv.phase === 'work_order_pending_cii_review',
+              instruction:
+                qv.phase === 'work_order_rejected_awaiting_company'
+                  ? 'CII rejected your work order. Please re-upload a revised PDF.'
+                  : qv.phase === 'work_order_pending_cii_review'
+                    ? 'Your work order was submitted. CII will review it.'
+                    : qv.is_reupload_cycle
+                      ? 'CII has re-uploaded the work order. Please review the new PDF and accept or reject it.'
+                      : 'Please review the work order document and accept or reject it.',
+            }
+          : null,
+      },
+    };
+  }
+
   /**
    * Get latest work order document info for a project.
    */
@@ -6678,6 +8041,15 @@ export class CompanyProjectsService {
     if (!project) {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
+
+    const activities = await this.companyActivityModel
+      .find({ company_id: companyId, project_id: projectId })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean();
+    const reviewUi = this.buildWorkOrderReviewUiPayload(workOrder as any, activities as any[]);
+    const proposalAccepted =
+      resolveProposalReviewStatus(project, workOrder) === PROPOSAL_REVIEW_STATUS.ACCEPTED;
 
     const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(/\/+$/, '');
     const extras = this.workOrderStatusExtras(workOrder as any);
@@ -6700,6 +8072,9 @@ export class CompanyProjectsService {
           can_reupload_work_order: extras.can_reupload_work_order ?? false,
           awaiting_cii_review: extras.awaiting_cii_review ?? false,
           ...this.workOrderAcceptancePayload(woAny || null),
+          ...reviewUi,
+          can_company_upload_work_order:
+            proposalAccepted && (reviewUi.can_company_upload_work_order ?? true),
         },
       };
     }
@@ -6727,6 +8102,7 @@ export class CompanyProjectsService {
         can_reupload_work_order: extras.can_reupload_work_order,
         awaiting_cii_review: extras.awaiting_cii_review,
         ...acceptance,
+        ...reviewUi,
       },
     };
   }
@@ -6911,7 +8287,7 @@ export class CompanyProjectsService {
     projectOrCompanyId: string,
     file: Express.Multer.File,
   ) {
-    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    const resolved = await this.resolveProjectForQuickview(projectOrCompanyId);
     if (!resolved?.company_id) {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
@@ -6923,29 +8299,13 @@ export class CompanyProjectsService {
   }
 
   /**
-   * Re-upload WO PDF only when latest WO is rejected (wo_status = 2).
+   * Company re-upload work order PDF after CII/admin rejected (wo_status = 2).
    */
   async reuploadWorkOrderDocumentByProjectId(
     projectOrCompanyId: string,
     file: Express.Multer.File,
   ) {
-    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
-    if (!resolved?.company_id) {
-      throw new NotFoundException({ status: 'error', message: 'Project not found' });
-    }
-    const companyId = String(resolved.company_id);
-    const projectId = String(resolved._id);
-    const latest = await this.companyWorkOrderModel
-      .findOne({ company_id: companyId, project_id: projectId })
-      .sort({ createdAt: -1 });
-    if (!latest || !isWorkOrderRejected(latest.wo_status)) {
-      throw new BadRequestException({
-        status: 'error',
-        message:
-          'Work order can only be re-uploaded when the latest work order is rejected (wo_status = 2).',
-      });
-    }
-    return this.uploadWorkOrderDocument(companyId, projectId, file);
+    return this.uploadWorkOrderDocumentByProjectId(projectOrCompanyId, file);
   }
 
   /**
@@ -9779,6 +11139,27 @@ export class CompanyProjectsService {
       });
     }
 
+    const existingWorkOrderForGate = await this.companyWorkOrderModel
+      .findOne({ company_id: companyId, project_id: projectId })
+      .sort({ createdAt: -1 })
+      .lean();
+    const proposalReview = resolveProposalReviewStatus(project, existingWorkOrderForGate);
+    if (proposalReview !== PROPOSAL_REVIEW_STATUS.ACCEPTED) {
+      throw new BadRequestException({
+        status: 'error',
+        code: 'PROPOSAL_NOT_ACCEPTED',
+        message:
+          'Accept the proposal document before uploading the work order. Use PATCH …/proposal-document/review with action "accept".',
+        data: {
+          proposal_review_status: proposalReview,
+          proposal_review_status_label: proposalReviewStatusLabel(
+            proposalReview,
+            existingWorkOrderForGate,
+          ),
+        },
+      });
+    }
+
     // Check if work order already exists (for re-upload case)
     const existingWorkOrder = await this.companyWorkOrderModel
       .findOne({
@@ -9795,24 +11176,41 @@ export class CompanyProjectsService {
     // Create or update work order document
     let workOrder;
     const isReUpload = existingWorkOrder && isWorkOrderRejected(existingWorkOrder.wo_status);
+    const hasExistingDoc =
+      existingWorkOrder && hasWorkOrderDocumentOnRow(existingWorkOrder as any);
+
+    if (hasExistingDoc && !isReUpload) {
+      throw new BadRequestException({
+        status: 'error',
+        code: 'WORK_ORDER_ALREADY_SUBMITTED',
+        message:
+          'Work order already submitted and awaiting CII review. Re-upload is allowed only after CII rejects it.',
+        data: { wo_status: existingWorkOrder.wo_status },
+      });
+    }
 
     if (existingWorkOrder && isReUpload) {
-      // Update existing work order (re-upload after rejection)
       existingWorkOrder.wo_doc = relativePath;
-      existingWorkOrder.wo_status = 0; // Reset to Under Review
-      existingWorkOrder.wo_remarks = null; // Clear previous remarks
+      existingWorkOrder.wo_status = 0;
+      existingWorkOrder.wo_remarks = null;
+      (existingWorkOrder as any).wo_uploaded_by = 'company';
+      (existingWorkOrder as any).wo_company_review_status = undefined;
+      (existingWorkOrder as any).wo_company_review_remarks = undefined;
+      (existingWorkOrder as any).wo_company_review_updated_at = undefined;
       (existingWorkOrder as any).wo_po_number = undefined;
       (existingWorkOrder as any).wo_acceptance_date = undefined;
+      existingWorkOrder.wo_doc_status_updated_at = new Date();
       await existingWorkOrder.save();
       workOrder = existingWorkOrder;
     } else {
-      // Create new work order document
       workOrder = await this.companyWorkOrderModel.create({
         company_id: companyId,
         project_id: projectId,
         wo_doc: relativePath,
-        wo_status: 0, // Under Review
+        wo_uploaded_by: 'company',
+        wo_status: 0,
         wo_remarks: null,
+        wo_doc_status_updated_at: new Date(),
       });
     }
 
@@ -9869,6 +11267,14 @@ export class CompanyProjectsService {
         console.error('[Work Order Upload] Notification failed:', e?.message || e),
       );
 
+    const activities = await this.companyActivityModel
+      .find({ company_id: companyId, project_id: projectId })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean();
+    const reviewUi = this.buildWorkOrderReviewUiPayload(workOrder.toObject(), activities as any[]);
+    const quickview = await this.getWorkOrderQuickviewSnippet(companyId, projectId);
+
     return {
       status: 'success',
       message: isReUpload 
@@ -9878,10 +11284,12 @@ export class CompanyProjectsService {
         document_url: fullUrl,
         document_filename: file.originalname,
         project_id: projectId,
-        wo_status: 0, // Under Review
+        wo_status: 0,
         next_activities_id: project.next_activities_id,
         reuploaded: isReUpload,
         ...this.workOrderStatusExtras(workOrder as any),
+        ...reviewUi,
+        quickview,
       },
     };
   }
@@ -10254,6 +11662,13 @@ export class CompanyProjectsService {
 
     const woForExtras = verifyWorkOrder || savedWorkOrder;
     const woPlain = (woForExtras as any)?.toObject?.() ?? woForExtras;
+    const activities = await this.companyActivityModel
+      .find({ company_id: companyId, project_id: projectId })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean();
+    const reviewUi = this.buildWorkOrderReviewUiPayload(woPlain, activities as any[]);
+    const quickview = await this.getWorkOrderQuickviewSnippet(companyId, projectId);
     return {
       status: 'success',
       message: dto.wo_status === 1
@@ -10265,6 +11680,8 @@ export class CompanyProjectsService {
         next_activities_id: project.next_activities_id,
         ...this.workOrderStatusExtras(woForExtras as any),
         ...this.workOrderAcceptancePayload(woPlain),
+        ...reviewUi,
+        quickview,
       },
     };
   }

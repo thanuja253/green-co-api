@@ -14,8 +14,22 @@ export class CompanyWorkOrder {
   @Prop()
   wo_doc?: string;
 
-  @Prop({ default: 0 }) // 1 = Accepted, 2 = Not Accepted, 0 = Pending
+  @Prop({ default: 0 }) // 1 = Accepted, 2 = Not Accepted, 0 = Pending (legacy CII review of company upload)
   wo_status?: number;
+
+  /** Who uploaded the current PDF: `company` (standard) or `cii` (deprecated). */
+  @Prop({ default: 'company' })
+  wo_uploaded_by?: string;
+
+  /** Company accept/reject on CII-uploaded work order: 0 = pending, 1 = accepted, 2 = rejected. */
+  @Prop()
+  wo_company_review_status?: number;
+
+  @Prop()
+  wo_company_review_remarks?: string;
+
+  @Prop()
+  wo_company_review_updated_at?: Date;
 
   @Prop()
   wo_remarks?: string; // Remarks/reason if work order is rejected
