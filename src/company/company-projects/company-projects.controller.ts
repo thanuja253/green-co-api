@@ -1450,6 +1450,18 @@ export class CompanyProjectsController {
     return this.companyProjectsService.getFinanceV2InvoicesByProjectId(projectId);
   }
 
+  /**
+   * Finance v2: Tax invoices (same data family as proforma; filter client-side by invoice_type if needed).
+   * GET /api/company/projects/:projectId/finance-v2/tax-invoices
+   */
+  @Get([':projectId/finance-v2/tax-invoices', ':projectId/finance-v2/tax-tab'])
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+  async getFinanceV2TaxInvoices(
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    return this.companyProjectsService.getFinanceV2InvoicesByProjectId(projectId);
+  }
+
   @Post([':projectId/finance-v2/proforma-invoices', ':projectId/finance-v2/invoices'])
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
   @UseInterceptors(
@@ -1498,9 +1510,63 @@ export class CompanyProjectsController {
     return this.companyProjectsService.createFinanceV2InvoiceByProjectId(projectId, dto, file);
   }
 
+  @Post([':projectId/finance-v2/tax-invoices', ':projectId/finance-v2/tax-tab'])
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  @UseInterceptors(
+    FileInterceptor('invoice_document', {
+      storage: diskStorage({
+        destination: (req, file, cb) => {
+          const projectId = (req as any).params?.projectId || 'unknown';
+          const uploadPath = join(process.cwd(), 'uploads', 'company', projectId, 'finance-v2');
+          if (!fs.existsSync(uploadPath)) {
+            fs.mkdirSync(uploadPath, { recursive: true });
+          }
+          cb(null, uploadPath);
+        },
+        filename: (req, file, cb) => {
+          const ext = extname(file.originalname);
+          cb(null, `finance-v2-${Date.now()}${ext}`);
+        },
+      }),
+      limits: { fileSize: 10 * 1024 * 1024 },
+      fileFilter: (req, file, cb) => {
+        const allowed = [
+          'application/pdf',
+          'image/jpeg',
+          'image/jpg',
+          'image/png',
+        ];
+        if (allowed.includes(file.mimetype)) {
+          cb(null, true);
+        } else {
+          cb(new Error('Invoice document must be PDF, JPG, JPEG or PNG.'), false);
+        }
+      },
+    }),
+  )
+  async createFinanceV2TaxInvoice(
+    @Param('projectId') projectId: string,
+    @Body() dto: CreateProformaInvoiceV2Dto,
+    @UploadedFile() file: Express.Multer.File,
+  ): Promise<any> {
+    if (!file) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'No file uploaded. Use field name "invoice_document".',
+      });
+    }
+    return this.companyProjectsService.createFinanceV2InvoiceByProjectId(
+      projectId,
+      { ...dto, invoice_type: 'tax', payment_for: 'inv', payment_type: 'tax' },
+      file,
+    );
+  }
+
   @Patch([
     ':projectId/finance-v2/proforma-invoices/:invoiceId',
     ':projectId/finance-v2/invoices/:invoiceId',
+    ':projectId/finance-v2/tax-invoices/:invoiceId',
+    ':projectId/finance-v2/tax-tab/:invoiceId',
   ])
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
   @UseInterceptors(
@@ -1558,8 +1624,12 @@ export class CompanyProjectsController {
     );
   }
 
-  @Post(':projectId/finance-v2/proforma-invoices/:invoiceId/submit-payment')
-  @Post(':projectId/finance-v2/tax-invoices/:invoiceId/submit-payment')
+  @Post([
+    ':projectId/finance-v2/proforma-invoices/:invoiceId/submit-payment',
+    ':projectId/finance-v2/tax-invoices/:invoiceId/submit-payment',
+    ':projectId/finance-v2/tax-tab/:invoiceId/submit-payment',
+    ':projectId/finance-v2/invoices/:invoiceId/submit-payment',
+  ])
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
   @UseInterceptors(
     FileFieldsInterceptor([
@@ -1616,7 +1686,11 @@ export class CompanyProjectsController {
     );
   }
 
-  @Patch(':projectId/finance-v2/proforma-invoices/:invoiceId/approval')
+  @Patch([
+    ':projectId/finance-v2/proforma-invoices/:invoiceId/approval',
+    ':projectId/finance-v2/tax-invoices/:invoiceId/approval',
+    ':projectId/finance-v2/tax-tab/:invoiceId/approval',
+  ])
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
   async updateFinanceV2Approval(
     @Param('projectId') projectId: string,
