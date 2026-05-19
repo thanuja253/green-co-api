@@ -258,12 +258,19 @@ function resolveProposalReviewStatus(
   workOrder?: { wo_doc?: string | null; wo_status?: unknown } | null,
 ): number | null {
   if (!hasProposalDocumentOnProject(project)) return null;
+
+  // Work-order step only happens after proposal was accepted — never show proposal “pending review” again.
+  if (workOrder?.wo_doc) {
+    return PROPOSAL_REVIEW_STATUS.ACCEPTED;
+  }
+  const nextId = Number((project as { next_activities_id?: number }).next_activities_id || 0);
+  if (nextId >= 4) {
+    return PROPOSAL_REVIEW_STATUS.ACCEPTED;
+  }
+
   const stored = (project as { proposal_review_status?: number | null }).proposal_review_status;
   if (stored !== null && stored !== undefined && !Number.isNaN(Number(stored))) {
     return Number(stored);
-  }
-  if (workOrder?.wo_doc && !isWorkOrderRejected(workOrder.wo_status)) {
-    return PROPOSAL_REVIEW_STATUS.ACCEPTED;
   }
   return PROPOSAL_REVIEW_STATUS.PENDING;
 }
@@ -5991,7 +5998,7 @@ export class CompanyProjectsService {
     const woHasDoc = !!workOrder?.wo_doc;
 
     if (reviewStatus === PROPOSAL_REVIEW_STATUS.PENDING) {
-      if (ciiReuploaded) {
+      if (ciiReuploaded && !woHasDoc && Number(project.next_activities_id || 0) < 4) {
         return {
           phase: 'proposal_reuploaded_pending_company',
           latestId: 3,
@@ -6003,6 +6010,9 @@ export class CompanyProjectsService {
           is_reupload_cycle: true,
           proposal_review_status: PROPOSAL_REVIEW_STATUS.PENDING,
         };
+      }
+      if (ciiReuploaded && (woHasDoc || Number(project.next_activities_id || 0) >= 4)) {
+        return null;
       }
       return {
         phase: 'proposal_pending_company',
