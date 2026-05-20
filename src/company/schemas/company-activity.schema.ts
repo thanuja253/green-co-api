@@ -17,8 +17,13 @@ export class CompanyActivity {
   @Prop()
   activity_type?: string; // 'company' or 'cii'
 
+  /** Legacy `cii_activity_log.activities_id` (same values as milestone_flow in migrated data). */
   @Prop()
   milestone_flow?: number;
+
+  /** Legacy `cii_activity_log.activity_status` (e.g. Pending, Rejected). */
+  @Prop({ default: 'Pending' })
+  activity_status?: string;
 
   @Prop({ default: false })
   milestone_completed?: boolean;

@@ -15416,22 +15416,232 @@ export class CompanyProjectsService {
     return { sent, message: `Sustenance reminders sent: ${sent}` };
   }
 
+  private readonly coordinatorMilestoneStepNames: Record<number, string> = {
+    1: 'Company Registered',
+    2: 'Company Filled Registration Info',
+    3: 'CII Uploaded Proposal Document',
+    4: 'Company Uploaded Work Order Document',
+    5: 'Work Order / Contract Document Accepted',
+    6: 'CII to provide Project Code',
+    7: 'Assign Project Co‑Ordinator',
+    8: 'CII uploaded the PI/Tax Invoice',
+    9: 'Company Paid Proforma Invoice',
+    10: 'CII Acknowledged Proforma Invoice',
+    11: 'Company Uploaded All Primary Data',
+    12: 'CII Approved All Primary Data',
+    13: 'All Checklist / Assessment Documents Uploaded by Company',
+    14: 'CII Approved All Assessment Submittal',
+    15: 'CII Assigned an Assessor',
+    16: 'Preliminary Scoring submitted by CII',
+    17: 'Final Scoring submitted (Rating Declaration)',
+    18: 'Certificate Uploaded',
+    19: '2nd Invoice uploaded',
+    20: 'Payment Receipt of 2nd Invoice uploaded',
+    21: 'Payment Receipt of 2nd Invoice acknowledged',
+    22: 'Plaque & certificate dispatched',
+    23: 'Feedback Report uploaded',
+    24: 'Project close‑out / Sustenance phase',
+  };
+
+  private coordinatorPerformanceStatusLabel(status: string): string {
+    const labels: Record<string, string> = {
+      launch_pending: 'Launch Pending',
+      pre_assessment_pending: 'Pre-Assessment Pending',
+      assessment_pending: 'Assessment Pending',
+      scoring_pending: 'Scoring Pending',
+      rated: 'Rated',
+      completed: 'Completed',
+    };
+    return labels[status] || status;
+  }
+
+  /** Criteria blocks under registration_info.assessment_scoring (by_criteria or legacy object). */
+  private extractAssessmentScoringCriteriaRows(project: Record<string, any>): Array<Record<string, any>> {
+    const scoring = project?.registration_info?.assessment_scoring;
+    if (!scoring || typeof scoring !== 'object') return [];
+    const byCriteria = (scoring as any).by_criteria;
+    if (byCriteria && typeof byCriteria === 'object' && !Array.isArray(byCriteria)) {
+      return Object.values(byCriteria).filter(Boolean) as Array<Record<string, any>>;
+    }
+    return Object.values(scoring).filter(
+      (v) => v && typeof v === 'object' && !Array.isArray(v) && 'rows' in (v as object),
+    ) as Array<Record<string, any>>;
+  }
+
+  /**
+   * Coordinator vs assessor completion per criteria; "all complete" only when both sides
+   * have final-submitted (or legacy project totals present with no stored criteria rows).
+   */
+  private computeCoordinatorPerformanceScoringFlags(project: Record<string, any>): {
+    coordinator_scoring_complete: boolean;
+    assessor_scoring_complete: boolean;
+    all_parameter_scoring_completed: boolean;
+  } {
+    const legacyRated =
+      Number(project.percentage_score || 0) > 0 && Number(project.total_score || 0) > 0;
+
+    const criteriaRows = this.extractAssessmentScoringCriteriaRows(project);
+    if (!criteriaRows.length) {
+      if (legacyRated) {
+        return {
+          coordinator_scoring_complete: true,
+          assessor_scoring_complete: true,
+          all_parameter_scoring_completed: true,
+        };
+      }
+      return {
+        coordinator_scoring_complete: false,
+        assessor_scoring_complete: false,
+        all_parameter_scoring_completed: false,
+      };
+    }
+
+    const coordinator_scoring_complete = criteriaRows.every((r) => Boolean(r?.final_submitted));
+    const assessor_scoring_complete = criteriaRows.every((r) => Boolean(r?.assessor_final_submitted));
+    const strictComplete = coordinator_scoring_complete && assessor_scoring_complete;
+    return {
+      coordinator_scoring_complete,
+      assessor_scoring_complete,
+      all_parameter_scoring_completed: strictComplete || legacyRated,
+    };
+  }
+
+  /** Richer copy for dashboards / Excel (aligned with common coordinator deck wording). */
+  private coordinatorPerformanceDisplayStatus(
+    performanceStatus: string,
+    flags: { site_visit_report_uploaded: boolean },
+  ): string {
+    switch (performanceStatus) {
+      case 'completed':
+        return 'Project Completed';
+      case 'rated':
+        return 'Rating Completed';
+      case 'scoring_pending':
+        return 'Scoring Pending';
+      case 'assessment_pending':
+        return 'Assessment Pending';
+      case 'pre_assessment_pending':
+        return flags.site_visit_report_uploaded ? 'Launch Completed' : 'Pre-Assessment Pending';
+      case 'launch_pending':
+      default:
+        return 'Launch Pending';
+    }
+  }
+
+  private coordinatorPerformanceTargetSlots(targetDatesRaw: unknown): {
+    target_dates: string[];
+    target_date_1: string | null;
+    target_date_2: string | null;
+    target_date_3: string | null;
+    target_dates_locked_slots: [boolean, boolean, boolean];
+  } {
+    const raw = Array.isArray(targetDatesRaw) ? targetDatesRaw : [];
+    const iso: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const d = raw[i];
+      if (d == null) {
+        iso.push('');
+        continue;
+      }
+      const t = new Date(d as any).getTime();
+      iso.push(Number.isNaN(t) ? '' : new Date(d as any).toISOString());
+    }
+    const slots: [boolean, boolean, boolean] = [
+      Boolean(iso[0]),
+      Boolean(iso[1]),
+      Boolean(iso[2]),
+    ];
+    return {
+      target_dates: iso.filter(Boolean),
+      target_date_1: iso[0] || null,
+      target_date_2: iso[1] || null,
+      target_date_3: iso[2] || null,
+      target_dates_locked_slots: slots,
+    };
+  }
+
   private deriveCoordinatorPerformanceStatus(flags: {
     feedback_report_uploaded: boolean;
     all_parameter_scoring_completed: boolean;
     assessor_selected: boolean;
     assessment_submittals_uploaded: boolean;
+    assessment_submittals_approved: boolean;
     primary_data_form_uploaded: boolean;
     primary_data_form_approved: boolean;
     site_visit_report_uploaded: boolean;
   }): string {
     if (flags.feedback_report_uploaded) return 'completed';
     if (flags.all_parameter_scoring_completed) return 'rated';
-    if (flags.assessor_selected && flags.assessment_submittals_uploaded) return 'scoring_pending';
-    if (flags.assessor_selected) return 'assessment_pending';
-    if (flags.primary_data_form_uploaded && flags.primary_data_form_approved) return 'pre_assessment_pending';
-    if (flags.site_visit_report_uploaded) return 'launch_pending';
+    if (
+      flags.assessment_submittals_uploaded &&
+      flags.assessment_submittals_approved &&
+      flags.assessor_selected
+    ) {
+      return 'scoring_pending';
+    }
+    if (flags.primary_data_form_uploaded && flags.primary_data_form_approved) {
+      return 'assessment_pending';
+    }
+    if (flags.site_visit_report_uploaded) return 'pre_assessment_pending';
     return 'launch_pending';
+  }
+
+  private formatLeadTimeMonths(poApprovedDate: Date | null): number | null {
+    if (!poApprovedDate || Number.isNaN(poApprovedDate.getTime())) return null;
+    const months = (Date.now() - poApprovedDate.getTime()) / (1000 * 60 * 60 * 24 * 30);
+    return Number(months.toFixed(1));
+  }
+
+  private resolveCoordinatorNextStepLabel(nextActivitiesId: number): string {
+    const id = Number(nextActivitiesId || 0);
+    if (id <= 0) return '';
+    return this.coordinatorMilestoneStepNames[Math.min(24, id)] || `step_${id}`;
+  }
+
+  private async resolveQuickviewNextStepDisplay(
+    companyId: string,
+    projectId: string,
+    fallback: string,
+  ): Promise<string> {
+    try {
+      const quickview = await this.getQuickviewData(companyId, projectId);
+      const quickviewNext = String(quickview?.data?.next_step?.name || '').trim();
+      return quickviewNext || fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  private async assertCoordinatorOwnsProject(
+    projectId: string,
+    coordinatorId?: string,
+  ): Promise<void> {
+    const cid = String(coordinatorId || '').trim();
+    if (!cid) {
+      throw new ForbiddenException({
+        status: 'error',
+        message: 'Coordinator authentication required.',
+      });
+    }
+    if (!Types.ObjectId.isValid(projectId) || !Types.ObjectId.isValid(cid)) {
+      throw new ForbiddenException({
+        status: 'error',
+        message: 'Coordinator is not assigned to this project.',
+      });
+    }
+    const assignment = await this.companyCoordinatorModel
+      .findOne({
+        project_id: new Types.ObjectId(projectId),
+        coordinator_id: new Types.ObjectId(cid),
+      })
+      .select('_id')
+      .lean();
+    if (!assignment) {
+      throw new ForbiddenException({
+        status: 'error',
+        message: 'Only the assigned coordinator can update this project.',
+      });
+    }
   }
 
   private toDateOnly(input: string | undefined): Date | null {
@@ -15450,7 +15660,11 @@ export class CompanyProjectsService {
       query?.coordinator_id || query?.coordinatorId || options.tokenCoordinatorId || '',
     ).trim();
     const yearFilter = String(query?.year || '').trim();
-    const statusFilter = String(query?.status || '').trim().toLowerCase();
+    const statusFilter = String(
+      query?.status || query?.performance_status || query?.performanceStatus || '',
+    )
+      .trim()
+      .toLowerCase();
     const sectorFilter = String(query?.sector || '').trim().toLowerCase();
     const fromDate = this.toDateOnly(query?.from_date);
     const toDateBase = this.toDateOnly(query?.to_date);
@@ -15458,6 +15672,10 @@ export class CompanyProjectsService {
     const page = Math.max(Number.parseInt(String(query?.page || '1'), 10) || 1, 1);
     const limit = Math.min(Math.max(Number.parseInt(String(query?.limit || '20'), 10) || 20, 1), 1000);
     const skip = (page - 1) * limit;
+    const sortKeyRaw = String(query?.sort || 'updated_at').trim().toLowerCase();
+    const sortKey = sortKeyRaw === 'created_at' ? 'created_at' : 'updated_at';
+    const sortDir =
+      String(query?.sort_dir || query?.sortDir || 'desc').trim().toLowerCase() === 'asc' ? 1 : -1;
 
     const coordinatorWhere: any = {};
     if (coordinatorIdFilter && Types.ObjectId.isValid(coordinatorIdFilter)) {
@@ -15474,14 +15692,41 @@ export class CompanyProjectsService {
         status: 'success',
         message: 'Coordinator performance dashboard fetched successfully',
         data: {
+          view_mode: coordinatorIdFilter ? 'coordinator' : 'overall',
+          filters: {
+            coordinator_id: coordinatorIdFilter || null,
+            year: yearFilter || null,
+            status: statusFilter || null,
+            performance_status: statusFilter || null,
+            sector: sectorFilter || null,
+            from_date: query?.from_date || null,
+            to_date: query?.to_date || null,
+            sort: sortKey,
+            sort_dir: sortDir === 1 ? 'asc' : 'desc',
+          },
+          coordinator_profile: null,
           summary: {
             total_projects: 0,
+            total_projects_assigned: 0,
             rated_companies: 0,
+            rated_companies_count: 0,
             completed_projects: 0,
+            completed_projects_count: 0,
+            ongoing_projects: 0,
+            ongoing_projects_count: 0,
             payment_received_proforma: 0,
+            proforma_payment_total: 0,
+            payment_received_count: 0,
             carryover_projects: 0,
+            carryover: 0,
             progress_percent: 0,
             ongoing_counts: {
+              launch_pending: 0,
+              pre_assessment_pending: 0,
+              assessment_pending: 0,
+              scoring_pending: 0,
+            },
+            pipeline_by_stage: {
               launch_pending: 0,
               pre_assessment_pending: 0,
               assessment_pending: 0,
@@ -15490,6 +15735,17 @@ export class CompanyProjectsService {
             total_proforma_payment_received: 0,
           },
           coordinators: [],
+          project_groups: {
+            ongoing: {
+              total: 0,
+              launch_pending: [],
+              pre_assessment_pending: [],
+              assessment_pending: [],
+              scoring_pending: [],
+            },
+            rated_projects: [],
+            completed_projects: [],
+          },
           projects: [],
           pagination: { page, limit, total: 0, total_pages: 0 },
         },
@@ -15503,7 +15759,7 @@ export class CompanyProjectsService {
       this.projectModel
         .find({ _id: { $in: projectIds.map((id) => new Types.ObjectId(id)) } })
         .select(
-          '_id company_id registration_info next_activities_id launch_training_document launch_training_report_date launch_training_sessions score_band_status total_score percentage_score max_points feedback_document_url coordinator_remarks coordinator_target_dates coordinator_target_dates_locked createdAt updatedAt',
+          '_id company_id registration_info next_activities_id launch_training_document launch_training_report_date launch_training_sessions total_score percentage_score max_points feedback_document_url feedback_upload_date certificate_upload_date coordinator_remarks coordinator_target_dates coordinator_target_dates_locked createdAt updatedAt',
         )
         .lean(),
       this.coordinatorModel
@@ -15559,12 +15815,28 @@ export class CompanyProjectsService {
       .select('_id name')
       .lean();
 
-    const checklistProjectIds = await this.mongoConnection
+    const checklistAgg = await this.mongoConnection
       .collection('assessment_checklist_documents')
-      .distinct('project_id', {
-        project_id: { $in: projectIds },
-        is_active: { $ne: false },
-      });
+      .aggregate([
+        {
+          $match: {
+            project_id: { $in: projectIds },
+            is_active: { $ne: false },
+          },
+        },
+        {
+          $group: {
+            _id: '$project_id',
+            total: { $sum: 1 },
+            approved: {
+              $sum: {
+                $cond: [{ $eq: ['$status', 'Approved'] }, 1, 0],
+              },
+            },
+          },
+        },
+      ])
+      .toArray();
 
     const assignmentByProject = new Map<string, any>();
     for (const row of assignments as any[]) {
@@ -15578,7 +15850,12 @@ export class CompanyProjectsService {
       (primaryDataAgg as any[]).map((r: any) => [String(r._id), r]),
     );
     const assessorSet = new Set((assessorAssignments as any[]).map((r: any) => String(r.project_id)));
-    const checklistSet = new Set((checklistProjectIds as string[]).map((id) => String(id)));
+    const checklistMap = new Map<string, { total: number; approved: number }>(
+      (checklistAgg as any[]).map((r: any) => [
+        String(r._id),
+        { total: Number(r.total || 0), approved: Number(r.approved || 0) },
+      ]),
+    );
     const proformaMap = new Map<string, number>(
       (proformaAgg as any[]).map((r: any) => [String(r._id), Number(r.total || 0)]),
     );
@@ -15595,7 +15872,7 @@ export class CompanyProjectsService {
       if (currentTs >= existingTs) workOrderMap.set(key, wo);
     }
 
-    const allRows = (projects as any[])
+    let allRows = (projects as any[])
       .map((project: any) => {
         const projectId = String(project._id);
         const assignment = assignmentByProject.get(projectId);
@@ -15605,6 +15882,8 @@ export class CompanyProjectsService {
         const company = companyMap.get(String(project.company_id));
         const workOrder = workOrderMap.get(projectId);
         const primary = primaryDataMap.get(projectId) || { total: 0, approved: 0 };
+        const checklist = checklistMap.get(projectId) || { total: 0, approved: 0 };
+        const scoringFlags = this.computeCoordinatorPerformanceScoringFlags(project);
         const flags = {
           site_visit_report_uploaded:
             Boolean(project.launch_training_document) ||
@@ -15615,10 +15894,14 @@ export class CompanyProjectsService {
           primary_data_form_approved:
             Number(primary.total || 0) > 0 &&
             Number(primary.approved || 0) >= Number(primary.total || 0),
-          assessment_submittals_uploaded: checklistSet.has(projectId),
+          assessment_submittals_uploaded: Number(checklist.total || 0) > 0,
+          assessment_submittals_approved:
+            Number(checklist.total || 0) > 0 &&
+            Number(checklist.approved || 0) >= Number(checklist.total || 0),
           assessor_selected: assessorSet.has(projectId),
-          all_parameter_scoring_completed:
-            Number(project.score_band_status || 0) === 1 || Number(project.total_score || 0) > 0,
+          all_parameter_scoring_completed: scoringFlags.all_parameter_scoring_completed,
+          coordinator_scoring_complete: scoringFlags.coordinator_scoring_complete,
+          assessor_scoring_complete: scoringFlags.assessor_scoring_complete,
           feedback_report_uploaded: Boolean(project.feedback_document_url),
         };
         const status = this.deriveCoordinatorPerformanceStatus(flags);
@@ -15628,28 +15911,38 @@ export class CompanyProjectsService {
             project?.registration_info?.sector_id ||
             '',
         ).trim();
-        const nextStep = Number(project.next_activities_id || 0) > 0
-          ? `step_${Number(project.next_activities_id)}`
-          : '';
-        const yearOfRegistration = new Date(project.createdAt).getUTCFullYear();
+        const nextStep = this.resolveCoordinatorNextStepLabel(
+          Number(project.next_activities_id || 0),
+        );
+        const displayStatus = this.coordinatorPerformanceDisplayStatus(status, {
+          site_visit_report_uploaded: flags.site_visit_report_uploaded,
+        });
+        const regYearRaw =
+          project?.registration_info?.year_of_registration ??
+          project?.registration_info?.registration_year ??
+          project?.registration_info?.year;
+        const parsedRegYear = Number(regYearRaw);
+        const yearOfRegistration = Number.isFinite(parsedRegYear)
+          ? parsedRegYear
+          : new Date(project.createdAt).getUTCFullYear();
         const assignmentDate = assignment?.createdAt ? new Date(assignment.createdAt) : null;
         const poApprovedDateRaw = workOrder?.wo_acceptance_date || workOrder?.wo_doc_status_updated_at || null;
         const poApprovedDate = poApprovedDateRaw ? new Date(poApprovedDateRaw) : null;
-        const leadTimeMonths =
-          assignmentDate && poApprovedDate
-            ? Number(
-                (
-                  (poApprovedDate.getTime() - assignmentDate.getTime()) /
-                  (1000 * 60 * 60 * 24 * 30)
-                ).toFixed(2),
-              )
-            : null;
+        const leadTimeMonths = this.formatLeadTimeMonths(poApprovedDate);
         const certificationLevel =
           Number(project.percentage_score || 0) > 0
             ? this.calculateTentativeLevel(Number(project.percentage_score || 0))
             : '';
+        const targetSlots = this.coordinatorPerformanceTargetSlots(
+          project.coordinator_target_dates,
+        );
+        const ratingDateRaw = project.certificate_upload_date || project.feedback_upload_date || null;
+        const ratingDate = ratingDateRaw ? new Date(ratingDateRaw) : null;
+
         return {
           project_id: projectId,
+          id: projectId,
+          _id: projectId,
           company_id: String(project.company_id),
           company_name: String(company?.name || ''),
           coordinator_id: assignment ? String(assignment.coordinator_id) : '',
@@ -15657,27 +15950,41 @@ export class CompanyProjectsService {
           coordinator_email: String(coordinator?.email || ''),
           coordinator_mobile: String(coordinator?.mobile || ''),
           sector: sectorValue,
+          industry: sectorValue,
           status,
+          performance_status: status,
+          status_label: this.coordinatorPerformanceStatusLabel(status),
+          display_status: displayStatus,
           next_step: nextStep,
+          next_step_display: nextStep,
+          remarks_editable: options.role === 'coordinator',
           year_of_registration: Number.isFinite(yearOfRegistration) ? yearOfRegistration : null,
+          registration_year: Number.isFinite(yearOfRegistration) ? yearOfRegistration : null,
           assignment_date: assignmentDate,
+          assigned_at: assignmentDate,
           po_approved_date: poApprovedDate,
+          po_date: poApprovedDate,
           lead_time_months: leadTimeMonths,
           certification_level: certificationLevel,
+          certification_date: ratingDate,
+          rating_date: ratingDate,
           coordinator_remarks: String(project.coordinator_remarks || ''),
           coordinator_target_dates: Array.isArray(project.coordinator_target_dates)
             ? project.coordinator_target_dates
             : [],
           coordinator_target_dates_locked: Boolean(project.coordinator_target_dates_locked),
           remarks: String(project.coordinator_remarks || ''),
-          target_dates: Array.isArray(project.coordinator_target_dates)
-            ? project.coordinator_target_dates
-            : [],
+          target_dates: targetSlots.target_dates,
+          target_date_1: targetSlots.target_date_1,
+          target_date_2: targetSlots.target_date_2,
+          target_date_3: targetSlots.target_date_3,
+          target_dates_locked_slots: targetSlots.target_dates_locked_slots,
           rated: status === 'rated' || status === 'completed',
           completed: status === 'completed',
           proforma_payment_received: Number(proformaMap.get(projectId) || 0),
           created_at: project.createdAt,
           updated_at: project.updatedAt,
+          cii_approved: flags.primary_data_form_approved,
           ...flags,
         };
       })
@@ -15704,6 +16011,33 @@ export class CompanyProjectsService {
         }
         return true;
       });
+
+    allRows = await Promise.all(
+      allRows.map(async (row) => {
+        const quickviewNextStep = await this.resolveQuickviewNextStepDisplay(
+          String(row.company_id || ''),
+          String(row.project_id || ''),
+          String(row.next_step || ''),
+        );
+        return {
+          ...row,
+          next_step: quickviewNextStep,
+          next_step_display: quickviewNextStep,
+        };
+      }),
+    );
+
+    allRows.sort((a: any, b: any) => {
+      const ta =
+        sortKey === 'created_at'
+          ? new Date(a.created_at || 0).getTime()
+          : new Date(a.updated_at || a.created_at || 0).getTime();
+      const tb =
+        sortKey === 'created_at'
+          ? new Date(b.created_at || 0).getTime()
+          : new Date(b.updated_at || b.created_at || 0).getTime();
+      return sortDir * (ta - tb);
+    });
 
     const total = allRows.length;
     const rows = allRows.slice(skip, skip + limit);
@@ -15743,32 +16077,128 @@ export class CompanyProjectsService {
       (sum, row) => sum + Number(row.proforma_payment_received || 0),
       0,
     );
-    const ratedCompanies = allRows.filter((r) => r.status === 'rated' || r.status === 'completed').length;
+    const ratedCompanies = allRows.filter((r) => r.status === 'rated').length;
     const completedProjects = allRows.filter((r) => r.status === 'completed').length;
     const carryoverProjects = allRows.filter((r) => r.status !== 'completed').length;
-    const progressPercent = total > 0 ? Number(((completedProjects / total) * 100).toFixed(2)) : 0;
+    const progressPercent =
+      total > 0 ? Number(((ratedCompanies / total) * 100).toFixed(2)) : 0;
     const ongoingCounts = {
       launch_pending: allRows.filter((r) => r.status === 'launch_pending').length,
       pre_assessment_pending: allRows.filter((r) => r.status === 'pre_assessment_pending').length,
       assessment_pending: allRows.filter((r) => r.status === 'assessment_pending').length,
       scoring_pending: allRows.filter((r) => r.status === 'scoring_pending').length,
     };
+    const ongoingProjects =
+      ongoingCounts.launch_pending +
+      ongoingCounts.pre_assessment_pending +
+      ongoingCounts.assessment_pending +
+      ongoingCounts.scoring_pending;
+
+    const toTableRow = (row: any, index: number) => ({
+      sl_no: index + 1,
+      ...row,
+    });
+
+    const projectGroups = {
+      ongoing: {
+        total: ongoingProjects,
+        launch_pending: allRows
+          .filter((r) => r.status === 'launch_pending')
+          .map((r, i) => toTableRow(r, i)),
+        pre_assessment_pending: allRows
+          .filter((r) => r.status === 'pre_assessment_pending')
+          .map((r, i) => toTableRow(r, i)),
+        assessment_pending: allRows
+          .filter((r) => r.status === 'assessment_pending')
+          .map((r, i) => toTableRow(r, i)),
+        scoring_pending: allRows
+          .filter((r) => r.status === 'scoring_pending')
+          .map((r, i) => toTableRow(r, i)),
+      },
+      rated_projects: allRows.filter((r) => r.status === 'rated').map((r, i) => toTableRow(r, i)),
+      completed_projects: allRows
+        .filter((r) => r.status === 'completed')
+        .map((r, i) => toTableRow(r, i)),
+    };
+
+    const paymentReceivedCount = allRows.filter((r) => Number(r.proforma_payment_received || 0) > 0)
+      .length;
+
+    const selectedCoordinator =
+      coordinatorIdFilter && coordinatorMap.has(coordinatorIdFilter)
+        ? coordinatorMap.get(coordinatorIdFilter)
+        : null;
+    const viewMode =
+      coordinatorIdFilter && Types.ObjectId.isValid(coordinatorIdFilter)
+        ? 'coordinator'
+        : 'overall';
 
     return {
       status: 'success',
       message: 'Coordinator performance dashboard fetched successfully',
       data: {
+        view_mode: viewMode,
+        filters: {
+          coordinator_id: coordinatorIdFilter || null,
+          year: yearFilter || null,
+          status: statusFilter || null,
+          performance_status: statusFilter || null,
+          sector: sectorFilter || null,
+          from_date: query?.from_date || null,
+          to_date: query?.to_date || null,
+          sort: sortKey,
+          sort_dir: sortDir === 1 ? 'asc' : 'desc',
+        },
+        coordinator_profile:
+          viewMode === 'coordinator' && selectedCoordinator
+            ? {
+                coordinator_id: String(selectedCoordinator._id),
+                id: String(selectedCoordinator._id),
+                name: String(selectedCoordinator.name || ''),
+                email: String(selectedCoordinator.email || ''),
+                mobile: String(selectedCoordinator.mobile || ''),
+              }
+            : null,
         summary: {
           total_projects: total,
+          total_projects_assigned: total,
           rated_companies: ratedCompanies,
+          rated_companies_count: ratedCompanies,
           completed_projects: completedProjects,
+          completed_projects_count: completedProjects,
+          ongoing_projects: ongoingProjects,
+          ongoing_projects_count: ongoingProjects,
           payment_received_proforma: totalPayment,
+          proforma_payment_total: totalPayment,
+          payment_received_count: paymentReceivedCount,
           carryover_projects: carryoverProjects,
+          carryover: carryoverProjects,
           progress_percent: progressPercent,
           ongoing_counts: ongoingCounts,
+          pipeline_by_stage: ongoingCounts,
           total_proforma_payment_received: totalPayment,
         },
-        coordinators: Array.from(coordinatorSummaryMap.values()),
+        coordinators: Array.from(coordinatorSummaryMap.values()).map((c) => ({
+          id: c.coordinator_id,
+          coordinator_id: c.coordinator_id,
+          name: c.coordinator_name,
+          coordinator_name: c.coordinator_name,
+          email: c.coordinator_email,
+          mobile: c.coordinator_mobile,
+          total_projects: c.total_projects,
+          status_counts: c.status_counts,
+          proforma_payment_received: c.proforma_payment_received,
+          progress_percent:
+            c.total_projects > 0
+              ? Number(
+                  (
+                    (Number(c.status_counts?.rated || 0) / c.total_projects) *
+                    100
+                  ).toFixed(2),
+                )
+              : 0,
+        })),
+        project_groups: projectGroups,
         projects: rows,
         pagination: {
           page,
@@ -15780,10 +16210,33 @@ export class CompanyProjectsService {
     };
   }
 
+  /**
+   * Same project rows as the dashboard `data.projects` slice (for clients that load meta separately).
+   * Runs the same aggregation as {@link getCoordinatorPerformanceDashboard}; use sparingly to avoid duplicate work.
+   */
+  async getCoordinatorPerformanceProjectsList(
+    query: Record<string, any>,
+    options: { role: 'admin' | 'coordinator'; tokenCoordinatorId?: string },
+  ): Promise<any> {
+    const full = await this.getCoordinatorPerformanceDashboard(query, options);
+    return {
+      status: full.status,
+      message: 'Coordinator performance projects loaded successfully',
+      data: {
+        projects: full.data?.projects ?? [],
+        pagination: full.data?.pagination ?? {},
+        filters: full.data?.filters ?? {},
+        summary: full.data?.summary ?? {},
+      },
+    };
+  }
+
   async updateCoordinatorProjectRemarks(
     projectId: string,
     remarksRaw: unknown,
+    coordinatorId?: string,
   ): Promise<{ status: string; message: string; data: any }> {
+    await this.assertCoordinatorOwnsProject(projectId, coordinatorId);
     const remarks = String(remarksRaw ?? '').trim();
     const project = await this.projectModel.findById(projectId);
     if (!project) {
@@ -15804,53 +16257,59 @@ export class CompanyProjectsService {
   async createCoordinatorProjectTargetDates(
     projectId: string,
     body: Record<string, any>,
+    coordinatorId?: string,
   ): Promise<{ status: string; message: string; data: any }> {
+    await this.assertCoordinatorOwnsProject(projectId, coordinatorId);
     const project = await this.projectModel.findById(projectId);
     if (!project) {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
-    const alreadyLocked = Boolean((project as any).coordinator_target_dates_locked);
     const existingDates = Array.isArray((project as any).coordinator_target_dates)
       ? ((project as any).coordinator_target_dates as Date[])
       : [];
-    if (alreadyLocked || existingDates.length > 0) {
-      throw new BadRequestException({
-        status: 'error',
-        message: 'Target dates are locked and cannot be edited.',
-      });
-    }
 
     const fromBody = Array.isArray(body?.target_dates)
       ? body.target_dates
       : [body?.target_date || body?.date].filter(Boolean);
-    const dateValues = fromBody
+    const newDateValues = fromBody
       .map((v: unknown) => new Date(String(v)))
       .filter((d: Date) => !Number.isNaN(d.getTime()));
 
-    if (!dateValues.length) {
+    if (!newDateValues.length) {
       throw new BadRequestException({
         status: 'error',
         message: 'At least one valid target date is required.',
       });
     }
-    if (dateValues.length > 3) {
+
+    const mergedDates = [...existingDates];
+    for (const d of newDateValues) {
+      if (mergedDates.length >= 3) break;
+      mergedDates.push(d);
+    }
+
+    if (mergedDates.length > 3) {
       throw new BadRequestException({
         status: 'error',
         message: 'Maximum 3 target dates are allowed.',
       });
     }
 
-    (project as any).coordinator_target_dates = dateValues;
-    (project as any).coordinator_target_dates_locked = true;
+    (project as any).coordinator_target_dates = mergedDates;
+    (project as any).coordinator_target_dates_locked = mergedDates.length >= 3;
     await project.save();
 
     return {
       status: 'success',
-      message: 'Target dates saved and locked successfully',
+      message:
+        mergedDates.length >= 3
+          ? 'Target dates saved (all 3 slots filled; no further dates can be added)'
+          : 'Target date saved successfully',
       data: {
         project_id: String(project._id),
-        target_dates: dateValues,
-        locked: true,
+        target_dates: mergedDates,
+        locked: mergedDates.length >= 3,
+        slots_remaining: Math.max(0, 3 - mergedDates.length),
       },
     };
   }

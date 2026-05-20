@@ -13,6 +13,13 @@ export class CoordinatorPerformanceController {
     });
   }
 
+  @Get('api/admin/coordinator-performance/projects')
+  async getAdminCoordinatorPerformanceProjects(@Query() query: Record<string, any>): Promise<any> {
+    return this.companyProjectsService.getCoordinatorPerformanceProjectsList(query, {
+      role: 'admin',
+    });
+  }
+
   @Get('api/coordinator/coordinator-performance/dashboard')
   async getCoordinatorPerformanceDashboard(
     @Req() req: Request,
@@ -28,25 +35,52 @@ export class CoordinatorPerformanceController {
     });
   }
 
+  @Get('api/coordinator/coordinator-performance/projects')
+  async getCoordinatorPerformanceProjects(
+    @Req() req: Request,
+    @Query() query: Record<string, any>,
+  ): Promise<any> {
+    const tokenCoordinatorId =
+      (req as any)?.user?.coordinatorId ||
+      (req as any)?.user?.coordinator_id ||
+      (req as any)?.user?.id;
+    return this.companyProjectsService.getCoordinatorPerformanceProjectsList(query, {
+      role: 'coordinator',
+      tokenCoordinatorId: tokenCoordinatorId ? String(tokenCoordinatorId) : undefined,
+    });
+  }
+
   @Patch('api/coordinator/projects/:projectId/remarks')
   async updateCoordinatorProjectRemarks(
+    @Req() req: Request,
     @Param('projectId') projectId: string,
     @Body() body: Record<string, any>,
   ): Promise<any> {
+    const tokenCoordinatorId =
+      (req as any)?.user?.coordinatorId ||
+      (req as any)?.user?.coordinator_id ||
+      (req as any)?.user?.id;
     return this.companyProjectsService.updateCoordinatorProjectRemarks(
       projectId,
       body?.remarks,
+      tokenCoordinatorId ? String(tokenCoordinatorId) : undefined,
     );
   }
 
   @Post('api/coordinator/projects/:projectId/target-dates')
   async createCoordinatorProjectTargetDates(
+    @Req() req: Request,
     @Param('projectId') projectId: string,
     @Body() body: Record<string, any>,
   ): Promise<any> {
+    const tokenCoordinatorId =
+      (req as any)?.user?.coordinatorId ||
+      (req as any)?.user?.coordinator_id ||
+      (req as any)?.user?.id;
     return this.companyProjectsService.createCoordinatorProjectTargetDates(
       projectId,
       body,
+      tokenCoordinatorId ? String(tokenCoordinatorId) : undefined,
     );
   }
 
