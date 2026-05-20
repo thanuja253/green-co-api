@@ -16,6 +16,13 @@ export class CreateStaffDto {
 
   @IsOptional()
   @IsString()
+  mobile?: string;
+
+  @IsOptional()
+  role?: string | number | Array<string | number>;
+
+  @IsOptional()
+  @IsString()
   role_id?: string;
 
   @IsOptional()

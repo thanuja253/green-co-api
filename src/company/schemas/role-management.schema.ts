@@ -14,8 +14,8 @@ export class RoleManagement {
   @Prop({ trim: true })
   formnumber?: string;
 
-  @Prop({ type: Object, default: {} })
-  permissions?: Record<string, any>;
+  @Prop({ type: [Number], default: [] })
+  permission_ids?: number[];
 }
 
 export const RoleManagementSchema = SchemaFactory.createForClass(RoleManagement);

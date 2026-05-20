@@ -1,6 +1,8 @@
 import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 import { AdminJwtAuthGuard } from '../company-auth/guards/admin-jwt-auth.guard';
 import { AdminGreencoDashboardService } from './admin-greenco-dashboard.service';
+import { AdminInertCompaniesService } from './admin-inert-companies.service';
+import { AdminAssessorFacilitatorDashboardService } from './admin-assessor-facilitator-dashboard.service';
 
 /**
  * JSON equivalent of Laravel `GET /admin/dashboard` (Greenco Status tab).
@@ -9,7 +11,11 @@ import { AdminGreencoDashboardService } from './admin-greenco-dashboard.service'
 @Controller()
 @UseGuards(AdminJwtAuthGuard)
 export class AdminGreencoDashboardController {
-  constructor(private readonly greencoDashboard: AdminGreencoDashboardService) {}
+  constructor(
+    private readonly greencoDashboard: AdminGreencoDashboardService,
+    private readonly inertCompaniesDashboard: AdminInertCompaniesService,
+    private readonly assessorFacilitatorDashboard: AdminAssessorFacilitatorDashboardService,
+  ) {}
 
   @Get('api/admin/dashboard')
   @Get('admin/dashboard')
@@ -57,5 +63,23 @@ export class AdminGreencoDashboardController {
   @Get('api/admin/dashboard/recent-activity')
   async recentActivity(@Query() query: Record<string, any>) {
     return this.greencoDashboard.getRecentActivity(query);
+  }
+
+  /**
+   * Laravel `GET /admin/inert_companies?year=` — KPI cards + state-wise chart.
+   */
+  @Get('api/admin/dashboard/inert-companies')
+  @Get('admin/dashboard/inert-companies')
+  async inertCompanies(@Query() query: Record<string, any>) {
+    return this.inertCompaniesDashboard.getInertCompaniesDashboard(query);
+  }
+
+  /**
+   * Laravel `GET /admin/assessorAndFacilitator?year=` — facilitator/assessor/WO/launch/coordinator stats.
+   */
+  @Get('api/admin/dashboard/assessor-facilitator')
+  @Get('admin/dashboard/assessor-facilitator')
+  async assessorFacilitator(@Query() query: Record<string, any>) {
+    return this.assessorFacilitatorDashboard.getAssessorFacilitatorDashboard(query);
   }
 }

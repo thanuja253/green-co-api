@@ -31,6 +31,15 @@ export class Staff {
 
   @Prop({ default: '1', trim: true })
   status?: string;
+
+  @Prop({ default: 'RT', trim: true })
+  user_role?: string;
+
+  @Prop({ trim: true, select: false })
+  password?: string;
+
+  @Prop({ default: '1', trim: true })
+  verification_status?: string;
 }
 
 export const StaffSchema = SchemaFactory.createForClass(Staff);

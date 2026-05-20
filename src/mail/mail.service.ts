@@ -964,5 +964,118 @@ export class MailService {
     };
     await this.transporter.sendMail(mailOptions);
   }
+
+  private getAdminPortalLoginUrl(): string {
+    const base = (process.env.ADMIN_PORTAL_URL || process.env.APP_URL || '').trim();
+    return (
+      (process.env.ADMIN_LOGIN_URL || '').trim() ||
+      (base ? `${base.replace(/\/$/, '')}/admin/login` : '/admin/login')
+    );
+  }
+
+  async sendStaffCreatedEmail(
+    email: string,
+    staffName: string,
+    temporaryPassword: string,
+  ): Promise<void> {
+    const loginUrl = this.getAdminPortalLoginUrl();
+    await this.transporter.sendMail({
+      from: process.env.MAIL_FROM_ADDRESS || 'noreply@greenco.com',
+      to: email,
+      subject: 'GreenCo - Staff account credentials',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2>Welcome to GreenCo Admin</h2>
+          <p>Dear ${staffName || 'Team Member'},</p>
+          <p>Your staff account has been created.</p>
+          <p><strong>Login Email:</strong> ${email}</p>
+          <p><strong>Temporary Password:</strong> ${temporaryPassword}</p>
+          <p><a href="${loginUrl}" target="_blank">Login to Admin Portal</a></p>
+          <p>Best regards,<br/>GreenCo Team</p>
+        </div>
+      `,
+    });
+  }
+
+  async sendStaffEmailChangedEmail(
+    email: string,
+    details: { name?: string; email?: string; mobile?: string; password?: string },
+  ): Promise<void> {
+    const loginUrl = this.getAdminPortalLoginUrl();
+    await this.transporter.sendMail({
+      from: process.env.MAIL_FROM_ADDRESS || 'noreply@greenco.com',
+      to: email,
+      subject: 'GreenCo - Staff login email updated',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2>Staff account email updated</h2>
+          <p>Dear ${details.name || 'Team Member'},</p>
+          <p>Your staff account email has been updated. Use the credentials below to sign in.</p>
+          <p><strong>Login Email:</strong> ${details.email || email}</p>
+          <p><strong>Temporary Password:</strong> ${details.password || ''}</p>
+          <p><a href="${loginUrl}" target="_blank">Login to Admin Portal</a></p>
+          <p>Best regards,<br/>GreenCo Team</p>
+        </div>
+      `,
+    });
+  }
+
+  async sendStaffDetailsChangedEmail(
+    email: string,
+    details: { name?: string; email?: string; mobile?: string; password?: string },
+  ): Promise<void> {
+    await this.transporter.sendMail({
+      from: process.env.MAIL_FROM_ADDRESS || 'noreply@greenco.com',
+      to: email,
+      subject: 'GreenCo - Staff account details changed',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2>Staff account update notice</h2>
+          <p>Dear ${details.name || 'Team Member'},</p>
+          <p>Your staff account details were updated by GreenCo Admin. Your login email is now <strong>${details.email || ''}</strong>.</p>
+          <p>If you did not expect this change, contact the GreenCo team.</p>
+          <p>Best regards,<br/>GreenCo Team</p>
+        </div>
+      `,
+    });
+  }
+
+  async sendStaffAccountActivatedEmail(
+    email: string,
+    details: { name?: string; email?: string; mobile?: string },
+  ): Promise<void> {
+    await this.transporter.sendMail({
+      from: process.env.MAIL_FROM_ADDRESS || 'noreply@greenco.com',
+      to: email,
+      subject: 'GreenCo - Staff account activated',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2>Account activated</h2>
+          <p>Dear ${details.name || 'Team Member'},</p>
+          <p>Your GreenCo staff account has been activated.</p>
+          <p>Best regards,<br/>GreenCo Team</p>
+        </div>
+      `,
+    });
+  }
+
+  async sendStaffAccountDeactivatedEmail(
+    email: string,
+    details: { name?: string; email?: string; mobile?: string },
+  ): Promise<void> {
+    await this.transporter.sendMail({
+      from: process.env.MAIL_FROM_ADDRESS || 'noreply@greenco.com',
+      to: email,
+      subject: 'GreenCo - Staff account deactivated',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2>Account deactivated</h2>
+          <p>Dear ${details.name || 'Team Member'},</p>
+          <p>Your GreenCo staff account has been deactivated. Contact the GreenCo team if you need access restored.</p>
+          <p>Best regards,<br/>GreenCo Team</p>
+        </div>
+      `,
+    });
+  }
 }
 

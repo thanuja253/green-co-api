@@ -36,5 +36,29 @@ export class ListStaffQueryDto {
   @IsOptional()
   @IsString()
   status?: string;
+
+  @IsOptional()
+  @IsString()
+  employee_code?: string;
+
+  @IsOptional()
+  @IsString()
+  mobile?: string;
+
+  @IsOptional()
+  @IsString()
+  role?: string;
+
+  @IsOptional()
+  @IsString()
+  draw?: string;
+
+  @IsOptional()
+  @IsString()
+  start?: string;
+
+  @IsOptional()
+  @IsString()
+  length?: string;
 }
 

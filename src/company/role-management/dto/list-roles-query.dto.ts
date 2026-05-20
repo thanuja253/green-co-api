@@ -20,5 +20,21 @@ export class ListRolesQueryDto {
   @IsOptional()
   @IsString()
   account_status?: string;
+
+  @IsOptional()
+  @IsString()
+  search?: string;
+
+  @IsOptional()
+  @IsString()
+  draw?: string;
+
+  @IsOptional()
+  @IsString()
+  start?: string;
+
+  @IsOptional()
+  @IsString()
+  length?: string;
 }
 

@@ -10,6 +10,9 @@ import { CoordinatorPerformanceController } from './coordinator-performance.cont
 import { AdminGreencoDashboardController } from './admin-greenco-dashboard.controller';
 import { CompanyProjectsService } from './company-projects.service';
 import { AdminGreencoDashboardService } from './admin-greenco-dashboard.service';
+import { AdminInertCompaniesService } from './admin-inert-companies.service';
+import { AdminAssessorFacilitatorDashboardService } from './admin-assessor-facilitator-dashboard.service';
+import { State, StateSchema } from '../schemas/state.schema';
 import {
   CompanyProject,
   CompanyProjectSchema,
@@ -101,6 +104,7 @@ import { MailModule } from '../../mail/mail.module';
       { name: CreditManagement.name, schema: CreditManagementSchema },
       { name: ParameterManagement.name, schema: ParameterManagementSchema },
       { name: MasterChecklistSector.name, schema: MasterChecklistSectorSchema },
+      { name: State.name, schema: StateSchema },
     ]),
   ],
   controllers: [
@@ -113,7 +117,12 @@ import { MailModule } from '../../mail/mail.module';
     CoordinatorPerformanceController,
     AdminGreencoDashboardController,
   ],
-  providers: [CompanyProjectsService, AdminGreencoDashboardService],
+  providers: [
+    CompanyProjectsService,
+    AdminGreencoDashboardService,
+    AdminInertCompaniesService,
+    AdminAssessorFacilitatorDashboardService,
+  ],
   exports: [CompanyProjectsService],
 })
 export class CompanyProjectsModule {}

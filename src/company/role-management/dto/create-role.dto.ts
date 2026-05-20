@@ -1,4 +1,4 @@
-import { IsObject, IsOptional, IsString } from 'class-validator';
+import { IsArray, IsOptional, IsString } from 'class-validator';
 
 export class CreateRoleDto {
   @IsString()
@@ -13,7 +13,7 @@ export class CreateRoleDto {
   formnumber?: string;
 
   @IsOptional()
-  @IsObject()
-  permissions?: Record<string, any>;
+  @IsArray()
+  permissions?: Array<string | number>;
 }
 
