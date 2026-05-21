@@ -3,7 +3,7 @@ import { NotificationsService } from './notifications.service';
 import { AssessorJwtAuthGuard } from '../assessor-auth/guards/assessor-jwt-auth.guard';
 import { AssessorAccountStatusGuard } from '../assessor-auth/guards/assessor-account-status.guard';
 
-@Controller('api/assessor/notifications')
+@Controller(['api/assessor/notifications', 'api/assessors/notifications'])
 export class AssessorNotificationsController {
   constructor(private readonly notificationsService: NotificationsService) {}
 

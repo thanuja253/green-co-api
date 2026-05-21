@@ -741,6 +741,42 @@ export class CompanyProjectsService {
       );
   }
 
+  /** In-app notification for a single assessor (notify_type AS). */
+  private notifyAssessor(
+    assessorId: string,
+    title: string,
+    content: string,
+    category = 'update',
+  ): void {
+    if (!assessorId) return;
+    this.notificationsService
+      .create(title, content, 'AS', assessorId, category)
+      .catch((e) =>
+        console.error('[Assessor notification] Failed:', e?.message || e),
+      );
+  }
+
+  /** Notify every assessor assigned to a project. */
+  private async notifyAssessorsOnProject(
+    projectId: string,
+    title: string,
+    content: string,
+    category = 'update',
+  ): Promise<void> {
+    const assessorIds = await this.companyAssessorModel.distinct('assessor_id', {
+      project_id: projectId,
+    });
+    for (const aid of assessorIds) {
+      const id = aid?.toString?.() || String(aid || '');
+      this.notifyAssessor(id, title, content, category);
+    }
+  }
+
+  /** Fire-and-forget: all assessors assigned to this project (no-op if none). */
+  private alertAssessorsOnProject(projectId: string, title: string, content: string): void {
+    void this.notifyAssessorsOnProject(projectId, title, content);
+  }
+
   private parseDdMmYyyyToDate(value: string): Date | null {
     const match = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(value);
     if (!match) return null;
@@ -1649,6 +1685,19 @@ export class CompanyProjectsService {
 
     await assessor.save();
 
+    if (approvalStatus === 'Approved' || approvalStatus === 'Rejected') {
+      const remarksText = remarksTrim ? ` Remarks: ${remarksTrim}` : '';
+      this.notifyAssessor(
+        assessorId,
+        approvalStatus === 'Approved'
+          ? 'Your assessor profile has been approved'
+          : 'Your assessor profile was not approved',
+        approvalStatus === 'Approved'
+          ? 'GreenCo Team has approved your assessor registration. You can continue with assigned projects.'
+          : `GreenCo Team has not approved your assessor registration.${remarksText}`,
+      );
+    }
+
     return {
       status: 'success',
       message: `Assessor ${approvalStatus.toLowerCase()} successfully`,
@@ -1713,6 +1762,18 @@ export class CompanyProjectsService {
     }
 
     await assessor.save();
+
+    if (status === 'Approved' || status === 'Rejected') {
+      const remarksText = String(remarks ?? '').trim();
+      this.notifyAssessor(
+        assessorId,
+        status === 'Approved' ? 'Profile document approved' : 'Profile document not approved',
+        status === 'Approved'
+          ? `GreenCo Team approved your uploaded document (${documentKey}).`
+          : `GreenCo Team did not approve your document (${documentKey}).${remarksText ? ` Remarks: ${remarksText}` : ''}`,
+      );
+    }
+
     return {
       status: 'success',
       message: `Document ${documentKey} marked as ${status}`,
@@ -2690,6 +2751,24 @@ export class CompanyProjectsService {
       milestone_flow: 18,
       milestone_completed: true,
     });
+
+    const company = await this.companyModel.findById(companyId).lean();
+    const projectCode = (project as any).project_id || projectId;
+    const companyName = company?.name || 'Company';
+    this.notificationsService
+      .create(
+        'Certificate issued',
+        `GreenCo Team has uploaded the certificate for your project ${projectCode}.`,
+        'C',
+        companyId,
+      )
+      .catch((e) => console.error('[Certificate] Company notification failed:', e));
+    await this.notifyAssessorsOnProject(
+      projectId,
+      'Certificate issued for your assigned project',
+      `GreenCo Team uploaded the certificate for ${companyName} (project ${projectCode}).`,
+    );
+
     return {
       status: 'success',
       message: 'Certificate uploaded successfully',
@@ -2755,6 +2834,15 @@ export class CompanyProjectsService {
       milestone_flow: 23,
       milestone_completed: true,
     });
+
+    const company = await this.companyModel.findById(companyId).lean();
+    const pCode = (project as any).project_id || projectId;
+    this.alertAssessorsOnProject(
+      projectId,
+      'Feedback report uploaded',
+      `${company?.name || 'Company'} (${pCode}): feedback report uploaded by GreenCo Team.`,
+    );
+
     return {
       status: 'success',
       message: 'Feedback uploaded successfully',
@@ -3228,6 +3316,17 @@ export class CompanyProjectsService {
 
     await project.save();
 
+    const company = await this.companyModel.findById(resolved.company_id).lean();
+    const companyName = company?.name || 'Company';
+    const projectCode = (project as any).project_id || String(resolved._id);
+    this.alertAssessorsOnProject(
+      String(resolved._id),
+      finalSubmit ? 'GreenCo Team submitted final scoring' : 'GreenCo Team updated scoring',
+      finalSubmit
+        ? `${companyName} (${projectCode}): CII/coordinator final scoring submitted for criteria ${parsed.criteriaId}.`
+        : `${companyName} (${projectCode}): scoring updated by GreenCo Team for criteria ${parsed.criteriaId}.`,
+    );
+
     return {
       status: 'success',
       message: finalSubmit
@@ -3450,8 +3549,12 @@ export class CompanyProjectsService {
     registrationInfo.assessment_scoring = scoringStore;
     (project as any).registration_info = registrationInfo;
 
+    const companyId = String((project as any).company_id || '').trim();
+    const company = await this.companyModel.findById(companyId).lean();
+    const companyName = company?.name || 'Company';
+    const projectCode = (project as any).project_id || projectId;
+
     if (finalSubmit) {
-      const companyId = String((project as any).company_id || '').trim();
       const assessorName = String((assessor as any)?.name || 'Assessor').trim();
       const description = `Assessor ${assessorName} has Submitted the Scoring`;
 
@@ -3501,6 +3604,27 @@ export class CompanyProjectsService {
       if (computedNext > currentNext) {
         (project as any).next_activities_id = computedNext;
       }
+
+      this.notificationsService
+        .create(
+          `${companyName}: Assessor scoring submitted`,
+          `Assessor ${assessorName} submitted final scoring for project ${projectCode}.`,
+          'A',
+        )
+        .catch((e) =>
+          console.error('[Assessor scoring] Admin notification failed:', e?.message || e),
+        );
+      this.notifyAssessor(
+        assessorId,
+        'Your scoring has been submitted',
+        `${companyName} (${projectCode}): final scoring submitted for criteria ${parsed.criteriaId}. GreenCo Team will review.`,
+      );
+    } else {
+      this.notifyAssessor(
+        assessorId,
+        'Scoring saved',
+        `${companyName} (${projectCode}): draft scoring saved for criteria ${parsed.criteriaId} (${updatedCount} row(s)).`,
+      );
     }
 
     (project as any).markModified?.('registration_info');
@@ -5011,7 +5135,12 @@ export class CompanyProjectsService {
         .catch((e) =>
           console.error('[Complete Milestone] Admin notification failed:', e?.message || e),
         );
-      
+      this.alertAssessorsOnProject(
+        projectId,
+        `Project milestone ${dto.milestone_flow} completed`,
+        `${companyName}: ${dto.description || `Milestone ${dto.milestone_flow} completed.`}`,
+      );
+
       console.log('[Complete Milestone] After update:', {
         projectId: project._id.toString(),
         old_next_activities_id: oldValue,
@@ -7046,6 +7175,13 @@ export class CompanyProjectsService {
           companyId,
         )
         .catch((e) => console.error('Assessment submittal upload notification failed:', e));
+      const companyForAs = await this.companyModel.findById(companyId).lean();
+      const pCode = (project as any).project_id || projectId;
+      this.alertAssessorsOnProject(
+        projectId,
+        'Assessment submittal uploaded',
+        `${companyForAs?.name || 'Company'} (${pCode}): ${title || file.originalname} uploaded.`,
+      );
 
       // If all 9 category tabs now have at least one document, send "all complete" notification (once per project)
       const ASSESSMENT_CATEGORY_CODES = ['GSC', 'IE', 'PSL', 'MS', 'EM', 'CBM', 'WTM', 'MRM', 'GBE'];
@@ -7070,6 +7206,11 @@ export class CompanyProjectsService {
               companyId,
             )
             .catch((e) => console.error('All assessment submittals complete notification failed:', e));
+          this.alertAssessorsOnProject(
+            projectId,
+            'All assessment submittals uploaded',
+            `${companyForAs?.name || 'Company'} (${pCode}): all 9 assessment categories have documents.`,
+          );
           await this.projectModel.updateOne(
             { _id: projectId, company_id: companyId },
             { $set: { assessment_submittals_complete_notified: true } },
@@ -7195,6 +7336,20 @@ export class CompanyProjectsService {
           this.mailService.sendChecklistDocNotAcceptedEmail((cf as any).facilitator_id.email, (cf as any).facilitator_id.name || 'Facilitator', detail).catch((e) => console.error('Checklist not-accepted email failed:', e));
         }
       }
+      this.alertAssessorsOnProject(projectId, 'Assessment submittal not accepted', detail);
+    }
+
+    if (updates.document_status === 1) {
+      const company = await this.companyModel.findById(companyId).lean();
+      const docDetails = (doc as any).description || (doc as any).document_title || 'Assessment submittal';
+      const pCode =
+        (await this.projectModel.findById(projectId).select('project_id').lean())?.project_id ||
+        projectId;
+      this.alertAssessorsOnProject(
+        projectId,
+        'Assessment submittal accepted',
+        `${company?.name || 'Company'} (${pCode}): ${docDetails} accepted by GreenCo Team.`,
+      );
     }
 
     return {
@@ -10856,6 +11011,12 @@ export class CompanyProjectsService {
       this.mailService.sendInvoiceRaisedEmail(company.email, company.name || 'Company', invoiceLabel, projectCode).catch((e) => console.error('Invoice email to company failed:', e));
     }
 
+    this.alertAssessorsOnProject(
+      projectId,
+      paymentFor === PAYMENT_FOR_PROFORMA ? 'Proforma invoice raised' : 'Tax invoice raised',
+      `${company?.name || 'Company'} (${projectCode}): ${invoiceLabel} raised by GreenCo Team.`,
+    );
+
     const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-04z5.onrender.com';
     const documentUrl = relativePath.startsWith('http') ? relativePath : `${baseUrl}/${relativePath.replace(/^\//, '')}`;
 
@@ -10951,6 +11112,11 @@ export class CompanyProjectsService {
           console.error('Payment submission notification to facilitator failed:', e),
         );
     }
+    this.alertAssessorsOnProject(
+      projectId,
+      'Company submitted payment',
+      `${companyName} (${projectId}): ${invoice.payment_for === PAYMENT_FOR_PROFORMA ? 'Proforma' : 'Tax'} payment submitted — pending admin review.`,
+    );
 
     const paymentDescription = `Payment submitted for invoice (${invoice.payment_for === PAYMENT_FOR_PROFORMA ? 'Proforma' : 'Tax Invoice'}): ${dto.payment_type}${dto.trans_id ? ` - ${dto.trans_id}` : ''}`;
 
@@ -11099,6 +11265,12 @@ export class CompanyProjectsService {
           this.mailService.sendPaymentApprovalEmail((cf as any).facilitator_id.email, (cf as any).facilitator_id.name || 'Facilitator', status as 'Approved' | 'DisApproved').catch((e) => console.error('Payment approval email to facilitator failed:', e));
         }
       }
+      const pCode = (project as any).project_id || projectId;
+      this.alertAssessorsOnProject(
+        projectId,
+        isProforma ? `Proforma invoice ${status}` : `Invoice payment ${status}`,
+        `${companyName} (${pCode}): ${isProforma ? 'Proforma' : 'Invoice'} ${status.toLowerCase()} by GreenCo Team.${approvalStatus === 1 && isProforma ? ' You may plan the site visit.' : ''}`,
+      );
     }
 
     return {
@@ -11362,6 +11534,13 @@ export class CompanyProjectsService {
       )
       .catch((err) => console.error('Site visit notification failed:', err));
 
+    const pCode = (project as any).project_id || projectId;
+    this.alertAssessorsOnProject(
+      projectId,
+      'Site visit report uploaded',
+      `${company?.name || 'Company'} (${pCode}): Launch & Training / site visit report uploaded.`,
+    );
+
     // Email: notify company that site visit report has been uploaded
     this.mailService
       .sendSiteVisitReportUploadedEmail(company?.email, company?.name || 'Company')
@@ -11432,6 +11611,14 @@ export class CompanyProjectsService {
     this.mailService
       .sendSiteVisitReportUploadedEmail(company?.email, company?.name || 'Company')
       .catch((err) => console.error('Site visit report email failed:', err));
+
+    const pRow = await this.projectModel.findById(resolved.projectId).select('project_id').lean();
+    const pCode = (pRow as any)?.project_id || resolved.projectId;
+    this.alertAssessorsOnProject(
+      resolved.projectId,
+      'Site visit report uploaded',
+      `${company?.name || 'Company'} (${pCode}): site visit report uploaded by consultant.`,
+    );
 
     return {
       status: 'success',
@@ -11616,6 +11803,11 @@ export class CompanyProjectsService {
             console.error('[Work Order Approval] Facilitator notification failed:', e?.message || e),
           );
       }
+      this.alertAssessorsOnProject(
+        projectId,
+        'Work order approved',
+        `${companyName} (${project.project_id || projectId}): work order approved by CII.`,
+      );
     } else if (dto.wo_status === 2 && projectCompanyId) {
       const company = await this.companyModel.findById(projectCompanyId).lean();
       const companyName = company?.name || 'Company';
@@ -11662,6 +11854,11 @@ export class CompanyProjectsService {
             console.error('[Work Order Approval] Facilitator notification failed:', e?.message || e),
           );
       }
+      this.alertAssessorsOnProject(
+        projectId,
+        'Work order rejected',
+        `${companyName} (${project.project_id || projectId}): work order rejected.${dto.wo_remarks ? ` Remarks: ${dto.wo_remarks}` : ''}`,
+      );
     }
 
     console.log('[Work Order Approval] Status updated:', {
@@ -12588,6 +12785,17 @@ export class CompanyProjectsService {
     }
 
     const assignmentIds = rows.map((row: any) => row._id);
+    const company = await this.companyModel.findById(companyId).lean();
+    const projectCode = (project as any).project_id || projectId;
+    const companyName = company?.name || 'Company';
+    for (const row of rows) {
+      const aid = (row as any).assessor_id?.toString?.() || String((row as any).assessor_id || '');
+      this.notifyAssessor(
+        aid,
+        'Removed from project assignment',
+        `You are no longer assigned to ${companyName} (project ${projectCode}).`,
+      );
+    }
     await this.companyAssessorModel.deleteMany({ _id: { $in: assignmentIds } });
 
     return {
@@ -12641,6 +12849,8 @@ export class CompanyProjectsService {
     });
 
     const dates = visitDates && visitDates.length > 0 ? visitDates : [new Date().toISOString().slice(0, 10)];
+    const datesLabel = dates.join(', ');
+    const hadAssignment = !!companyAssessor;
 
     if (companyAssessor) {
       companyAssessor.visit_dates = dates;
@@ -12655,14 +12865,13 @@ export class CompanyProjectsService {
     }
 
     // In-app: notify Assessor (AS)
-    this.notificationsService
-      .create(
-        'Greenco Team has assigned an Assessor for your company',
-        `Assessor ${assessor.name} has assigned to Company ${company?.name || 'N/A'} by Admin`,
-        'AS',
-        assessorId,
-      )
-      .catch((err) => console.error('Notification to assessor failed:', err));
+    this.notifyAssessor(
+      assessorId,
+      hadAssignment ? 'Site visit dates updated' : 'You have been assigned to a GreenCo project',
+      hadAssignment
+        ? `Visit dates for ${company?.name || 'Company'} (project ${projectCode}) were updated: ${datesLabel}.`
+        : `You have been assigned to ${company?.name || 'Company'} (project ${projectCode}). Visit dates: ${datesLabel}.`,
+    );
     this.notificationsService
       .create(
         'Assessor assigned (Admin alert)',
@@ -12841,14 +13050,15 @@ export class CompanyProjectsService {
       )
       .catch((err) => console.error('Notification to company failed:', err));
 
-    this.notificationsService
-      .create(
-        'Greenco Team has assigned an Assessor',
-        `You have been assigned to company ${company?.name || 'N/A'}.`,
-        'AS',
-        selectAssessor,
-      )
-      .catch((err) => console.error('Notification to assessor failed:', err));
+    const projectCode = (project as any).project_id || companyProjectId;
+    const datesLabel = dates.join(', ');
+    this.notifyAssessor(
+      selectAssessor,
+      hadAssessorBefore ? 'Site visit dates updated' : 'You have been assigned to a GreenCo project',
+      hadAssessorBefore
+        ? `Visit dates for ${company?.name || 'Company'} (project ${projectCode}) were updated: ${datesLabel}.`
+        : `You have been assigned to ${company?.name || 'Company'} (project ${projectCode}). Visit dates: ${datesLabel}.`,
+    );
 
     this.mailService
       .sendAssessorAssignedToCompanyEmail(
@@ -14880,6 +15090,14 @@ export class CompanyProjectsService {
       )
       .catch((e) => console.error('Primary data submission notification failed:', e));
 
+    const company = await this.companyModel.findById(companyId).lean();
+    const pCode = (project as any)?.project_id || projectId;
+    this.alertAssessorsOnProject(
+      projectId,
+      'Primary data submitted',
+      `${company?.name || 'Company'} (${pCode}): company submitted all primary data — pending GreenCo review.`,
+    );
+
     return { status: 'success', message: 'Success! Primary Data Submitted.' };
   }
 
@@ -14915,6 +15133,14 @@ export class CompanyProjectsService {
       milestone_flow: 9,
       milestone_completed: false,
     });
+
+    const company = await this.companyModel.findById(companyId).lean();
+    const pCode = (project as any).project_id || projectId;
+    this.alertAssessorsOnProject(
+      projectId,
+      'Primary data documents re-uploaded',
+      `${company?.name || 'Company'} (${pCode}): company re-uploaded primary data documents.`,
+    );
 
     return { status: 'success', message: 'Success! Primary Data Documents Uploaded Successfully!' };
   }
@@ -15066,6 +15292,13 @@ export class CompanyProjectsService {
           this.mailService.sendPrimaryDocNotAcceptedEmail((cf as any).facilitator_id.email, (cf as any).facilitator_id.name || 'Facilitator', detail).catch((e) => console.error('Primary not-accepted email failed:', e));
         }
       }
+      const pRow = await this.projectModel.findById(projectId).select('project_id').lean();
+      const pCode = (pRow as any)?.project_id || projectId;
+      this.alertAssessorsOnProject(
+        projectId,
+        'Primary data not accepted',
+        `${company?.name || 'Company'} (${pCode}): ${detail}`,
+      );
     }
 
     // In-app + email when accepted (status 1)
@@ -15085,6 +15318,13 @@ export class CompanyProjectsService {
           this.mailService.sendPrimaryDocAcceptedEmail((cf as any).facilitator_id.email, (cf as any).facilitator_id.name || 'Facilitator', formType).catch((e) => console.error('Primary accepted email failed:', e));
         }
       }
+      const pRowAcc = await this.projectModel.findById(projectId).select('project_id').lean();
+      const pCodeAcc = (pRowAcc as any)?.project_id || projectId;
+      this.alertAssessorsOnProject(
+        projectId,
+        'Primary data accepted',
+        `${company?.name || 'Company'} (${pCodeAcc}): section "${formType}" accepted by GreenCo Team.`,
+      );
     }
 
     const updated = await this.primaryDataFormModel

@@ -46,6 +46,20 @@ export class AdminJwtAuthGuard implements CanActivate {
     if (/^\/?admin\/projects\/[^/]+\/certificate(-document)?$/i.test(path)) {
       return true;
     }
+    // Plaque details (GET/POST/PATCH) — public for company/CII panel compatibility.
+    if (/^\/?api\/admin\/projects\/[^/]+\/plaque$/i.test(path)) {
+      return true;
+    }
+    if (/^\/?admin\/projects\/[^/]+\/plaque$/i.test(path)) {
+      return true;
+    }
+    // Project details (p-details) — public for company/CII panel compatibility.
+    if (/^\/?api\/admin\/projects\/[^/]+\/p[-_]details$/i.test(path)) {
+      return true;
+    }
+    if (/^\/?admin\/projects\/[^/]+\/p[-_]details$/i.test(path)) {
+      return true;
+    }
     // Keep facilitators list endpoint public for CII flow compatibility.
     if (/^\/?api\/admin\/facilitators$/i.test(path)) {
       return true;
