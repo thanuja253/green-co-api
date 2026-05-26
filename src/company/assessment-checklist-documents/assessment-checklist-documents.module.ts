@@ -11,9 +11,13 @@ import {
   ParameterManagementSchema,
 } from '../schemas/parameter-management.schema';
 import { Company, CompanySchema } from '../schemas/company.schema';
+import { CompanyProject, CompanyProjectSchema } from '../schemas/company-project.schema';
+import { CompanyFacilitator, CompanyFacilitatorSchema } from '../schemas/company-facilitator.schema';
 import { AssessmentChecklistDocumentsController } from './assessment-checklist-documents.controller';
 import { AssessmentChecklistDocumentsService } from './assessment-checklist-documents.service';
 import { AccountStatusGuard } from '../company-auth/guards/account-status.guard';
+import { NotificationsModule } from '../notifications/notifications.module';
+import { MailModule } from '../../mail/mail.module';
 
 @Module({
   imports: [
@@ -23,7 +27,11 @@ import { AccountStatusGuard } from '../company-auth/guards/account-status.guard'
       { name: GroupManagement.name, schema: GroupManagementSchema },
       { name: ParameterManagement.name, schema: ParameterManagementSchema },
       { name: Company.name, schema: CompanySchema },
+      { name: CompanyProject.name, schema: CompanyProjectSchema },
+      { name: CompanyFacilitator.name, schema: CompanyFacilitatorSchema },
     ]),
+    NotificationsModule,
+    MailModule,
   ],
   controllers: [AssessmentChecklistDocumentsController],
   providers: [AssessmentChecklistDocumentsService, AccountStatusGuard],

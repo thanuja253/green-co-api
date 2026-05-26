@@ -9,6 +9,8 @@ export class AdminNotificationsController {
   /**
    * GET /api/admin/notifications?skip=0&limit=50
    * List admin notifications with unread badge count.
+   * Each item includes: id, title, message, seen, is_seen, created_at,
+   * project_id, company_id, company_name, project_code, activity, responsibility, event_type.
    */
   @Get()
   @UseGuards(AdminJwtAuthGuard)

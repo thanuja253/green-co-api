@@ -26,6 +26,7 @@ import {
 import { Facilitator, FacilitatorDocument } from '../schemas/facilitator.schema';
 import { MailService } from '../../mail/mail.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { MILESTONE_STEPS } from '../notifications/workflow-milestone.constants';
 import { passwordGeneration } from '../../helpers/password.helper';
 import { RegisterDto } from './dto/register.dto';
 import { RegisterThroughFacilitatorDto } from './dto/register-through-facilitator.dto';
@@ -177,20 +178,8 @@ export class CompanyAuthService {
     savedProject.next_activities_id = 2;
     await savedProject.save();
 
-    // Workflow transition notification: Step 1 -> Step 2
-    this.notificationsService
-      .create(
-        'Workflow moved: Company Registered -> Registration Form',
-        'Latest step: Company Registered. Next step: Registration Form. Please fill your registration form details.',
-        'C',
-        savedCompany._id.toString(),
-        'update',
-      )
-      .catch((err) =>
-        console.error('Registration step transition notification failed:', err),
-      );
-
     // Create facilitator assignment if assessment is facilitator
+    let facilitatorIdForNotify: string | null = null;
     if (normalizedAssessment === 'facilitator' && registerDto.selectfacilitator) {
       const facilitator = new this.companyFacilitatorModel({
         company_id: savedCompany._id,
@@ -198,27 +187,25 @@ export class CompanyAuthService {
         facilitator_id: new Types.ObjectId(registerDto.selectfacilitator),
       });
       await facilitator.save();
+      facilitatorIdForNotify = registerDto.selectfacilitator;
     }
 
-    // In-app: notify Admin (New Company Registered)
-    this.notificationsService
-      .create(
-        'New Company Registered',
-        `Company ${savedCompany.name} Registered`,
-        'A',
-        null,
-      )
-      .catch((err) => console.error('Notification create failed:', err));
-
-    // In-app: notify Company (credentials / next steps)
-    this.notificationsService
-      .create(
-        'Registration successful',
-        'You have been registered. Check your email for login credentials and next steps.',
-        'C',
-        savedCompany._id.toString(),
-      )
-      .catch((err) => console.error('Notification to company failed:', err));
+    await this.notificationsService.logWorkflowStepForProject(
+      {
+        project_id: savedProject._id.toString(),
+        company_id: savedCompany._id.toString(),
+        company_name: savedCompany.name,
+        project_code: savedProject._id.toString(),
+        activity: MILESTONE_STEPS[1].name,
+        responsibility: MILESTONE_STEPS[1].responsibility,
+      },
+      'step_completed',
+      {
+        admin: true,
+        company: true,
+        facilitatorId: facilitatorIdForNotify,
+      },
+    );
 
     // Send registration email in background (non-blocking)
     this.mailService

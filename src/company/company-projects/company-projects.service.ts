@@ -76,6 +76,12 @@ import type { Response } from 'express';
 import { getCertificationType } from '../../helpers/certification.helper';
 import { passwordGeneration } from '../../helpers/password.helper';
 import { NotificationsService } from '../notifications/notifications.service';
+import {
+  milestoneActivity,
+  MILESTONE_STEPS,
+  WorkflowEventType,
+} from '../notifications/workflow-milestone.constants';
+import { WorkflowNotificationMeta } from '../notifications/workflow-notification.types';
 import { MailService } from '../../mail/mail.service';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import * as bcrypt from 'bcrypt';
@@ -249,6 +255,12 @@ function hasProposalDocumentOnProject(project: { proposal_document?: string | nu
   return !!String(project.proposal_document || '').trim();
 }
 
+/** CI + Facilitator registration (`process_type` = `f`). */
+function isFacilitatorProcessType(project: { process_type?: string | null }): boolean {
+  const pt = String(project.process_type || '').trim().toLowerCase();
+  return pt === 'f' || pt === 'facilitator';
+}
+
 function resolveProposalReviewStatus(
   project: {
     proposal_review_status?: number | null;
@@ -317,6 +329,23 @@ function isCiiUploadedWorkOrder(workOrder: { wo_uploaded_by?: string | null } | 
 
 function isCompanyUploadedWorkOrder(workOrder: { wo_uploaded_by?: string | null } | null): boolean {
   return !!workOrder && !isCiiUploadedWorkOrder(workOrder);
+}
+
+/** Facilitator-signed contract PDF stored on the work-order row (`wo_uploaded_by = facilitator`). */
+function isFacilitatorUploadedContract(
+  workOrder: { wo_uploaded_by?: string | null; wo_doc?: string | null } | null,
+): boolean {
+  if (!workOrder || !hasWorkOrderDocumentOnRow(workOrder)) return false;
+  return String((workOrder as { wo_uploaded_by?: string }).wo_uploaded_by || '')
+    .trim()
+    .toLowerCase() === 'facilitator';
+}
+
+function activityDescribesFacilitatorContractReupload(description: unknown): boolean {
+  return (
+    typeof description === 'string' &&
+    /Facilitator Re-Uploaded Contract Document/i.test(description)
+  );
 }
 
 function canCompanyReuploadWorkOrderDocument(
@@ -705,6 +734,99 @@ export class CompanyProjectsService {
     return [...new Set((value || '').split(',').map((d) => d.trim()).filter(Boolean))];
   }
 
+  private async resolveProjectNotificationContext(
+    projectId: string,
+    companyId?: string,
+  ): Promise<{
+    projectId: string;
+    companyId: string;
+    companyName: string;
+    projectCode: string;
+  } | null> {
+    const project = await this.projectModel
+      .findById(projectId)
+      .select('company_id project_id')
+      .lean();
+    if (!project) return null;
+    const cid =
+      companyId ||
+      (project as any).company_id?.toString?.() ||
+      String((project as any).company_id || '');
+    if (!cid) return null;
+    const company = await this.companyModel.findById(cid).select('name').lean();
+    return {
+      projectId: String((project as any)._id),
+      companyId: cid,
+      companyName: company?.name || 'Company',
+      projectCode: String((project as any).project_id || (project as any)._id),
+    };
+  }
+
+  private async getFacilitatorIdForProject(
+    companyId: string,
+    projectId: string,
+  ): Promise<string | null> {
+    const cf = await this.companyFacilitatorModel
+      .findOne({ company_id: companyId, project_id: projectId })
+      .lean();
+    if (!cf?.facilitator_id) return null;
+    return String((cf as any).facilitator_id);
+  }
+
+  /**
+   * One workflow event → admin (+ company, facilitator, assessors when requested).
+   * Uses real company_name and Quick View activity text.
+   */
+  private async logWorkflowStepNotification(
+    projectId: string,
+    companyId: string | undefined,
+    activity: string,
+    responsibility: string,
+    eventType: WorkflowEventType,
+    options?: {
+      milestoneFlow?: number;
+      admin?: boolean;
+      company?: boolean;
+      facilitator?: boolean;
+      assessors?: boolean;
+    },
+  ): Promise<void> {
+    const ctx = await this.resolveProjectNotificationContext(projectId, companyId);
+    if (!ctx) return;
+    let act = activity;
+    let resp = responsibility;
+    if (options?.milestoneFlow != null) {
+      const m = milestoneActivity(options.milestoneFlow, activity);
+      act = m.activity;
+      resp = m.responsibility;
+    }
+    const meta = {
+      project_id: ctx.projectId,
+      company_id: ctx.companyId,
+      company_name: ctx.companyName,
+      project_code: ctx.projectCode,
+      activity: act,
+      responsibility: resp,
+    };
+    const facilitatorId =
+      options?.facilitator !== false
+        ? await this.getFacilitatorIdForProject(ctx.companyId, ctx.projectId)
+        : null;
+    const assessorIds = options?.assessors
+      ? (
+          await this.companyAssessorModel.distinct('assessor_id', {
+            project_id: ctx.projectId,
+          })
+        ).map((id) => String(id))
+      : [];
+    await this.notificationsService.logWorkflowStepForProject(meta, eventType, {
+      admin: options?.admin !== false,
+      company: options?.company !== false,
+      facilitatorId: facilitatorId || undefined,
+      assessorIds: options?.assessors ? assessorIds : undefined,
+    });
+  }
+
   private async notifyStepTransition(
     companyId: string,
     projectId: string,
@@ -713,68 +835,75 @@ export class CompanyProjectsService {
     reason: string,
   ): Promise<void> {
     if (!companyId || toStep <= fromStep) return;
-    const fromLabel = WORKFLOW_STEP_LABELS[fromStep] || `Step ${fromStep}`;
-    const toLabel = WORKFLOW_STEP_LABELS[toStep] || `Step ${toStep}`;
-    const company = await this.companyModel.findById(companyId).lean();
-    const companyName = company?.name || 'Company';
-    await this.notificationsService
-      .create(
-        `Workflow moved: ${fromLabel} -> ${toLabel}`,
-        `Latest step: ${fromLabel}. Next step: ${toLabel}. ${reason}.`,
-        'C',
-        companyId,
-        'update',
-      )
-      .catch((e) =>
-        console.error('[Step Transition Notification] Failed:', e?.message || e),
-      );
-    await this.notificationsService
-      .create(
-        `${companyName}: Workflow moved: ${fromLabel} -> ${toLabel}`,
-        `Company: ${companyName}. Project ${projectId}: ${fromLabel} -> ${toLabel}. ${reason}.`,
-        'A',
-        undefined,
-        'update',
-      )
-      .catch((e) =>
-        console.error('[Step Transition Notification] Admin feed failed:', e?.message || e),
-      );
+    const completed = milestoneActivity(fromStep);
+    const next = milestoneActivity(toStep);
+    await this.logWorkflowStepNotification(
+      projectId,
+      companyId,
+      `${completed.activity} → Next: ${next.activity}. ${reason}`,
+      next.responsibility,
+      'step_completed',
+      { milestoneFlow: toStep, facilitator: true, assessors: true },
+    );
   }
 
   /** In-app notification for a single assessor (notify_type AS). */
-  private notifyAssessor(
+  private async notifyAssessor(
     assessorId: string,
     title: string,
     content: string,
     category = 'update',
-  ): void {
+    meta?: WorkflowNotificationMeta,
+  ): Promise<void> {
     if (!assessorId) return;
-    this.notificationsService
-      .create(title, content, 'AS', assessorId, category)
+    await this.notificationsService
+      .create(title, content, 'AS', assessorId, category, meta)
       .catch((e) =>
         console.error('[Assessor notification] Failed:', e?.message || e),
       );
   }
 
-  /** Notify every assessor assigned to a project. */
+  /** Notify every assessor assigned to a project (with workflow meta). */
   private async notifyAssessorsOnProject(
     projectId: string,
-    title: string,
-    content: string,
-    category = 'update',
+    activity: string,
+    eventType: WorkflowEventType = 'update',
+    responsibility = 'CII',
   ): Promise<void> {
+    const ctx = await this.resolveProjectNotificationContext(projectId);
+    if (!ctx) return;
+    const meta: WorkflowNotificationMeta = {
+      project_id: ctx.projectId,
+      company_id: ctx.companyId,
+      company_name: ctx.companyName,
+      project_code: ctx.projectCode,
+      activity,
+      responsibility,
+      event_type: eventType,
+    };
     const assessorIds = await this.companyAssessorModel.distinct('assessor_id', {
       project_id: projectId,
     });
     for (const aid of assessorIds) {
       const id = aid?.toString?.() || String(aid || '');
-      this.notifyAssessor(id, title, content, category);
+      await this.notifyAssessor(
+        id,
+        activity,
+        `${ctx.companyName}: ${activity}`,
+        'update',
+        meta,
+      );
     }
   }
 
-  /** Fire-and-forget: all assessors assigned to this project (no-op if none). */
-  private alertAssessorsOnProject(projectId: string, title: string, content: string): void {
-    void this.notifyAssessorsOnProject(projectId, title, content);
+  /** Fire-and-forget: all assessors on project. */
+  private alertAssessorsOnProject(
+    projectId: string,
+    activity: string,
+    eventType: WorkflowEventType = 'update',
+    responsibility = 'CII',
+  ): void {
+    void this.notifyAssessorsOnProject(projectId, activity, eventType, responsibility);
   }
 
   private parseDdMmYyyyToDate(value: string): Date | null {
@@ -2752,21 +2881,13 @@ export class CompanyProjectsService {
       milestone_completed: true,
     });
 
-    const company = await this.companyModel.findById(companyId).lean();
-    const projectCode = (project as any).project_id || projectId;
-    const companyName = company?.name || 'Company';
-    this.notificationsService
-      .create(
-        'Certificate issued',
-        `GreenCo Team has uploaded the certificate for your project ${projectCode}.`,
-        'C',
-        companyId,
-      )
-      .catch((e) => console.error('[Certificate] Company notification failed:', e));
-    await this.notifyAssessorsOnProject(
+    await this.logWorkflowStepNotification(
       projectId,
-      'Certificate issued for your assigned project',
-      `GreenCo Team uploaded the certificate for ${companyName} (project ${projectCode}).`,
+      companyId,
+      MILESTONE_STEPS[18].name,
+      'CII',
+      'step_completed',
+      { milestoneFlow: 18, assessors: true },
     );
 
     return {
@@ -2835,12 +2956,13 @@ export class CompanyProjectsService {
       milestone_completed: true,
     });
 
-    const company = await this.companyModel.findById(companyId).lean();
-    const pCode = (project as any).project_id || projectId;
-    this.alertAssessorsOnProject(
+    await this.logWorkflowStepNotification(
       projectId,
-      'Feedback report uploaded',
-      `${company?.name || 'Company'} (${pCode}): feedback report uploaded by GreenCo Team.`,
+      companyId,
+      MILESTONE_STEPS[23].name,
+      'CII',
+      'step_completed',
+      { milestoneFlow: 23, assessors: true },
     );
 
     return {
@@ -3319,12 +3441,57 @@ export class CompanyProjectsService {
     const company = await this.companyModel.findById(resolved.company_id).lean();
     const companyName = company?.name || 'Company';
     const projectCode = (project as any).project_id || String(resolved._id);
+    const scoringActivity = finalSubmit ? MILESTONE_STEPS[17].name : MILESTONE_STEPS[16].name;
     this.alertAssessorsOnProject(
       String(resolved._id),
-      finalSubmit ? 'GreenCo Team submitted final scoring' : 'GreenCo Team updated scoring',
-      finalSubmit
-        ? `${companyName} (${projectCode}): CII/coordinator final scoring submitted for criteria ${parsed.criteriaId}.`
-        : `${companyName} (${projectCode}): scoring updated by GreenCo Team for criteria ${parsed.criteriaId}.`,
+      scoringActivity,
+      finalSubmit ? 'step_completed' : 'update',
+    );
+
+    const scoringTitle = finalSubmit ? 'Final Scoring Submitted (Rating Declaration)' : 'Preliminary Scoring Submitted';
+    const scoringDetail = `${companyName}: ${scoringActivity} for project ${projectCode}.`;
+
+    this.notificationsService
+      .create(scoringTitle, scoringDetail, 'C', String(resolved.company_id))
+      .catch((e) => console.error('[Scoring] Company notification failed:', e));
+
+    this.notificationsService
+      .create(scoringTitle, scoringDetail, 'A')
+      .catch((e) => console.error('[Scoring] Admin notification failed:', e));
+
+    const cfScoring = await this.companyFacilitatorModel.findOne({ company_id: resolved.company_id, project_id: resolved._id }).populate('facilitator_id').lean();
+    if (cfScoring && (cfScoring as any).facilitator_id) {
+      const fid = (cfScoring as any).facilitator_id._id?.toString?.() || (cfScoring as any).facilitator_id;
+      this.notificationsService
+        .create(scoringTitle, scoringDetail, 'F', fid)
+        .catch((e) => console.error('[Scoring] Facilitator notification failed:', e));
+      if ((cfScoring as any).facilitator_id.email) {
+        this.mailService
+          .sendRatingEmail({
+            to: (cfScoring as any).facilitator_id.email,
+            cc: [],
+            subject: `GreenCo - ${scoringTitle} for ${companyName}`,
+            html: `
+              <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                <h2>${scoringTitle}</h2>
+                <p>Dear ${(cfScoring as any).facilitator_id.name || 'Facilitator'},</p>
+                <p>${scoringDetail}</p>
+                <p>Please log in to the portal for details.</p>
+                <p>Best regards,<br>Green Co Team</p>
+              </div>
+            `,
+          })
+          .catch((e) => console.error('[Scoring] Facilitator email failed:', e));
+      }
+    }
+
+    await this.logWorkflowStepNotification(
+      String(resolved._id),
+      String(resolved.company_id),
+      scoringActivity,
+      'CII',
+      finalSubmit ? 'step_completed' : 'update',
+      { milestoneFlow: finalSubmit ? 17 : 16, facilitator: true, assessors: false },
     );
 
     return {
@@ -4066,22 +4233,15 @@ export class CompanyProjectsService {
       }
     }
 
-    // In-app notification
     if (companyId) {
-      const title = options?.isUpdate
-        ? 'Registration form updated'
-        : 'Registration form submitted';
-      const body = options?.isUpdate
-        ? 'Your registration information has been updated.'
-        : 'Your registration information has been saved successfully. You can view or update it from the project dashboard.';
-      this.notificationsService
-        .create(title, body, 'C', companyId)
-        .then((doc) => {
-          console.log('[Registration Info Service] Notification created for company', companyId, 'id:', (doc as any)?._id?.toString?.());
-        })
-        .catch((e) => {
-          console.error('[Registration Info Service] Notification failed:', e?.message || e);
-        });
+      await this.logWorkflowStepNotification(
+        projectId,
+        companyId,
+        MILESTONE_STEPS[2].name,
+        'Company',
+        options?.isUpdate ? 'update' : 'step_completed',
+        { milestoneFlow: 2, assessors: false },
+      );
     }
 
     console.log('[Registration Info Service] Saved successfully. Registration info:', {
@@ -5110,35 +5270,13 @@ export class CompanyProjectsService {
         dto.description || `Milestone ${dto.milestone_flow} completed`,
       );
 
-      // Capture each completed step in notifications so panel can read from notification APIs.
-      this.notificationsService
-        .create(
-          `Step ${dto.milestone_flow} completed`,
-          dto.description || `Milestone ${dto.milestone_flow} has been completed.`,
-          'C',
-          String(project.company_id),
-          'update',
-        )
-        .catch((e) =>
-          console.error('[Complete Milestone] Notification failed:', e?.message || e),
-        );
-      const company = await this.companyModel.findById(project.company_id).lean();
-      const companyName = company?.name || 'Company';
-      this.notificationsService
-        .create(
-          `${companyName}: Step ${dto.milestone_flow} completed`,
-          `Company: ${companyName}. Project ${projectId}: ${dto.description || `Milestone ${dto.milestone_flow} has been completed.`}`,
-          'A',
-          undefined,
-          'update',
-        )
-        .catch((e) =>
-          console.error('[Complete Milestone] Admin notification failed:', e?.message || e),
-        );
-      this.alertAssessorsOnProject(
+      await this.logWorkflowStepNotification(
         projectId,
-        `Project milestone ${dto.milestone_flow} completed`,
-        `${companyName}: ${dto.description || `Milestone ${dto.milestone_flow} completed.`}`,
+        String(project.company_id),
+        dto.description || MILESTONE_STEPS[dto.milestone_flow]?.name || `Milestone ${dto.milestone_flow}`,
+        MILESTONE_STEPS[dto.milestone_flow]?.responsibility || 'CII',
+        'step_completed',
+        { milestoneFlow: dto.milestone_flow, facilitator: true, assessors: true },
       );
 
       console.log('[Complete Milestone] After update:', {
@@ -5352,16 +5490,24 @@ export class CompanyProjectsService {
             workOrder as any,
           );
 
+    const facilitatorContractReviewQv =
+      isFacilitatorProcessType(project) && workOrder && isFacilitatorUploadedContract(workOrder as any)
+        ? this.getFacilitatorContractReviewQuickviewState(workOrder as any, allActivities as any[])
+        : null;
+
     const workOrderReviewQv =
       primaryDataReacceptance ||
       primaryDataReuploadAccepted ||
-      proposalReviewQv
+      proposalReviewQv ||
+      facilitatorContractReviewQv
         ? null
         : this.getWorkOrderReviewQuickviewState(
             project,
             workOrder as any,
             allActivities as any[],
           );
+
+    const contractFlowQv = facilitatorContractReviewQv ?? workOrderReviewQv;
 
     // WO rejected → CII re-uploads proposal → company re-uploads WO (revision cycle; after proposal accepted)
     const woEarly = workOrder as any;
@@ -5374,7 +5520,7 @@ export class CompanyProjectsService {
     let proposalWaitingForCiiProposalReupload = false;
     if (
       !proposalReviewQv &&
-      !workOrderReviewQv &&
+      !contractFlowQv &&
       isWorkOrderRejected(woEarly?.wo_status) &&
       (project as any).proposal_document
     ) {
@@ -5521,8 +5667,8 @@ export class CompanyProjectsService {
         : project.next_activities_id
           ? parseInt(String(project.next_activities_id), 10)
           : 1;
-    const rawNextId = workOrderReviewQv
-      ? workOrderReviewQv.nextId
+    const rawNextId = contractFlowQv
+      ? contractFlowQv.nextId
       : proposalReviewQv
       ? proposalReviewQv.nextId
       : proposalRevisionAfterWoReject
@@ -5545,8 +5691,8 @@ export class CompanyProjectsService {
     const isAtCloseOutNoRecertify = effectiveNextId === 24 && !recertificationNewProjectId;
     const ciiWoReviewStepName =
       'CII to Accept or Reject Work Order Document';
-    const nextStepDisplayName = workOrderReviewQv
-      ? workOrderReviewQv.nextName
+    const nextStepDisplayName = contractFlowQv
+      ? contractFlowQv.nextName
       : proposalReviewQv
       ? proposalReviewQv.nextName
       : proposalRevisionAfterWoReject
@@ -5565,7 +5711,7 @@ export class CompanyProjectsService {
                 ? 'Certificate created'
                 : nextActivityInfo.name;
     const nextStepDisplayStatus =
-      workOrderReviewQv ||
+      contractFlowQv ||
       proposalReviewQv ||
       proposalRevisionAfterWoReject ||
       proposalWaitingForCiiProposalReupload ||
@@ -5578,8 +5724,8 @@ export class CompanyProjectsService {
           : isAtCloseOutNoRecertify
             ? 'Completed'
             : nextActivityInfo.status;
-    const nextStepDisplayResponsibility = workOrderReviewQv
-      ? workOrderReviewQv.nextResp
+    const nextStepDisplayResponsibility = contractFlowQv
+      ? contractFlowQv.nextResp
       : proposalReviewQv
       ? proposalReviewQv.nextResp
       : proposalRevisionAfterWoReject
@@ -5649,11 +5795,11 @@ export class CompanyProjectsService {
 
     // Build current activity data (Latest Step Completed)
     // Show the latest completed milestone, or fallback to latest activity description
-    const currentActivityData = workOrderReviewQv
+    const currentActivityData = contractFlowQv
       ? {
-          activity: workOrderReviewQv.latestName,
+          activity: contractFlowQv.latestName,
           activity_status: 'Completed',
-          responsibility: workOrderReviewQv.latestResp,
+          responsibility: contractFlowQv.latestResp,
         }
       : proposalReviewQv
       ? {
@@ -5682,7 +5828,7 @@ export class CompanyProjectsService {
           : primaryDataReacceptance
             ? {
                 activity: primaryDataReacceptance.latestName,
-                activity_status: 'Completed',
+                activity_status: primaryDataReacceptance.latestStatus,
                 responsibility: primaryDataReacceptance.latestResp,
               }
             : primaryDataReuploadAccepted
@@ -5772,12 +5918,12 @@ export class CompanyProjectsService {
       sustenance: 16,    // Preliminary Scoring – show Recertification when nextActivitiesId >= 16
     };
 
-    const next_step = workOrderReviewQv
+    const next_step = contractFlowQv
       ? {
-          id: workOrderReviewQv.nextId,
-          name: workOrderReviewQv.nextName,
+          id: contractFlowQv.nextId,
+          name: contractFlowQv.nextName,
           status: 'Pending',
-          responsibility: workOrderReviewQv.nextResp,
+          responsibility: contractFlowQv.nextResp,
         }
       : proposalReviewQv
       ? {
@@ -5827,12 +5973,12 @@ export class CompanyProjectsService {
                 status: nextStepDisplayStatus,
                 responsibility: nextStepDisplayResponsibility,
               };
-    const latest_step = workOrderReviewQv
+    const latest_step = contractFlowQv
       ? {
-          id: workOrderReviewQv.latestId,
-          name: workOrderReviewQv.latestName,
+          id: contractFlowQv.latestId,
+          name: contractFlowQv.latestName,
           status: 'Completed',
-          responsibility: workOrderReviewQv.latestResp,
+          responsibility: contractFlowQv.latestResp,
         }
       : proposalReviewQv
       ? {
@@ -5866,7 +6012,7 @@ export class CompanyProjectsService {
           ? {
               id: primaryDataReacceptance.latestId,
               name: primaryDataReacceptance.latestName,
-              status: 'Completed',
+              status: primaryDataReacceptance.latestStatus,
               responsibility: primaryDataReacceptance.latestResp,
             }
           : primaryDataReuploadAccepted
@@ -5892,8 +6038,8 @@ export class CompanyProjectsService {
       ? 'awaiting_cii_review'
       : primaryDataReuploadAccepted
         ? 'reupload_accepted'
-        : workOrderReviewQv
-          ? workOrderReviewQv.phase
+        : contractFlowQv
+          ? contractFlowQv.phase
           : proposalReviewQv
             ? proposalReviewQv.phase
             : 'normal';
@@ -5965,6 +6111,59 @@ export class CompanyProjectsService {
                 instruction: workOrderReviewQv.is_reupload_cycle
                   ? 'CII has re-uploaded the work order. Please review the new PDF and accept or reject it.'
                   : 'Please review the work order document and accept or reject it.',
+              },
+            }
+          : {}),
+        ...(facilitatorContractReviewQv
+          ? {
+              facilitator_contract_review: {
+                phase: facilitatorContractReviewQv.phase,
+                wo_status: facilitatorContractReviewQv.wo_status,
+                is_reupload_cycle: facilitatorContractReviewQv.is_reupload_cycle,
+                latest_step_label: facilitatorContractReviewQv.latestName,
+                next_step_label: facilitatorContractReviewQv.nextName,
+                can_facilitator_reupload_contract:
+                  facilitatorContractReviewQv.phase ===
+                  'facilitator_contract_rejected_awaiting_facilitator',
+                can_admin_review_contract:
+                  facilitatorContractReviewQv.phase ===
+                    'facilitator_contract_pending_cii_review' ||
+                  facilitatorContractReviewQv.phase ===
+                    'facilitator_contract_reuploaded_pending_cii',
+                show_admin_accept_reject_buttons:
+                  facilitatorContractReviewQv.phase ===
+                    'facilitator_contract_pending_cii_review' ||
+                  facilitatorContractReviewQv.phase ===
+                    'facilitator_contract_reuploaded_pending_cii',
+                needs_po_amount:
+                  facilitatorContractReviewQv.phase ===
+                  'facilitator_contract_accepted_awaiting_po',
+              },
+              facilitator_contract_workflow: {
+                latest_step_completed: {
+                  activity: facilitatorContractReviewQv.latestName,
+                  status: 'Completed',
+                  responsibility: facilitatorContractReviewQv.latestResp,
+                },
+                next_step: {
+                  activity: facilitatorContractReviewQv.nextName,
+                  status: 'Pending',
+                  responsibility: facilitatorContractReviewQv.nextResp,
+                },
+                is_reupload_cycle: facilitatorContractReviewQv.is_reupload_cycle,
+                show_admin_accept_reject_buttons:
+                  facilitatorContractReviewQv.phase ===
+                    'facilitator_contract_pending_cii_review' ||
+                  facilitatorContractReviewQv.phase ===
+                    'facilitator_contract_reuploaded_pending_cii',
+                instruction:
+                  facilitatorContractReviewQv.phase ===
+                  'facilitator_contract_rejected_awaiting_facilitator'
+                    ? 'CII rejected the contract document. Please re-upload a revised PDF.'
+                    : facilitatorContractReviewQv.phase ===
+                        'facilitator_contract_accepted_awaiting_po'
+                      ? 'Contract accepted. CII will enter the PO amount and acceptance date.'
+                      : 'Contract document is awaiting CII review.',
               },
             }
           : {}),
@@ -6233,9 +6432,10 @@ export class CompanyProjectsService {
       can_company_review_proposal: reviewStatus === PROPOSAL_REVIEW_STATUS.PENDING,
       show_accept_reject_buttons: reviewStatus === PROPOSAL_REVIEW_STATUS.PENDING,
       can_upload_work_order:
-        reviewStatus === PROPOSAL_REVIEW_STATUS.ACCEPTED &&
-        (!workOrder?.wo_doc ||
-          (workOrder && isWorkOrderRejected(workOrder.wo_status))),
+        isFacilitatorProcessType(project) ||
+        (reviewStatus === PROPOSAL_REVIEW_STATUS.ACCEPTED &&
+          (!workOrder?.wo_doc ||
+            (workOrder && isWorkOrderRejected(workOrder.wo_status)))),
       can_upload_proposal_first_time: !hasProposalDocumentOnProject(project),
       can_replace_proposal: reviewStatus === PROPOSAL_REVIEW_STATUS.REJECTED,
       can_cii_reupload_proposal:
@@ -6346,15 +6546,14 @@ export class CompanyProjectsService {
         milestone_completed: false,
       });
 
-      this.notificationsService
-        .create(
-          'Proposal document rejected',
-          `The company rejected the proposal document for project ${project.project_id || projectId}. Reason: ${reason}. Please re-upload the proposal.`,
-          'A',
-        )
-        .catch((e) =>
-          console.error('[Proposal Review] Reject notification failed:', e?.message || e),
-        );
+      await this.logWorkflowStepNotification(
+        projectId,
+        companyId,
+        'Company rejected Proposal Document',
+        'Company',
+        'rejected',
+        { assessors: true },
+      );
 
       const refreshed = await this.getProposalDocument(companyId, projectId);
       const reviewUi = this.buildProposalReviewUiPayload(
@@ -6400,15 +6599,16 @@ export class CompanyProjectsService {
       milestone_completed: true,
     });
 
-    this.notificationsService
-      .create(
-        'Proposal document accepted',
-        `The company accepted the proposal document for project ${project.project_id || projectId}. They can now upload the work order.`,
-        'A',
-      )
-      .catch((e) =>
-        console.error('[Proposal Review] Accept notification failed:', e?.message || e),
-      );
+    await this.logWorkflowStepNotification(
+      projectId,
+      companyId,
+      ciiReuploaded
+        ? 'Company Accepted Re-Uploaded Proposal Document'
+        : 'Company Accepted Proposal Document',
+      'Company',
+      'step_completed',
+      { milestoneFlow: 4, assessors: true },
+    );
 
     const refreshed = await this.getProposalDocument(companyId, projectId);
     const reviewUi = this.buildProposalReviewUiPayload(
@@ -6535,23 +6735,14 @@ export class CompanyProjectsService {
       processType: project.process_type,
     });
 
-    if (notifyUserId) {
-      const projLabel = project.project_id || project._id.toString();
-      this.notificationsService
-        .create(
-          hadExistingProposal
-            ? 'Proposal document reuploaded'
-            : 'Proposal document uploaded',
-          hadExistingProposal
-            ? `Proposal document has been reuploaded for your project ${projLabel}.`
-            : `Proposal document has been uploaded for your project ${projLabel}.`,
-          notifyType,
-          notifyUserId,
-        )
-        .catch((e) =>
-          console.error('[Proposal Document] Notification failed:', e?.message || e),
-        );
-    }
+    await this.logWorkflowStepNotification(
+      projectId,
+      companyId,
+      hadExistingProposal ? 'CII Re-Uploaded Proposal Document' : MILESTONE_STEPS[3].name,
+      'CII',
+      hadExistingProposal ? 'reupload' : 'step_completed',
+      { milestoneFlow: 3, company: notifyType === 'C', facilitator: notifyType === 'F', assessors: true },
+    );
 
     // Stay on milestone 3 until company accepts; then they move to work-order upload (4).
     const prevNextActivity = Number((project as any).next_activities_id || 0);
@@ -7177,11 +7368,41 @@ export class CompanyProjectsService {
         .catch((e) => console.error('Assessment submittal upload notification failed:', e));
       const companyForAs = await this.companyModel.findById(companyId).lean();
       const pCode = (project as any).project_id || projectId;
-      this.alertAssessorsOnProject(
-        projectId,
-        'Assessment submittal uploaded',
-        `${companyForAs?.name || 'Company'} (${pCode}): ${title || file.originalname} uploaded.`,
-      );
+      this.alertAssessorsOnProject(projectId, MILESTONE_STEPS[13].name, 'update');
+
+      // Notify facilitator about the assessment submittal upload
+      const cfUpload = await this.companyFacilitatorModel.findOne({ company_id: companyId, project_id: projectId }).populate('facilitator_id').lean();
+      if (cfUpload && (cfUpload as any).facilitator_id) {
+        const fid = (cfUpload as any).facilitator_id._id?.toString?.() || (cfUpload as any).facilitator_id;
+        const companyName = companyForAs?.name || 'Company';
+        const docName = title || file.originalname;
+        this.notificationsService
+          .create(
+            'Assessment Submittal Uploaded',
+            `${companyName} has uploaded an assessment submittal: ${docName} (Project: ${pCode}). Please review.`,
+            'F',
+            fid,
+          )
+          .catch((e) => console.error('Assessment submittal upload notification to facilitator failed:', e));
+        if ((cfUpload as any).facilitator_id.email) {
+          this.mailService
+            .sendRatingEmail({
+              to: (cfUpload as any).facilitator_id.email,
+              cc: [],
+              subject: `GreenCo - Assessment Submittal Uploaded by ${companyName}`,
+              html: `
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                  <h2>Assessment Submittal Uploaded</h2>
+                  <p>Dear ${(cfUpload as any).facilitator_id.name || 'Facilitator'},</p>
+                  <p><strong>${companyName}</strong> has uploaded an assessment submittal document: <strong>${docName}</strong> for project <strong>${pCode}</strong>.</p>
+                  <p>Please log in to the portal to review.</p>
+                  <p>Best regards,<br>Green Co Team</p>
+                </div>
+              `,
+            })
+            .catch((e) => console.error('Assessment submittal upload email to facilitator failed:', e));
+        }
+      }
 
       // If all 9 category tabs now have at least one document, send "all complete" notification (once per project)
       const ASSESSMENT_CATEGORY_CODES = ['GSC', 'IE', 'PSL', 'MS', 'EM', 'CBM', 'WTM', 'MRM', 'GBE'];
@@ -7206,11 +7427,40 @@ export class CompanyProjectsService {
               companyId,
             )
             .catch((e) => console.error('All assessment submittals complete notification failed:', e));
-          this.alertAssessorsOnProject(
-            projectId,
-            'All assessment submittals uploaded',
-            `${companyForAs?.name || 'Company'} (${pCode}): all 9 assessment categories have documents.`,
-          );
+          this.alertAssessorsOnProject(projectId, MILESTONE_STEPS[13].name, 'step_completed');
+
+          // Notify facilitator when all assessment categories are complete
+          if (cfUpload && (cfUpload as any).facilitator_id) {
+            const fid = (cfUpload as any).facilitator_id._id?.toString?.() || (cfUpload as any).facilitator_id;
+            const companyName = companyForAs?.name || 'Company';
+            this.notificationsService
+              .create(
+                'All Assessment Submittals Uploaded',
+                `${companyName} has uploaded documents for all assessment categories (GSC, IE, PSL, MS, EM, CBM, WTM, MRM, GBE) for project ${pCode}.`,
+                'F',
+                fid,
+              )
+              .catch((e) => console.error('All assessment submittals complete notification to facilitator failed:', e));
+            if ((cfUpload as any).facilitator_id.email) {
+              this.mailService
+                .sendRatingEmail({
+                  to: (cfUpload as any).facilitator_id.email,
+                  cc: [],
+                  subject: `GreenCo - All Assessment Submittals Uploaded by ${companyName}`,
+                  html: `
+                    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                      <h2>All Assessment Submittals Uploaded</h2>
+                      <p>Dear ${(cfUpload as any).facilitator_id.name || 'Facilitator'},</p>
+                      <p><strong>${companyName}</strong> has uploaded documents for all 9 assessment categories (GSC, IE, PSL, MS, EM, CBM, WTM, MRM, GBE) for project <strong>${pCode}</strong>.</p>
+                      <p>Please log in to the portal to review.</p>
+                      <p>Best regards,<br>Green Co Team</p>
+                    </div>
+                  `,
+                })
+                .catch((e) => console.error('All assessment submittals complete email to facilitator failed:', e));
+            }
+          }
+
           await this.projectModel.updateOne(
             { _id: projectId, company_id: companyId },
             { $set: { assessment_submittals_complete_notified: true } },
@@ -7336,20 +7586,50 @@ export class CompanyProjectsService {
           this.mailService.sendChecklistDocNotAcceptedEmail((cf as any).facilitator_id.email, (cf as any).facilitator_id.name || 'Facilitator', detail).catch((e) => console.error('Checklist not-accepted email failed:', e));
         }
       }
-      this.alertAssessorsOnProject(projectId, 'Assessment submittal not accepted', detail);
+      this.alertAssessorsOnProject(
+        projectId,
+        'CII rejected assessment submittal',
+        'rejected',
+      );
     }
 
     if (updates.document_status === 1) {
       const company = await this.companyModel.findById(companyId).lean();
+      const companyName = company?.name || 'Company';
       const docDetails = (doc as any).description || (doc as any).document_title || 'Assessment submittal';
       const pCode =
         (await this.projectModel.findById(projectId).select('project_id').lean())?.project_id ||
         projectId;
-      this.alertAssessorsOnProject(
-        projectId,
-        'Assessment submittal accepted',
-        `${company?.name || 'Company'} (${pCode}): ${docDetails} accepted by GreenCo Team.`,
-      );
+      const detail = `Company: ${companyName}. Document: ${docDetails}. Project: ${pCode}`;
+      this.notificationsService
+        .create('Assessment submittal accepted', detail, 'C', companyId)
+        .catch((e) => console.error('Assessment accepted notification to company failed:', e));
+      const cf = await this.companyFacilitatorModel.findOne({ company_id: companyId, project_id: projectId }).populate('facilitator_id').lean();
+      if (cf && (cf as any).facilitator_id) {
+        const fid = (cf as any).facilitator_id._id?.toString?.() || (cf as any).facilitator_id;
+        this.notificationsService
+          .create('Assessment submittal accepted', detail, 'F', fid)
+          .catch((e) => console.error('Assessment accepted notification to facilitator failed:', e));
+        if ((cf as any).facilitator_id.email) {
+          this.mailService
+            .sendRatingEmail({
+              to: (cf as any).facilitator_id.email,
+              cc: [],
+              subject: `GreenCo - Assessment Submittal Accepted for ${companyName}`,
+              html: `
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                  <h2>Assessment Submittal Accepted</h2>
+                  <p>Dear ${(cf as any).facilitator_id.name || 'Facilitator'},</p>
+                  <p>An assessment submittal for <strong>${companyName}</strong> has been accepted. Document: <strong>${docDetails}</strong> (Project: ${pCode}).</p>
+                  <p>Please log in to the portal for details.</p>
+                  <p>Best regards,<br>Green Co Team</p>
+                </div>
+              `,
+            })
+            .catch((e) => console.error('Assessment accepted email to facilitator failed:', e));
+        }
+      }
+      this.alertAssessorsOnProject(projectId, MILESTONE_STEPS[14].name, 'step_completed');
     }
 
     return {
@@ -7604,6 +7884,93 @@ export class CompanyProjectsService {
 
   private hasCiiReuploadedWorkOrderInActivities(activities: Array<{ description?: string }>): boolean {
     return activities.some((a) => activityDescribesCiiWorkOrderReupload(a.description));
+  }
+
+  /**
+   * CI + Facilitator: facilitator uploads signed contract; CII accepts/rejects; PO after accept.
+   */
+  private getFacilitatorContractReviewQuickviewState(
+    workOrder: any,
+    activities: Array<{ description?: string }>,
+  ): {
+    phase:
+      | 'facilitator_contract_pending_cii_review'
+      | 'facilitator_contract_rejected_awaiting_facilitator'
+      | 'facilitator_contract_reuploaded_pending_cii'
+      | 'facilitator_contract_accepted_awaiting_po';
+    latestId: number;
+    latestName: string;
+    latestResp: string;
+    nextId: number;
+    nextName: string;
+    nextResp: string;
+    is_reupload_cycle: boolean;
+    wo_status: number;
+  } | null {
+    if (!isFacilitatorUploadedContract(workOrder)) return null;
+
+    const st = Number(workOrder.wo_status ?? 0);
+    const facilitatorReuploaded = activities.some((a) =>
+      activityDescribesFacilitatorContractReupload(a.description),
+    );
+    const acceptance = this.workOrderAcceptancePayload(workOrder);
+
+    if (st === 1) {
+      if (acceptance.needs_acceptance_details) {
+        return {
+          phase: 'facilitator_contract_accepted_awaiting_po',
+          latestId: 5,
+          latestName: 'CII Accepted Facilitator Contract Document',
+          latestResp: 'CII',
+          nextId: 5,
+          nextName: 'CII to Enter PO Amount and Acceptance Date',
+          nextResp: 'CII',
+          is_reupload_cycle: facilitatorReuploaded,
+          wo_status: st,
+        };
+      }
+      return null;
+    }
+
+    if (st === 2) {
+      return {
+        phase: 'facilitator_contract_rejected_awaiting_facilitator',
+        latestId: 5,
+        latestName: 'CII Rejected Facilitator Contract Document',
+        latestResp: 'CII',
+        nextId: 4,
+        nextName: 'Facilitator to Re-Upload Contract Document',
+        nextResp: 'Facilitator',
+        is_reupload_cycle: true,
+        wo_status: st,
+      };
+    }
+
+    if (facilitatorReuploaded) {
+      return {
+        phase: 'facilitator_contract_reuploaded_pending_cii',
+        latestId: 4,
+        latestName: 'Facilitator Re-Uploaded Contract Document',
+        latestResp: 'Facilitator',
+        nextId: 5,
+        nextName: 'CII to Accept or Reject Re-Uploaded Contract Document',
+        nextResp: 'CII',
+        is_reupload_cycle: true,
+        wo_status: st,
+      };
+    }
+
+    return {
+      phase: 'facilitator_contract_pending_cii_review',
+      latestId: 4,
+      latestName: 'Facilitator Uploaded Contract Document',
+      latestResp: 'Facilitator',
+      nextId: 5,
+      nextName: 'CII to Accept or Reject Contract Document',
+      nextResp: 'CII',
+      is_reupload_cycle: false,
+      wo_status: st,
+    };
   }
 
   /** Company-uploaded WO — CII reviews via legacy `wo_status`. */
@@ -8464,6 +8831,25 @@ export class CompanyProjectsService {
   }
 
   /**
+   * Facilitator flow: company uploads facilitator contract (work order) without CII proposal acceptance.
+   */
+  async uploadFacilitatorContractDocumentByProjectId(
+    projectOrCompanyId: string,
+    file: Express.Multer.File,
+  ) {
+    const resolved = await this.resolveProjectForQuickview(projectOrCompanyId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.uploadWorkOrderDocument(
+      String(resolved.company_id),
+      String(resolved._id),
+      file,
+      { facilitatorContract: true },
+    );
+  }
+
+  /**
    * Company re-upload work order PDF after CII/admin rejected (wo_status = 2).
    */
   async reuploadWorkOrderDocumentByProjectId(
@@ -8471,6 +8857,14 @@ export class CompanyProjectsService {
     file: Express.Multer.File,
   ) {
     return this.uploadWorkOrderDocumentByProjectId(projectOrCompanyId, file);
+  }
+
+  /** Facilitator flow re-upload (same gate as first facilitator contract upload). */
+  async reuploadFacilitatorContractDocumentByProjectId(
+    projectOrCompanyId: string,
+    file: Express.Multer.File,
+  ) {
+    return this.uploadFacilitatorContractDocumentByProjectId(projectOrCompanyId, file);
   }
 
   /**
@@ -9216,6 +9610,595 @@ export class CompanyProjectsService {
     };
   }
 
+  private buildFacilitatorContractReviewUiPayload(
+    workOrder: any | null,
+    activities: Array<{ description?: string }>,
+  ) {
+    const qv = workOrder
+      ? this.getFacilitatorContractReviewQuickviewState(workOrder, activities)
+      : null;
+    const st = workOrder ? Number(workOrder.wo_status ?? 0) : null;
+    const hasDoc = hasWorkOrderDocumentOnRow(workOrder);
+    const rejected = workOrder != null && isWorkOrderRejected(workOrder.wo_status);
+    return {
+      contract_flow: 'facilitator_upload_cii_review',
+      wo_uploaded_by: 'facilitator',
+      wo_status: st,
+      wo_status_label: !hasDoc
+        ? null
+        : rejected
+          ? 'rejected'
+          : st === 1
+            ? 'accepted'
+            : 'pending_review',
+      can_facilitator_upload_contract: !hasDoc,
+      can_facilitator_reupload_contract: rejected,
+      can_admin_review_contract:
+        hasDoc && st === 0 && (qv?.phase === 'facilitator_contract_pending_cii_review' ||
+          qv?.phase === 'facilitator_contract_reuploaded_pending_cii'),
+      show_admin_accept_reject_buttons:
+        hasDoc && st === 0 && (qv?.phase === 'facilitator_contract_pending_cii_review' ||
+          qv?.phase === 'facilitator_contract_reuploaded_pending_cii'),
+      needs_po_amount: qv?.phase === 'facilitator_contract_accepted_awaiting_po',
+      quickview_phase: qv?.phase ?? null,
+      latest_step_label: qv?.latestName ?? null,
+      next_step_label: qv?.nextName ?? null,
+      is_contract_reupload_cycle: qv?.is_reupload_cycle ?? false,
+    };
+  }
+
+  private async getFacilitatorContractQuickviewSnippet(companyId: string, projectId: string) {
+    const qv = await this.getQuickviewData(companyId, projectId);
+    const d = qv.data || {};
+    return {
+      quickview_phase: d.quickview_phase ?? 'normal',
+      quickview_display: d.quickview_display ?? null,
+      latest_step: d.latest_step ?? null,
+      next_step: d.next_step ?? null,
+      facilitator_contract_review: d.facilitator_contract_review ?? null,
+    };
+  }
+
+  /**
+   * Facilitator panel quickview (assigned CI + Facilitator projects only).
+   */
+  async getQuickviewDataForFacilitator(facilitatorId: string, projectId: string) {
+    const resolved = await this.resolveFacilitatorFinanceProject(facilitatorId, projectId);
+    const quickview = await this.getQuickviewData(resolved.companyId, resolved.projectId);
+    return {
+      ...quickview,
+      data: {
+        ...quickview.data,
+        facilitator_panel: true,
+      },
+    };
+  }
+
+  /**
+   * GET signed contract document metadata (facilitator JWT).
+   */
+  async getFacilitatorSignedContractDocument(facilitatorId: string, projectId: string) {
+    const resolved = await this.resolveFacilitatorFinanceProject(facilitatorId, projectId);
+    return this.getFacilitatorSignedContractDocumentForCompany(
+      resolved.companyId,
+      resolved.projectId,
+    );
+  }
+
+  async getFacilitatorSignedContractDocumentForAdmin(projectId: string) {
+    const adminResolved = await this.resolveProjectForAdmin(projectId);
+    if (!adminResolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    return this.getFacilitatorSignedContractDocumentForCompany(
+      String(adminResolved.company_id),
+      String(adminResolved._id),
+    );
+  }
+
+  private async getFacilitatorSignedContractDocumentForCompany(
+    companyId: string,
+    projectId: string,
+  ) {
+    const [project, workOrder] = await Promise.all([
+      this.projectModel.findOne({ _id: projectId, company_id: companyId }).lean(),
+      this.companyWorkOrderModel
+        .findOne({ company_id: companyId, project_id: projectId })
+        .sort({ createdAt: -1 })
+        .lean(),
+    ]);
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    if (!isFacilitatorProcessType(project)) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Contract document API is only for CI + Facilitator projects.',
+      });
+    }
+
+    const activities = await this.companyActivityModel
+      .find({ company_id: companyId, project_id: projectId })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean();
+    const reviewUi = this.buildFacilitatorContractReviewUiPayload(
+      workOrder as any,
+      activities as any[],
+    );
+    const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(
+      /\/+$/,
+      '',
+    );
+    const woAny = workOrder as any;
+
+    if (!woAny?.wo_doc || !isFacilitatorUploadedContract(woAny)) {
+      return {
+        status: 'success',
+        message: 'Facilitator contract document not uploaded yet',
+        data: {
+          has_document: false,
+          document_url: null,
+          document_filename: null,
+          wo_status: woAny?.wo_status ?? null,
+          wo_remarks: woAny?.wo_remarks ?? null,
+          ...this.workOrderAcceptancePayload(woAny || null),
+          ...reviewUi,
+        },
+      };
+    }
+
+    const woDocPath = String(woAny.wo_doc || '').replace(/^\/+/, '');
+    const url = woDocPath.startsWith('http') ? woDocPath : `${baseUrl}/${woDocPath}`;
+    return {
+      status: 'success',
+      message: 'Facilitator contract document retrieved successfully',
+      data: {
+        has_document: true,
+        document_url: url,
+        document_filename: woDocPath.split('/').pop() || 'contract.pdf',
+        wo_status: woAny.wo_status ?? 0,
+        wo_remarks: woAny.wo_remarks || null,
+        wo_doc_status_updated_at:
+          woAny.wo_doc_status_updated_at?.toISOString?.() ??
+          woAny.updatedAt?.toISOString?.() ??
+          null,
+        work_order_id: String(woAny._id),
+        ...this.workOrderAcceptancePayload(woAny),
+        ...reviewUi,
+      },
+    };
+  }
+
+  /**
+   * Facilitator uploads signed contract PDF (first upload or after CII rejection).
+   */
+  async uploadFacilitatorSignedContractDocument(
+    facilitatorId: string,
+    projectId: string,
+    file: Express.Multer.File,
+  ) {
+    const resolved = await this.resolveFacilitatorFinanceProject(facilitatorId, projectId);
+    return this.persistFacilitatorSignedContractUpload(
+      resolved.companyId,
+      resolved.projectId,
+      file,
+      false,
+    );
+  }
+
+  async reuploadFacilitatorSignedContractDocument(
+    facilitatorId: string,
+    projectId: string,
+    file: Express.Multer.File,
+  ) {
+    const resolved = await this.resolveFacilitatorFinanceProject(facilitatorId, projectId);
+    return this.persistFacilitatorSignedContractUpload(
+      resolved.companyId,
+      resolved.projectId,
+      file,
+      true,
+    );
+  }
+
+  private async persistFacilitatorSignedContractUpload(
+    companyId: string,
+    projectId: string,
+    file: Express.Multer.File,
+    requireRejected: boolean,
+  ) {
+    const project = await this.projectModel.findOne({ _id: projectId, company_id: companyId });
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    if (!isFacilitatorProcessType(project)) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Contract upload is only for CI + Facilitator registration projects.',
+      });
+    }
+
+    const existing = await this.companyWorkOrderModel
+      .findOne({ company_id: companyId, project_id: projectId })
+      .sort({ createdAt: -1 });
+
+    const hasExistingFacilitatorDoc =
+      existing &&
+      hasWorkOrderDocumentOnRow(existing as any) &&
+      isFacilitatorUploadedContract(existing as any);
+    const isReUpload = hasExistingFacilitatorDoc && isWorkOrderRejected(existing!.wo_status);
+
+    if (requireRejected && !isReUpload) {
+      throw new BadRequestException({
+        status: 'error',
+        code: 'CONTRACT_REUPLOAD_NOT_ALLOWED',
+        message:
+          'Contract re-upload is allowed only after CII rejects the previous contract document.',
+        data: { wo_status: existing?.wo_status ?? null },
+      });
+    }
+    if (!requireRejected && hasExistingFacilitatorDoc && !isReUpload) {
+      throw new BadRequestException({
+        status: 'error',
+        code: 'CONTRACT_ALREADY_SUBMITTED',
+        message:
+          'Contract document already submitted and awaiting CII review. Re-upload is allowed only after rejection.',
+        data: { wo_status: existing?.wo_status ?? null },
+      });
+    }
+
+    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-04z5.onrender.com';
+    const relativePath = `uploads/facilitator-signed-contracts/${projectId}/${file.filename}`;
+    const fullUrl = `${baseUrl}/${relativePath}`;
+
+    let workOrder;
+    if (existing && isReUpload) {
+      existing.wo_doc = relativePath;
+      existing.wo_status = 0;
+      existing.wo_remarks = null;
+      (existing as any).wo_uploaded_by = 'facilitator';
+      (existing as any).wo_po_number = undefined;
+      (existing as any).wo_acceptance_date = undefined;
+      existing.wo_doc_status_updated_at = new Date();
+      await existing.save();
+      workOrder = existing;
+    } else {
+      workOrder = await this.companyWorkOrderModel.create({
+        company_id: companyId,
+        project_id: projectId,
+        wo_doc: relativePath,
+        wo_uploaded_by: 'facilitator',
+        wo_status: 0,
+        wo_remarks: null,
+        wo_doc_status_updated_at: new Date(),
+      });
+    }
+
+    const activityDesc = isReUpload
+      ? 'Facilitator Re-Uploaded Contract Document'
+      : 'Facilitator Uploaded Contract Document';
+
+    await this.companyActivityModel.create({
+      company_id: companyId,
+      project_id: projectId,
+      description: activityDesc,
+      activity_type: 'facilitator',
+      milestone_flow: 4,
+      milestone_completed: true,
+    });
+
+    const prevNext = Number((project as any).next_activities_id || 0);
+    project.next_activities_id = 5;
+    await project.save();
+    await this.notifyStepTransition(
+      String(project.company_id),
+      String(project._id),
+      prevNext,
+      5,
+      isReUpload ? 'Facilitator contract re-uploaded' : 'Facilitator contract uploaded',
+    );
+
+    const facAssignment = await this.companyFacilitatorModel.findOne({
+      company_id: companyId,
+      project_id: projectId,
+    });
+    if (facAssignment) {
+      (facAssignment as any).contract_doc_status = 0;
+      await facAssignment.save();
+    }
+
+    const contractNotifTitle = isReUpload ? 'Facilitator contract re-uploaded' : 'Facilitator contract submitted';
+    const contractNotifDetail = isReUpload
+      ? `Project ${project.project_id || projectId}: facilitator re-uploaded the contract document for CII review.`
+      : `Project ${project.project_id || projectId}: facilitator uploaded the contract document for CII review.`;
+
+    this.notificationsService
+      .create(contractNotifTitle, contractNotifDetail, 'A')
+      .catch((e) => console.error('[Facilitator Contract] Admin notification failed:', e?.message || e));
+
+    this.notificationsService
+      .create(contractNotifTitle, contractNotifDetail, 'C', companyId)
+      .catch((e) => console.error('[Facilitator Contract] Company notification failed:', e?.message || e));
+
+    const cfForNotif = await this.companyFacilitatorModel.findOne({ company_id: companyId, project_id: projectId }).populate('facilitator_id').lean();
+    if (cfForNotif && (cfForNotif as any).facilitator_id) {
+      const fid = (cfForNotif as any).facilitator_id._id?.toString?.() || (cfForNotif as any).facilitator_id;
+      this.notificationsService
+        .create(
+          isReUpload ? 'Contract document re-uploaded successfully' : 'Contract document submitted successfully',
+          `Your contract document for project ${project.project_id || projectId} has been ${isReUpload ? 're-uploaded' : 'submitted'} and is pending CII review.`,
+          'F',
+          fid,
+        )
+        .catch((e) => console.error('[Facilitator Contract] Facilitator notification failed:', e?.message || e));
+    }
+
+    const activities = await this.companyActivityModel
+      .find({ company_id: companyId, project_id: projectId })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean();
+    const reviewUi = this.buildFacilitatorContractReviewUiPayload(
+      workOrder.toObject(),
+      activities as any[],
+    );
+    const quickview = await this.getFacilitatorContractQuickviewSnippet(companyId, projectId);
+
+    return {
+      status: 'success',
+      message: isReUpload
+        ? 'Contract document re-uploaded successfully'
+        : 'Contract document uploaded successfully',
+      data: {
+        document_url: fullUrl,
+        document_filename: file.originalname,
+        project_id: projectId,
+        wo_status: 0,
+        next_activities_id: project.next_activities_id,
+        reuploaded: isReUpload,
+        ...reviewUi,
+        quickview,
+      },
+    };
+  }
+
+  /**
+   * CII/Admin: accept (1) or reject (2) facilitator-uploaded contract document.
+   */
+  async reviewFacilitatorSignedContractByAdmin(
+    projectId: string,
+    dto: { wo_status: number; wo_remarks?: string },
+  ) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const companyId = String(resolved.company_id);
+    const effectiveProjectId = String(resolved._id);
+
+    const project = await this.projectModel.findOne({
+      _id: effectiveProjectId,
+      company_id: companyId,
+    });
+    if (!project) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    if (!isFacilitatorProcessType(project)) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Contract review is only for CI + Facilitator projects.',
+      });
+    }
+
+    const workOrder = await this.companyWorkOrderModel
+      .findOne({ company_id: companyId, project_id: effectiveProjectId })
+      .sort({ createdAt: -1 });
+
+    if (!workOrder || !hasWorkOrderDocumentOnRow(workOrder as any)) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Facilitator contract document not found',
+      });
+    }
+    if (!isFacilitatorUploadedContract(workOrder as any)) {
+      throw new BadRequestException({
+        status: 'error',
+        message:
+          'Latest document was not uploaded by the facilitator. Use the standard work-order review API.',
+      });
+    }
+
+    if (dto.wo_status === 2 && !String(dto.wo_remarks || '').trim()) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Remarks are required when rejecting the contract document',
+      });
+    }
+
+    workOrder.wo_status = dto.wo_status;
+    workOrder.wo_remarks = dto.wo_status === 2 ? dto.wo_remarks || null : null;
+    workOrder.wo_doc_status_updated_at = new Date();
+    if (dto.wo_status === 2) {
+      (workOrder as any).wo_po_number = undefined;
+      (workOrder as any).wo_acceptance_date = undefined;
+    }
+    await workOrder.save();
+
+    const facAssignment = await this.companyFacilitatorModel.findOne({
+      company_id: companyId,
+      project_id: effectiveProjectId,
+    });
+
+    if (dto.wo_status === 1) {
+      if (facAssignment) {
+        (facAssignment as any).contract_doc_status = 1;
+        await facAssignment.save();
+      }
+      const currentNext = Number((project as any).next_activities_id || 0);
+      if (currentNext < 6) {
+        (project as any).next_activities_id = 5;
+        await project.save();
+      }
+    } else if (dto.wo_status === 2) {
+      if (facAssignment) {
+        (facAssignment as any).contract_doc_status = 0;
+        await facAssignment.save();
+      }
+      (project as any).next_activities_id = 4;
+      await project.save();
+      if (facAssignment?.facilitator_id) {
+        this.notificationsService
+          .create(
+            'Contract document rejected',
+            `Project ${project.project_id || effectiveProjectId}: CII rejected your contract document. Please re-upload a revised PDF.`,
+            'F',
+            String(facAssignment.facilitator_id),
+          )
+          .catch((e) =>
+            console.error('[Facilitator Contract] Reject notification failed:', e?.message || e),
+          );
+      }
+    }
+
+    await this.companyActivityModel.create({
+      company_id: companyId,
+      project_id: effectiveProjectId,
+      description:
+        dto.wo_status === 1
+          ? 'CII Accepted Facilitator Contract Document'
+          : 'CII Rejected Facilitator Contract Document',
+      activity_type: 'cii',
+      milestone_flow: 5,
+      milestone_completed: dto.wo_status === 1,
+    });
+
+    const activities = await this.companyActivityModel
+      .find({ company_id: companyId, project_id: effectiveProjectId })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean();
+    const reviewUi = this.buildFacilitatorContractReviewUiPayload(
+      workOrder.toObject(),
+      activities as any[],
+    );
+    const quickview = await this.getFacilitatorContractQuickviewSnippet(
+      companyId,
+      effectiveProjectId,
+    );
+
+    return {
+      status: 'success',
+      message:
+        dto.wo_status === 1
+          ? 'Facilitator contract document accepted'
+          : 'Facilitator contract document rejected',
+      data: {
+        wo_status: dto.wo_status,
+        wo_remarks: workOrder.wo_remarks,
+        ...this.workOrderAcceptancePayload(workOrder.toObject()),
+        ...reviewUi,
+        quickview,
+      },
+    };
+  }
+
+  /**
+   * CII/Admin: PO number + acceptance date after facilitator contract accepted.
+   */
+  async setFacilitatorSignedContractAcceptanceByAdmin(
+    projectId: string,
+    dto: { wo_po_number: string; wo_acceptance_date: string },
+  ) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const companyId = String(resolved.company_id);
+    const effectiveProjectId = String(resolved._id);
+
+    const latest = await this.companyWorkOrderModel
+      .findOne({ company_id: companyId, project_id: effectiveProjectId })
+      .sort({ createdAt: -1 });
+
+    if (!latest || !isFacilitatorUploadedContract(latest as any)) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Facilitator contract document not found',
+      });
+    }
+
+    const result = await this.setWorkOrderAcceptanceDetails(companyId, effectiveProjectId, dto);
+
+    const project = await this.projectModel.findById(effectiveProjectId);
+    if (project) {
+      const currentNext = Number((project as any).next_activities_id || 0);
+      if (currentNext < 6) {
+        (project as any).next_activities_id = 6;
+        await project.save();
+        await this.notifyStepTransition(
+          companyId,
+          effectiveProjectId,
+          currentNext,
+          6,
+          'PO amount saved for facilitator contract',
+        );
+      }
+    }
+
+    const quickview = await this.getFacilitatorContractQuickviewSnippet(
+      companyId,
+      effectiveProjectId,
+    );
+    return {
+      ...result,
+      data: {
+        ...(result.data as object),
+        quickview,
+      },
+    };
+  }
+
+  async getFacilitatorSignedContractAcceptanceForAdmin(projectId: string) {
+    const resolved = await this.resolveProjectForAdmin(projectId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+    const workOrder = await this.companyWorkOrderModel
+      .findOne({
+        company_id: String(resolved.company_id),
+        project_id: String(resolved._id),
+      })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    if (!workOrder || !isFacilitatorUploadedContract(workOrder as any)) {
+      return {
+        status: 'success',
+        message: 'No facilitator contract document for this project',
+        data: {
+          work_order_id: null,
+          wo_status: null,
+          wo_uploaded_by: null,
+          ...this.workOrderAcceptancePayload(null),
+        },
+      };
+    }
+
+    const wo = workOrder as any;
+    return {
+      status: 'success',
+      message: 'Facilitator contract acceptance details',
+      data: {
+        work_order_id: String(wo._id),
+        wo_status: wo.wo_status ?? 0,
+        wo_uploaded_by: wo.wo_uploaded_by ?? 'facilitator',
+        wo_doc_status_updated_at:
+          wo.wo_doc_status_updated_at?.toISOString?.() ?? wo.updatedAt?.toISOString?.() ?? null,
+        ...this.workOrderAcceptancePayload(wo),
+      },
+    };
+  }
+
   async getFinanceV2InvoicesForFacilitator(facilitatorId: string, projectId: string) {
     return this.withFinanceV2MongoRetry(async () => {
       const resolved = await this.resolveFacilitatorFinanceProject(facilitatorId, projectId);
@@ -9515,6 +10498,34 @@ export class CompanyProjectsService {
       await this.dispatchFinanceV2Reminder(invoice as any).catch((e) =>
         console.error('[Finance v2] Initial reminder send failed:', e?.message || e),
       );
+    }
+
+    // Advance milestone when this is the 2nd invoice cycle (next_activities_id = 19)
+    const currentNext = Number((project as any).next_activities_id || 0);
+    if (currentNext === 19) {
+      (project as any).next_activities_id = 20;
+      await project.save();
+      await this.companyActivityModel.create({
+        company_id: companyId,
+        project_id: projectId,
+        description: '2nd Invoice uploaded',
+        activity_type: 'cii',
+        milestone_flow: 19,
+        milestone_completed: true,
+      });
+    }
+
+    // Facilitator flow: notify facilitator when CII uploads proforma/tax invoice
+    if (isFacilitatorProcessType(project)) {
+      const invoiceLabel = dto.invoice_type === 'tax' ? 'Tax Invoice' : 'Proforma Invoice';
+      await this.logWorkflowStepNotification(
+        projectId,
+        companyId,
+        `CII uploaded ${invoiceLabel} – awaiting supporting documents from Facilitator`,
+        'CII',
+        'step_completed',
+        { facilitator: true, company: true, admin: true },
+      ).catch((e) => console.error('[Finance v2] Facilitator invoice notification failed:', e?.message || e));
     }
 
     const list = await this.getFinanceV2Invoices(companyId, projectId);
@@ -9963,6 +10974,23 @@ export class CompanyProjectsService {
     if (dto.remarks) (invoice as any).remarks = dto.remarks;
     await invoice.save();
 
+    // Facilitator flow: notify when supporting documents are uploaded
+    const paymentProject = await this.projectModel.findById(projectId).lean();
+    if (paymentProject && isFacilitatorProcessType(paymentProject)) {
+      const isReupload = Number((invoice as any).approval_status) === 0 && alreadyPaid > 0;
+      const activityText = isReupload
+        ? 'Facilitator re-uploaded supporting documents – awaiting CII review'
+        : 'Facilitator uploaded supporting documents – awaiting CII review';
+      await this.logWorkflowStepNotification(
+        projectId,
+        companyId,
+        activityText,
+        'Facilitator',
+        isReupload ? 'reupload' : 'step_completed',
+        { facilitator: true, company: true, admin: true },
+      ).catch((e) => console.error('[Finance v2] Supporting docs upload notification failed:', e?.message || e));
+    }
+
     return {
       status: 'success',
       message: 'Finance v2 payment submitted successfully',
@@ -10017,6 +11045,36 @@ export class CompanyProjectsService {
     (invoice as any).remarks = dto.remarks ?? (dto as any).approval_remarks ?? null;
     (invoice as any).approved_at = new Date();
     await invoice.save();
+
+    // Facilitator flow: notify facilitator on acceptance/rejection of supporting documents
+    const approvalProject = await this.projectModel.findById(projectId).lean();
+    if (approvalProject && isFacilitatorProcessType(approvalProject)) {
+      const approvalNum = Number(dto.approval_status);
+      const invoiceType = (invoice as any).invoice_type === 'tax' ? 'Tax Invoice' : 'Proforma Invoice';
+      if (approvalNum === 1) {
+        // Accepted
+        await this.logWorkflowStepNotification(
+          projectId,
+          companyId,
+          `CII accepted supporting documents for ${invoiceType}`,
+          'CII',
+          'step_completed',
+          { facilitator: true, company: true, admin: true },
+        ).catch((e) => console.error('[Finance v2] Approval acceptance notification failed:', e?.message || e));
+      } else if (approvalNum === 2) {
+        // Rejected — facilitator must re-upload; loop continues until accepted
+        const rejectionRemarks = (invoice as any).remarks ? ` – Remarks: ${(invoice as any).remarks}` : '';
+        await this.logWorkflowStepNotification(
+          projectId,
+          companyId,
+          `CII rejected supporting documents for ${invoiceType}${rejectionRemarks} – Facilitator must re-upload`,
+          'CII',
+          'rejected',
+          { facilitator: true, company: true, admin: true },
+        ).catch((e) => console.error('[Finance v2] Approval rejection notification failed:', e?.message || e));
+      }
+    }
+
     return {
       status: 'success',
       message: 'Finance v2 approval updated',
@@ -11011,10 +12069,13 @@ export class CompanyProjectsService {
       this.mailService.sendInvoiceRaisedEmail(company.email, company.name || 'Company', invoiceLabel, projectCode).catch((e) => console.error('Invoice email to company failed:', e));
     }
 
-    this.alertAssessorsOnProject(
+    await this.logWorkflowStepNotification(
       projectId,
-      paymentFor === PAYMENT_FOR_PROFORMA ? 'Proforma invoice raised' : 'Tax invoice raised',
-      `${company?.name || 'Company'} (${projectCode}): ${invoiceLabel} raised by GreenCo Team.`,
+      companyId,
+      MILESTONE_STEPS[8].name,
+      'CII',
+      'step_pending',
+      { milestoneFlow: 8, assessors: true },
     );
 
     const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-04z5.onrender.com';
@@ -11112,10 +12173,13 @@ export class CompanyProjectsService {
           console.error('Payment submission notification to facilitator failed:', e),
         );
     }
-    this.alertAssessorsOnProject(
+    await this.logWorkflowStepNotification(
       projectId,
-      'Company submitted payment',
-      `${companyName} (${projectId}): ${invoice.payment_for === PAYMENT_FOR_PROFORMA ? 'Proforma' : 'Tax'} payment submitted — pending admin review.`,
+      companyId,
+      MILESTONE_STEPS[9].name,
+      'Company',
+      'step_completed',
+      { milestoneFlow: 9, assessors: true },
     );
 
     const paymentDescription = `Payment submitted for invoice (${invoice.payment_for === PAYMENT_FOR_PROFORMA ? 'Proforma' : 'Tax Invoice'}): ${dto.payment_type}${dto.trans_id ? ` - ${dto.trans_id}` : ''}`;
@@ -11266,10 +12330,18 @@ export class CompanyProjectsService {
         }
       }
       const pCode = (project as any).project_id || projectId;
-      this.alertAssessorsOnProject(
+      await this.logWorkflowStepNotification(
         projectId,
-        isProforma ? `Proforma invoice ${status}` : `Invoice payment ${status}`,
-        `${companyName} (${pCode}): ${isProforma ? 'Proforma' : 'Invoice'} ${status.toLowerCase()} by GreenCo Team.${approvalStatus === 1 && isProforma ? ' You may plan the site visit.' : ''}`,
+        companyId,
+        approvalStatus === 1 && isProforma
+          ? MILESTONE_STEPS[10].name
+          : `${isProforma ? 'Proforma' : 'Invoice'} ${status}`,
+        'CII',
+        approvalStatus === 1 ? 'step_completed' : 'rejected',
+        {
+          milestoneFlow: approvalStatus === 1 && isProforma ? 10 : undefined,
+          assessors: true,
+        },
       );
     }
 
@@ -11308,6 +12380,7 @@ export class CompanyProjectsService {
     companyId: string,
     projectId: string,
     file: Express.Multer.File,
+    options?: { facilitatorContract?: boolean },
   ) {
     const project = await this.projectModel.findOne({
       _id: projectId,
@@ -11321,25 +12394,41 @@ export class CompanyProjectsService {
       });
     }
 
+    const facilitatorFlow = isFacilitatorProcessType(project);
+    if (options?.facilitatorContract && !facilitatorFlow) {
+      throw new BadRequestException({
+        status: 'error',
+        code: 'NOT_FACILITATOR_PROJECT',
+        message:
+          'Facilitator contract upload is only for CI + Facilitator registration projects.',
+      });
+    }
+
     const existingWorkOrderForGate = await this.companyWorkOrderModel
       .findOne({ company_id: companyId, project_id: projectId })
       .sort({ createdAt: -1 })
       .lean();
-    const proposalReview = resolveProposalReviewStatus(project, existingWorkOrderForGate);
-    if (proposalReview !== PROPOSAL_REVIEW_STATUS.ACCEPTED) {
-      throw new BadRequestException({
-        status: 'error',
-        code: 'PROPOSAL_NOT_ACCEPTED',
-        message:
-          'Accept the proposal document before uploading the work order. Use PATCH …/proposal-document/review with action "accept".',
-        data: {
-          proposal_review_status: proposalReview,
-          proposal_review_status_label: proposalReviewStatusLabel(
-            proposalReview,
-            existingWorkOrderForGate,
-          ),
-        },
-      });
+
+    // CII flow: company must accept CII proposal before work order. Facilitator flow skips that gate.
+    if (!facilitatorFlow || !options?.facilitatorContract) {
+      const proposalReview = resolveProposalReviewStatus(project, existingWorkOrderForGate);
+      if (proposalReview !== PROPOSAL_REVIEW_STATUS.ACCEPTED) {
+        const noProposal = proposalReview === null;
+        throw new BadRequestException({
+          status: 'error',
+          code: noProposal ? 'PROPOSAL_NOT_UPLOADED' : 'PROPOSAL_NOT_ACCEPTED',
+          message: noProposal
+            ? 'CII must upload the proposal document before you can upload the work order.'
+            : 'Accept the proposal document before uploading the work order. Use PATCH …/proposal-document/review with action "accept".',
+          data: {
+            proposal_review_status: proposalReview,
+            proposal_review_status_label: proposalReviewStatusLabel(
+              proposalReview,
+              existingWorkOrderForGate,
+            ),
+          },
+        });
+      }
     }
 
     // Check if work order already exists (for re-upload case)
@@ -11535,11 +12624,7 @@ export class CompanyProjectsService {
       .catch((err) => console.error('Site visit notification failed:', err));
 
     const pCode = (project as any).project_id || projectId;
-    this.alertAssessorsOnProject(
-      projectId,
-      'Site visit report uploaded',
-      `${company?.name || 'Company'} (${pCode}): Launch & Training / site visit report uploaded.`,
-    );
+    this.alertAssessorsOnProject(projectId, 'Consultant Uploaded Site Visit Report', 'step_completed');
 
     // Email: notify company that site visit report has been uploaded
     this.mailService
@@ -11614,11 +12699,7 @@ export class CompanyProjectsService {
 
     const pRow = await this.projectModel.findById(resolved.projectId).select('project_id').lean();
     const pCode = (pRow as any)?.project_id || resolved.projectId;
-    this.alertAssessorsOnProject(
-      resolved.projectId,
-      'Site visit report uploaded',
-      `${company?.name || 'Company'} (${pCode}): site visit report uploaded by consultant.`,
-    );
+    this.alertAssessorsOnProject(resolved.projectId, 'Consultant Uploaded Site Visit Report', 'step_completed');
 
     return {
       status: 'success',
@@ -11803,10 +12884,13 @@ export class CompanyProjectsService {
             console.error('[Work Order Approval] Facilitator notification failed:', e?.message || e),
           );
       }
-      this.alertAssessorsOnProject(
+      await this.logWorkflowStepNotification(
         projectId,
-        'Work order approved',
-        `${companyName} (${project.project_id || projectId}): work order approved by CII.`,
+        projectCompanyId,
+        MILESTONE_STEPS[5].name,
+        'CII',
+        'step_completed',
+        { milestoneFlow: 5, assessors: true },
       );
     } else if (dto.wo_status === 2 && projectCompanyId) {
       const company = await this.companyModel.findById(projectCompanyId).lean();
@@ -11854,10 +12938,13 @@ export class CompanyProjectsService {
             console.error('[Work Order Approval] Facilitator notification failed:', e?.message || e),
           );
       }
-      this.alertAssessorsOnProject(
+      await this.logWorkflowStepNotification(
         projectId,
-        'Work order rejected',
-        `${companyName} (${project.project_id || projectId}): work order rejected.${dto.wo_remarks ? ` Remarks: ${dto.wo_remarks}` : ''}`,
+        projectCompanyId,
+        'Work order rejected by CII',
+        'CII',
+        'rejected',
+        { assessors: true },
       );
     }
 
@@ -12864,31 +13951,33 @@ export class CompanyProjectsService {
       });
     }
 
-    // In-app: notify Assessor (AS)
-    this.notifyAssessor(
-      assessorId,
-      hadAssignment ? 'Site visit dates updated' : 'You have been assigned to a GreenCo project',
-      hadAssignment
-        ? `Visit dates for ${company?.name || 'Company'} (project ${projectCode}) were updated: ${datesLabel}.`
-        : `You have been assigned to ${company?.name || 'Company'} (project ${projectCode}). Visit dates: ${datesLabel}.`,
+    await this.logWorkflowStepNotification(
+      projectId,
+      companyId,
+      hadAssignment ? 'Site visit dates updated' : MILESTONE_STEPS[15].name,
+      'CII',
+      hadAssignment ? 'update' : 'step_completed',
+      { milestoneFlow: hadAssignment ? undefined : 15, assessors: false },
     );
-    this.notificationsService
-      .create(
-        'Assessor assigned (Admin alert)',
-        `Project ${projectId}: Assessor ${assessor.name} assigned.`,
-        'A',
-      )
-      .catch((err) => console.error('Notification to admin failed:', err));
-
-    // In-app: notify Company (C)
-    this.notificationsService
-      .create(
-        'GreenCo Team has assigned an Assessor for your project',
-        `Assessor ${assessor.name} has been assigned for your project by GreenCo Team. Check site visit details.`,
-        'C',
-        companyId,
-      )
-      .catch((err) => console.error('Notification to company failed:', err));
+    const ctx = await this.resolveProjectNotificationContext(projectId, companyId);
+    if (ctx) {
+      const meta: WorkflowNotificationMeta = {
+        project_id: ctx.projectId,
+        company_id: ctx.companyId,
+        company_name: ctx.companyName,
+        project_code: ctx.projectCode,
+        activity: hadAssignment ? 'Site visit dates updated' : MILESTONE_STEPS[15].name,
+        responsibility: 'CII',
+        event_type: hadAssignment ? 'update' : 'step_completed',
+      };
+      await this.notifyAssessor(
+        assessorId,
+        meta.activity!,
+        `${ctx.companyName}: ${meta.activity}`,
+        'update',
+        meta,
+      );
+    }
 
     // Email: to assessor
     this.mailService
@@ -13178,6 +14267,15 @@ export class CompanyProjectsService {
       milestone_flow: 11,
       milestone_completed: true,
     });
+
+    await this.logWorkflowStepNotification(
+      projectId,
+      companyId,
+      `Company Re-Uploaded Primary Data${sectionPart}`,
+      'Company',
+      'reupload',
+      { assessors: true },
+    );
   }
 
   /**
@@ -13342,11 +14440,11 @@ export class CompanyProjectsService {
     );
     if (reaccept) {
       return {
-        quickview_phase: 'awaiting_cii_review',
+        quickview_phase: reaccept.latestStatus === 'Rejected' ? 'rejected' as any : 'awaiting_cii_review',
         latest_step: {
           id: reaccept.latestId,
           name: reaccept.latestName,
-          status: 'Completed',
+          status: reaccept.latestStatus,
           responsibility: reaccept.latestResp,
         },
         next_step: {
@@ -13424,6 +14522,7 @@ export class CompanyProjectsService {
     nextName: string;
     latestResp: string;
     nextResp: string;
+    latestStatus: string;
     pending_sections: string[];
   } | null> {
     const resubmittedTypes = await this.getResubmittedInfoTypesFromActivities(allActivities);
@@ -13438,6 +14537,7 @@ export class CompanyProjectsService {
     if (!rows.length) return null;
 
     const pendingSections = new Set<string>();
+    const rejectedSections = new Set<string>();
     for (const infoType of resubmittedTypes) {
       const sectionRows = (rows as any[]).filter(
         (r) =>
@@ -13449,22 +14549,52 @@ export class CompanyProjectsService {
         continue;
       }
       if (
-        !sectionRows.every(
+        sectionRows.every(
           (r) => Number(r?.document_status) === PRIMARY_DATA_DOC_STATUS.ACCEPTED,
         )
       ) {
+        continue;
+      }
+      const hasRejected = sectionRows.some(
+        (r) => Number(r?.document_status) === PRIMARY_DATA_DOC_STATUS.NOT_ACCEPTED,
+      );
+      if (hasRejected) {
+        rejectedSections.add(infoType);
+      } else {
         pendingSections.add(infoType);
       }
     }
-    if (!pendingSections.size) return null;
 
-    const sectionList = [...pendingSections];
-    const labels = await Promise.all(sectionList.map((s) => this.getPrimaryDataSectionLabel(s)));
+    if (rejectedSections.size && !pendingSections.size) {
+      const sectionList = [...rejectedSections];
+      const labels = await Promise.all(sectionList.map((s) => this.getPrimaryDataSectionLabel(s)));
+      const sectionSuffix =
+        sectionList.length === 1 && labels[0]
+          ? ` (${labels[0]})`
+          : sectionList.length === 1
+            ? ` (${sectionList[0].toUpperCase()})`
+            : '';
+      return {
+        latestId: 12,
+        nextId: 11,
+        latestName: `Primary data has been rejected${sectionSuffix}`,
+        nextName: `Company needs to re-upload primary data form`,
+        latestResp: 'CII',
+        nextResp: 'Company',
+        latestStatus: 'Rejected',
+        pending_sections: sectionList,
+      };
+    }
+
+    if (!pendingSections.size && !rejectedSections.size) return null;
+
+    const allPending = [...pendingSections, ...rejectedSections];
+    const labels = await Promise.all(allPending.map((s) => this.getPrimaryDataSectionLabel(s)));
     const sectionSuffix =
-      sectionList.length === 1 && labels[0]
+      allPending.length === 1 && labels[0]
         ? ` (${labels[0]})`
-        : sectionList.length === 1
-          ? ` (${sectionList[0].toUpperCase()})`
+        : allPending.length === 1
+          ? ` (${allPending[0].toUpperCase()})`
           : '';
 
     return {
@@ -13474,7 +14604,8 @@ export class CompanyProjectsService {
       nextName: 'CII to Approve or Reject Re-Uploaded Primary Data',
       latestResp: 'Company',
       nextResp: 'CII',
-      pending_sections: sectionList,
+      latestStatus: 'Completed',
+      pending_sections: allPending,
     };
   }
 
@@ -15092,10 +16223,13 @@ export class CompanyProjectsService {
 
     const company = await this.companyModel.findById(companyId).lean();
     const pCode = (project as any)?.project_id || projectId;
-    this.alertAssessorsOnProject(
+    await this.logWorkflowStepNotification(
       projectId,
-      'Primary data submitted',
-      `${company?.name || 'Company'} (${pCode}): company submitted all primary data — pending GreenCo review.`,
+      companyId,
+      MILESTONE_STEPS[11].name,
+      'Company',
+      'step_completed',
+      { milestoneFlow: 11, assessors: true },
     );
 
     return { status: 'success', message: 'Success! Primary Data Submitted.' };
@@ -15136,10 +16270,13 @@ export class CompanyProjectsService {
 
     const company = await this.companyModel.findById(companyId).lean();
     const pCode = (project as any).project_id || projectId;
-    this.alertAssessorsOnProject(
+    await this.logWorkflowStepNotification(
       projectId,
-      'Primary data documents re-uploaded',
-      `${company?.name || 'Company'} (${pCode}): company re-uploaded primary data documents.`,
+      companyId,
+      'Company re-submitted Primary Form Data Documents',
+      'Company',
+      'reupload',
+      { assessors: true },
     );
 
     return { status: 'success', message: 'Success! Primary Data Documents Uploaded Successfully!' };
@@ -15294,10 +16431,13 @@ export class CompanyProjectsService {
       }
       const pRow = await this.projectModel.findById(projectId).select('project_id').lean();
       const pCode = (pRow as any)?.project_id || projectId;
-      this.alertAssessorsOnProject(
+      await this.logWorkflowStepNotification(
         projectId,
-        'Primary data not accepted',
-        `${company?.name || 'Company'} (${pCode}): ${detail}`,
+        companyId,
+        `Primary data section not accepted (${formType})`,
+        'CII',
+        'rejected',
+        { assessors: true },
       );
     }
 
@@ -15320,10 +16460,13 @@ export class CompanyProjectsService {
       }
       const pRowAcc = await this.projectModel.findById(projectId).select('project_id').lean();
       const pCodeAcc = (pRowAcc as any)?.project_id || projectId;
-      this.alertAssessorsOnProject(
+      await this.logWorkflowStepNotification(
         projectId,
-        'Primary data accepted',
-        `${company?.name || 'Company'} (${pCodeAcc}): section "${formType}" accepted by GreenCo Team.`,
+        companyId,
+        `Primary data section accepted (${formType})`,
+        'CII',
+        'step_completed',
+        { milestoneFlow: 12, assessors: true },
       );
     }
 
@@ -15359,6 +16502,15 @@ export class CompanyProjectsService {
             milestone_flow: 12,
             milestone_completed: true,
           });
+
+          await this.logWorkflowStepNotification(
+            projectId,
+            companyId,
+            'CII Approved the Re-Uploaded Primary Data Documents',
+            'CII',
+            'step_completed',
+            { milestoneFlow: 12, assessors: true },
+          );
         }
         const currentNext = Number((project as any).next_activities_id ?? 0);
         if (currentNext < 13) {

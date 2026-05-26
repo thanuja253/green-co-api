@@ -6,12 +6,21 @@ import { AdminLaunchTrainingController } from './admin-launch-training.controlle
 import { AssessorCompanyProjectsController } from './assessor-company-projects.controller';
 import { FacilitatorFinanceV2Controller } from './facilitator-finance-v2.controller';
 import { FacilitatorLaunchTrainingController } from './facilitator-launch-training.controller';
+import { FacilitatorContractDocumentController } from './facilitator-contract-document.controller';
+import { AdminFacilitatorContractController } from './admin-facilitator-contract.controller';
 import { CoordinatorPerformanceController } from './coordinator-performance.controller';
 import { AdminGreencoDashboardController } from './admin-greenco-dashboard.controller';
+import { WorkOrderFlowController } from './work-order-flow.controller';
+import { AdminEnhancedFeaturesController } from './admin-enhanced-features.controller';
+import { CoordinatorChecklistController } from './coordinator-checklist.controller';
+import { CompanyDashboardResourcesController } from './company-dashboard-resources.controller';
 import { CompanyProjectsService } from './company-projects.service';
 import { AdminGreencoDashboardService } from './admin-greenco-dashboard.service';
 import { AdminInertCompaniesService } from './admin-inert-companies.service';
 import { AdminAssessorFacilitatorDashboardService } from './admin-assessor-facilitator-dashboard.service';
+import { WorkOrderFlowService } from './work-order-flow.service';
+import { DashboardFreezeService } from './dashboard-freeze.service';
+import { EnhancedFeaturesService } from './enhanced-features.service';
 import { State, StateSchema } from '../schemas/state.schema';
 import {
   CompanyProject,
@@ -77,6 +86,26 @@ import {
   MasterChecklistSector,
   MasterChecklistSectorSchema,
 } from '../schemas/master-checklist-sector.schema';
+import {
+  DashboardSnapshot,
+  DashboardSnapshotSchema,
+} from '../schemas/dashboard-snapshot.schema';
+import {
+  ChecklistVersion,
+  ChecklistVersionSchema,
+} from '../schemas/checklist-version.schema';
+import {
+  CoordinatorChecklistVerification,
+  CoordinatorChecklistVerificationSchema,
+} from '../schemas/coordinator-checklist-verification.schema';
+import {
+  EmailTemplate,
+  EmailTemplateSchema,
+} from '../schemas/email-template.schema';
+import {
+  CompanyDashboardResource,
+  CompanyDashboardResourceSchema,
+} from '../schemas/company-dashboard-resource.schema';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { MailModule } from '../../mail/mail.module';
 
@@ -105,6 +134,11 @@ import { MailModule } from '../../mail/mail.module';
       { name: ParameterManagement.name, schema: ParameterManagementSchema },
       { name: MasterChecklistSector.name, schema: MasterChecklistSectorSchema },
       { name: State.name, schema: StateSchema },
+      { name: DashboardSnapshot.name, schema: DashboardSnapshotSchema },
+      { name: ChecklistVersion.name, schema: ChecklistVersionSchema },
+      { name: CoordinatorChecklistVerification.name, schema: CoordinatorChecklistVerificationSchema },
+      { name: EmailTemplate.name, schema: EmailTemplateSchema },
+      { name: CompanyDashboardResource.name, schema: CompanyDashboardResourceSchema },
     ]),
   ],
   controllers: [
@@ -114,16 +148,25 @@ import { MailModule } from '../../mail/mail.module';
     AssessorCompanyProjectsController,
     FacilitatorFinanceV2Controller,
     FacilitatorLaunchTrainingController,
+    FacilitatorContractDocumentController,
+    AdminFacilitatorContractController,
     CoordinatorPerformanceController,
     AdminGreencoDashboardController,
+    WorkOrderFlowController,
+    AdminEnhancedFeaturesController,
+    CoordinatorChecklistController,
+    CompanyDashboardResourcesController,
   ],
   providers: [
     CompanyProjectsService,
     AdminGreencoDashboardService,
     AdminInertCompaniesService,
     AdminAssessorFacilitatorDashboardService,
+    WorkOrderFlowService,
+    DashboardFreezeService,
+    EnhancedFeaturesService,
   ],
-  exports: [CompanyProjectsService],
+  exports: [CompanyProjectsService, EnhancedFeaturesService],
 })
 export class CompanyProjectsModule {}
 

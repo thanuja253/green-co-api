@@ -30,8 +30,36 @@ export class NotificationLog {
 
   @Prop({ default: false })
   seen: boolean;
+
+  @Prop({ type: MongooseSchema.Types.ObjectId, required: false })
+  project_id?: MongooseSchema.Types.ObjectId;
+
+  @Prop({ type: MongooseSchema.Types.ObjectId, required: false })
+  company_id?: MongooseSchema.Types.ObjectId;
+
+  @Prop({ required: false })
+  company_name?: string;
+
+  @Prop({ required: false })
+  project_code?: string;
+
+  /** Same label as Quick View latest/next step activity. */
+  @Prop({ required: false })
+  activity?: string;
+
+  @Prop({ required: false })
+  responsibility?: string;
+
+  @Prop({ required: false })
+  event_type?: string;
+
+  /** Shortcut URL for admins to navigate directly to the referenced page/task. */
+  @Prop({ required: false })
+  shortcut_url?: string;
 }
 
 export const NotificationLogSchema = SchemaFactory.createForClass(NotificationLog);
 NotificationLogSchema.index({ notify_type: 1, user_id: 1 });
 NotificationLogSchema.index({ user_id: 1, seen: 1, createdAt: -1 });
+NotificationLogSchema.index({ notify_type: 1, project_id: 1, createdAt: -1 });
+NotificationLogSchema.index({ company_id: 1, createdAt: -1 });

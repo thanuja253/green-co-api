@@ -7,6 +7,8 @@ type MailPayload = {
   to: string;
   subject: string;
   html: string;
+  cc?: string[];
+  attachments?: Array<{ filename: string; path: string }>;
 };
 
 @Injectable()
@@ -280,6 +282,50 @@ export class MailService {
       const responseText = await response.text();
       throw new Error(`Resend API error ${response.status}: ${responseText}`);
     }
+  }
+
+  async sendRatingEmail(options: {
+    to: string;
+    cc: string[];
+    subject: string;
+    html: string;
+    attachments?: Array<{ filename: string; path: string }>;
+  }): Promise<void> {
+    const mailOptions: MailPayload = {
+      from: process.env.MAIL_FROM_ADDRESS || 'noreply@greenco.com',
+      to: options.to,
+      subject: options.subject,
+      html: options.html,
+      cc: options.cc,
+      attachments: options.attachments,
+    };
+
+    if (this.smtpTransporter) {
+      try {
+        await this.smtpTransporter.sendMail({
+          from: mailOptions.from,
+          to: mailOptions.to,
+          cc: mailOptions.cc?.join(', '),
+          subject: mailOptions.subject,
+          html: mailOptions.html,
+          attachments: mailOptions.attachments?.map((a) => ({
+            filename: a.filename,
+            path: a.path,
+          })),
+        });
+        return;
+      } catch (smtpErr) {
+        console.warn('[MailService] SMTP send failed for rating email. Falling back to Resend.');
+        if (!this.resendApiKey) throw smtpErr;
+      }
+    }
+
+    await this.sendViaResend({
+      from: mailOptions.from,
+      to: mailOptions.to,
+      subject: mailOptions.subject,
+      html: mailOptions.html,
+    });
   }
 
   private logSmtpErrorContext(error: unknown, recipient: string): void {

@@ -143,6 +143,42 @@ export class CompanyProject {
   @Prop({ type: MongooseSchema.Types.ObjectId, required: false })
   recertification_project_id?: MongooseSchema.Types.ObjectId;
 
+  /** Checklist version used for this project's assessment (links to ChecklistVersion). */
+  @Prop()
+  checklist_version_id?: string;
+
+  @Prop()
+  checklist_version_number?: number;
+
+  /** Whether coordinator has verified the project checklist. */
+  @Prop({ default: false })
+  coordinator_checklist_verified?: boolean;
+
+  @Prop()
+  coordinator_checklist_verified_at?: Date;
+
+  @Prop()
+  coordinator_checklist_verified_by?: string;
+
+  /** Auto-generated plaque PDF path. */
+  @Prop()
+  plaque_pdf_path?: string;
+
+  /** Auto-generated certificate PDF path. */
+  @Prop()
+  certificate_pdf_path?: string;
+
+  /** Rating label from the scoring/proforma (e.g. 'Gold', 'Platinum'). */
+  @Prop()
+  rating_label?: string;
+
+  /** Whether auto-generated cert/plaque documents have been created. */
+  @Prop({ default: false })
+  cert_plaque_generated?: boolean;
+
+  @Prop()
+  cert_plaque_generated_at?: Date;
+
   /** Plaque dispatch details captured from Add Plaque form. */
   @Prop({
     type: {

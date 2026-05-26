@@ -32,21 +32,65 @@ export class CompanyWorkOrder {
   wo_company_review_updated_at?: Date;
 
   @Prop()
-  wo_remarks?: string; // Remarks/reason if work order is rejected
+  wo_remarks?: string;
 
   @Prop()
   wo_doc_status_updated_at?: Date;
 
-  /** Purchase order number (admin, after work order accepted). */
   @Prop()
   wo_po_number?: string;
 
-  /** Date of acceptance as entered by admin (not future; default suggested = status update time). */
   @Prop()
   wo_acceptance_date?: Date;
+
+  // ── New Work Order Flow fields ──
+
+  /** Work Order Number submitted by the client (mandatory, unique per company). */
+  @Prop()
+  wo_number?: string;
+
+  /** Work Order Date submitted by the client (must not be future). */
+  @Prop()
+  wo_date?: Date;
+
+  /** Auto-generated reference number on approval: GBC/YYYY/Serial (e.g. GBC/2025/0012). */
+  @Prop({ unique: true, sparse: true })
+  reference_number?: string;
+
+  /** Company name snapshot at time of work order (editable by admin). */
+  @Prop()
+  company_name?: string;
+
+  /** Total service fee entered by GreenCo admin during approval (numeric, non-negative). */
+  @Prop({ default: 0 })
+  total_fee?: number;
+
+  /** Registration fee entered by GreenCo admin during approval (numeric, non-negative). */
+  @Prop({ default: 0 })
+  registration_fee?: number;
+
+  /** Workflow status: pending_approval | approved | rejected */
+  @Prop({ default: 'pending_approval' })
+  approval_status?: string;
+
+  /** Admin user who approved/rejected. */
+  @Prop()
+  approved_by?: string;
+
+  /** Admin user display name. */
+  @Prop()
+  approved_by_name?: string;
+
+  @Prop()
+  approved_at?: Date;
+
+  @Prop()
+  rejection_reason?: string;
 }
 
 export const CompanyWorkOrderSchema = SchemaFactory.createForClass(CompanyWorkOrder);
 CompanyWorkOrderSchema.index({ company_id: 1, project_id: 1 });
 CompanyWorkOrderSchema.index({ company_id: 1, project_id: 1, createdAt: -1 });
+CompanyWorkOrderSchema.index({ approval_status: 1 });
+CompanyWorkOrderSchema.index({ reference_number: 1 });
 

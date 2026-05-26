@@ -18,6 +18,11 @@ import {
   ParameterManagement,
   ParameterManagementDocument,
 } from '../schemas/parameter-management.schema';
+import { CompanyProject, CompanyProjectDocument } from '../schemas/company-project.schema';
+import { CompanyFacilitator, CompanyFacilitatorDocument } from '../schemas/company-facilitator.schema';
+import { Company, CompanyDocument } from '../schemas/company.schema';
+import { NotificationsService } from '../notifications/notifications.service';
+import { MailService } from '../../mail/mail.service';
 
 function normalizeTitle(value: unknown): string {
   return String(value ?? '')
@@ -36,6 +41,14 @@ export class AssessmentChecklistDocumentsService {
     private readonly groupModel: Model<GroupManagementDocument>,
     @InjectModel(ParameterManagement.name)
     private readonly criteriaModel: Model<ParameterManagementDocument>,
+    @InjectModel(CompanyProject.name)
+    private readonly projectModel: Model<CompanyProjectDocument>,
+    @InjectModel(CompanyFacilitator.name)
+    private readonly companyFacilitatorModel: Model<CompanyFacilitatorDocument>,
+    @InjectModel(Company.name)
+    private readonly companyModel: Model<CompanyDocument>,
+    private readonly notificationsService: NotificationsService,
+    private readonly mailService: MailService,
   ) {}
 
   private toUrl(path: string): string {
@@ -145,6 +158,12 @@ export class AssessmentChecklistDocumentsService {
       reviewed_at: args.uploadedByRole === 'ADMIN' ? new Date() : undefined,
     });
 
+    if (args.uploadedByRole === 'COMPANY') {
+      this.sendChecklistUploadNotifications(args.projectId, title, (criteria as any).short_name || (criteria as any).name || '').catch(
+        (e) => console.error('[AssessmentChecklist] Upload notification failed:', e),
+      );
+    }
+
     return {
       status: 'success',
       message: 'Checklist document uploaded successfully',
@@ -165,6 +184,15 @@ export class AssessmentChecklistDocumentsService {
     row.reviewed_by = adminId || 'admin';
     row.reviewed_at = new Date();
     await row.save();
+
+    this.sendChecklistStatusNotifications(
+      String(row.project_id),
+      row.title || '',
+      (row as any).criteria_short_name || (row as any).criteria_name || '',
+      status,
+      row.remarks || '',
+    ).catch((e) => console.error('[AssessmentChecklist] Status notification failed:', e));
+
     return {
       status: 'success',
       message: 'Checklist document updated successfully',
@@ -229,6 +257,113 @@ export class AssessmentChecklistDocumentsService {
       absolutePath,
       filename: basename(absolutePath),
     };
+  }
+
+  private async resolveProjectContext(projectId: string) {
+    const project = await this.projectModel.findById(projectId).lean();
+    if (!project) return null;
+    const companyId = String((project as any).company_id);
+    const company = await this.companyModel.findById(companyId).lean();
+    const cf = await this.companyFacilitatorModel
+      .findOne({ company_id: companyId, project_id: projectId })
+      .populate('facilitator_id')
+      .lean();
+    return {
+      companyId,
+      companyName: (company as any)?.name || 'Company',
+      companyEmail: (company as any)?.email || null,
+      projectCode: (project as any).project_id || projectId,
+      facilitator: cf && (cf as any).facilitator_id ? (cf as any).facilitator_id : null,
+    };
+  }
+
+  private async sendChecklistUploadNotifications(projectId: string, docTitle: string, criteriaLabel: string) {
+    const ctx = await this.resolveProjectContext(projectId);
+    if (!ctx) return;
+    const detail = `${ctx.companyName} uploaded assessment checklist document: ${docTitle}${criteriaLabel ? ` (${criteriaLabel})` : ''} for project ${ctx.projectCode}.`;
+
+    this.notificationsService
+      .create('Assessment Checklist Document Uploaded', `Your assessment checklist document "${docTitle}" has been uploaded. GreenCo Team will review it.`, 'C', ctx.companyId)
+      .catch((e) => console.error('[AssessmentChecklist] Company notification failed:', e));
+
+    this.notificationsService
+      .create(`${ctx.companyName}: Assessment Checklist Document Uploaded`, detail, 'A')
+      .catch((e) => console.error('[AssessmentChecklist] Admin notification failed:', e));
+
+    if (ctx.facilitator) {
+      const fid = ctx.facilitator._id?.toString?.() || String(ctx.facilitator);
+      this.notificationsService
+        .create('Assessment Checklist Document Uploaded', detail + ' Please review.', 'F', fid)
+        .catch((e) => console.error('[AssessmentChecklist] Facilitator notification failed:', e));
+      if (ctx.facilitator.email) {
+        this.mailService
+          .sendRatingEmail({
+            to: ctx.facilitator.email,
+            cc: [],
+            subject: `GreenCo - Assessment Checklist Uploaded by ${ctx.companyName}`,
+            html: `
+              <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                <h2>Assessment Checklist Document Uploaded</h2>
+                <p>Dear ${ctx.facilitator.name || 'Facilitator'},</p>
+                <p><strong>${ctx.companyName}</strong> has uploaded an assessment checklist document: <strong>${docTitle}</strong>${criteriaLabel ? ` (${criteriaLabel})` : ''} for project <strong>${ctx.projectCode}</strong>.</p>
+                <p>Please log in to the portal to review.</p>
+                <p>Best regards,<br>Green Co Team</p>
+              </div>
+            `,
+          })
+          .catch((e) => console.error('[AssessmentChecklist] Facilitator email failed:', e));
+      }
+    }
+  }
+
+  private async sendChecklistStatusNotifications(
+    projectId: string,
+    docTitle: string,
+    criteriaLabel: string,
+    status: AssessmentChecklistStatus,
+    remarks: string,
+  ) {
+    const ctx = await this.resolveProjectContext(projectId);
+    if (!ctx) return;
+    const statusLabel = status === 'Approved' ? 'accepted' : 'not accepted';
+    const detail = `Assessment checklist document "${docTitle}"${criteriaLabel ? ` (${criteriaLabel})` : ''} has been ${statusLabel} for project ${ctx.projectCode}.${remarks ? ` Remarks: ${remarks}` : ''}`;
+
+    this.notificationsService
+      .create(`Assessment checklist ${statusLabel}`, detail, 'C', ctx.companyId)
+      .catch((e) => console.error('[AssessmentChecklist] Company status notification failed:', e));
+
+    if (ctx.facilitator) {
+      const fid = ctx.facilitator._id?.toString?.() || String(ctx.facilitator);
+      this.notificationsService
+        .create(`Assessment checklist ${statusLabel}`, `${ctx.companyName}: ${detail}`, 'F', fid)
+        .catch((e) => console.error('[AssessmentChecklist] Facilitator status notification failed:', e));
+      if (ctx.facilitator.email) {
+        this.mailService
+          .sendRatingEmail({
+            to: ctx.facilitator.email,
+            cc: [],
+            subject: `GreenCo - Assessment Checklist ${status === 'Approved' ? 'Accepted' : 'Not Accepted'} for ${ctx.companyName}`,
+            html: `
+              <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                <h2>Assessment Checklist ${status === 'Approved' ? 'Accepted' : 'Not Accepted'}</h2>
+                <p>Dear ${ctx.facilitator.name || 'Facilitator'},</p>
+                <p>An assessment checklist document for <strong>${ctx.companyName}</strong> has been <strong>${statusLabel}</strong>.</p>
+                <p>Document: <strong>${docTitle}</strong>${criteriaLabel ? ` (${criteriaLabel})` : ''} — Project: <strong>${ctx.projectCode}</strong></p>
+                ${remarks ? `<p>Remarks: ${remarks}</p>` : ''}
+                <p>Please log in to the portal for details.</p>
+                <p>Best regards,<br>Green Co Team</p>
+              </div>
+            `,
+          })
+          .catch((e) => console.error('[AssessmentChecklist] Facilitator status email failed:', e));
+      }
+    }
+
+    if (status === 'Rejected' && ctx.companyEmail) {
+      this.mailService
+        .sendChecklistDocNotAcceptedEmail(ctx.companyEmail, ctx.companyName, `Document: ${docTitle}${criteriaLabel ? ` (${criteriaLabel})` : ''}.${remarks ? ` Remarks: ${remarks}` : ''}`)
+        .catch((e) => console.error('[AssessmentChecklist] Company rejection email failed:', e));
+    }
   }
 }
 

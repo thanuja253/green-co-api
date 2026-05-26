@@ -2200,7 +2200,10 @@ export class CompanyProjectsController {
         message: 'No file uploaded. Please select a PDF file.',
       });
     }
-    return this.companyProjectsService.uploadWorkOrderDocumentByProjectId(projectId, file);
+    return this.companyProjectsService.uploadFacilitatorContractDocumentByProjectId(
+      projectId,
+      file,
+    );
   }
 
   @Post(':projectId/facilitator-contract-document/reupload')
@@ -2237,7 +2240,10 @@ export class CompanyProjectsController {
         message: 'No file uploaded. Use field workorderdocument (PDF).',
       });
     }
-    return this.companyProjectsService.reuploadWorkOrderDocumentByProjectId(projectId, file);
+    return this.companyProjectsService.reuploadFacilitatorContractDocumentByProjectId(
+      projectId,
+      file,
+    );
   }
 
   @Patch(':projectId/facilitator-contract-document/review')
