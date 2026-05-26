@@ -15,6 +15,8 @@ import { CompanyDashboardResource, CompanyDashboardResourceDocument } from '../s
 import { NotificationsService } from '../notifications/notifications.service';
 import { MailService } from '../../mail/mail.service';
 import { join } from 'node:path';
+import { mkdirSync, createWriteStream } from 'node:fs';
+import PDFDocument from 'pdfkit';
 
 @Injectable()
 export class EnhancedFeaturesService {
@@ -93,7 +95,8 @@ export class EnhancedFeaturesService {
         .sort({ createdAt: -1 })
         .lean();
 
-      const invoiceLabel = (latestInvoice as any)?.invoice_type === 'tax' ? 'Tax Invoice' : 'Proforma Invoice';
+      const baseInvoiceLabel = (latestInvoice as any)?.invoice_type === 'tax' ? 'Tax Invoice' : 'Proforma Invoice';
+      const invoiceLabel = currentNext >= 19 ? `2nd ${baseInvoiceLabel}` : baseInvoiceLabel;
 
       await this.notificationsService.logWorkflowStepForProject(
         {
@@ -167,14 +170,17 @@ export class EnhancedFeaturesService {
       }
     }
 
+    const currentNext = Number((project as any).next_activities_id || 0);
+    const proformaLabel = currentNext >= 19 ? '2nd Proforma Invoice' : 'Proforma Invoice';
+
     await this.notificationsService.logWorkflowStepForProject(
       {
         company_name: company?.name || 'Company',
         company_id: companyIdStr,
         project_id: projectId,
         activity: isFacilitatorFlow
-          ? 'CII uploaded Proforma Invoice – awaiting supporting documents from Facilitator'
-          : 'Proforma Invoice Auto-generated',
+          ? `CII uploaded ${proformaLabel} – awaiting supporting documents from Facilitator`
+          : `${proformaLabel} Auto-generated`,
         responsibility: 'CII',
         shortcut_url: `${frontendBase}/admin/projects/${projectId}/finance`,
       },
@@ -346,6 +352,24 @@ export class EnhancedFeaturesService {
     };
   }
 
+  async getChecklistVerificationStatus(projectId: string) {
+    const project = await this.projectModel
+      .findById(projectId)
+      .select('coordinator_checklist_verified coordinator_checklist_verified_at coordinator_checklist_verified_by')
+      .lean();
+    if (!project) throw new NotFoundException('Project not found');
+
+    return {
+      status: 'success',
+      data: {
+        project_id: projectId,
+        coordinator_checklist_verified: (project as any).coordinator_checklist_verified || false,
+        coordinator_checklist_verified_at: (project as any).coordinator_checklist_verified_at || null,
+        coordinator_checklist_verified_by: (project as any).coordinator_checklist_verified_by || null,
+      },
+    };
+  }
+
   // ── Certificate & Plaque Automation ──
 
   async generateCertificateAndPlaque(projectId: string) {
@@ -363,8 +387,55 @@ export class EnhancedFeaturesService {
       throw new BadRequestException('Rating not finalized yet. Cannot generate certificate/plaque.');
     }
 
-    const certPath = `uploads/certificates/${projectId}/certificate_${Date.now()}.pdf`;
-    const plaquePath = `uploads/certificates/${projectId}/plaque_${Date.now()}.pdf`;
+    const dirPath = join(process.cwd(), 'uploads', 'certificates', projectId);
+    mkdirSync(dirPath, { recursive: true });
+
+    const certFilename = `certificate_${Date.now()}.pdf`;
+    const plaqueFilename = `plaque_${Date.now()}.pdf`;
+    const certPath = `uploads/certificates/${projectId}/${certFilename}`;
+    const plaquePath = `uploads/certificates/${projectId}/${plaqueFilename}`;
+
+    const projectCode = (project as any).project_id || projectId;
+    const issueDate = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' });
+    const percentageScore = (project as any).percentage_score ?? '';
+
+    await this.generatePdf(join(process.cwd(), certPath), (doc) => {
+      doc.fontSize(28).fillColor('#3A973D').text('GreenCo Rating Certificate', { align: 'center' });
+      doc.moveDown(1.5);
+      doc.fontSize(14).fillColor('#333333').text('This is to certify that', { align: 'center' });
+      doc.moveDown(0.5);
+      doc.fontSize(22).fillColor('#000000').text(companyName, { align: 'center' });
+      doc.moveDown(0.5);
+      doc.fontSize(14).fillColor('#333333').text(`has been awarded the`, { align: 'center' });
+      doc.moveDown(0.5);
+      doc.fontSize(26).fillColor('#6DC041').text(`${rating} Rating`, { align: 'center' });
+      doc.moveDown(0.5);
+      if (percentageScore) {
+        doc.fontSize(12).fillColor('#555555').text(`Score: ${percentageScore}%`, { align: 'center' });
+        doc.moveDown(0.3);
+      }
+      doc.fontSize(12).fillColor('#555555').text(`Project: ${projectCode}`, { align: 'center' });
+      doc.moveDown(0.3);
+      doc.fontSize(12).fillColor('#555555').text(`Date: ${issueDate}`, { align: 'center' });
+      doc.moveDown(2);
+      doc.fontSize(10).fillColor('#888888').text('Confederation of Indian Industry (CII)', { align: 'center' });
+      doc.text('GreenCo Rating System', { align: 'center' });
+    });
+
+    await this.generatePdf(join(process.cwd(), plaquePath), (doc) => {
+      doc.rect(30, 30, doc.page.width - 60, doc.page.height - 60).lineWidth(3).strokeColor('#6DC041').stroke();
+      doc.moveDown(3);
+      doc.fontSize(32).fillColor('#3A973D').text('GreenCo', { align: 'center' });
+      doc.fontSize(18).fillColor('#6DC041').text(`${rating} Rating`, { align: 'center' });
+      doc.moveDown(1);
+      doc.fontSize(20).fillColor('#000000').text(companyName, { align: 'center' });
+      doc.moveDown(0.5);
+      doc.fontSize(12).fillColor('#555555').text(`Project: ${projectCode}`, { align: 'center' });
+      doc.moveDown(0.3);
+      doc.fontSize(12).fillColor('#555555').text(issueDate, { align: 'center' });
+      doc.moveDown(2);
+      doc.fontSize(10).fillColor('#888888').text('Confederation of Indian Industry', { align: 'center' });
+    });
 
     await this.projectModel.findByIdAndUpdate(projectId, {
       $set: {
@@ -402,6 +473,18 @@ export class EnhancedFeaturesService {
         generated_at: new Date(),
       },
     };
+  }
+
+  private generatePdf(filePath: string, render: (doc: PDFKit.PDFDocument) => void): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const doc = new PDFDocument({ size: 'A4', margin: 50 });
+      const stream = createWriteStream(filePath);
+      doc.pipe(stream);
+      render(doc);
+      doc.end();
+      stream.on('finish', resolve);
+      stream.on('error', reject);
+    });
   }
 
   private deriveRatingFromScore(project: any): string | null {
@@ -471,18 +554,42 @@ export class EnhancedFeaturesService {
 
     const companyName = company.name || '';
     const rating = project.rating_label || '';
+    const percentageScore = String((project as any).percentage_score ?? '');
+    const totalScore = String((project as any).total_score ?? '');
+    const maxPoints = String((project as any).max_points ?? '');
 
-    const subject = this.replacePlaceholders(template.subject_template, {
-      company_name: companyName,
-      rating,
-      project_code: project.project_id || '',
-    });
-    const body = this.replacePlaceholders(template.body_template, {
+    const coordinatorAssignment = await this.compCoordinatorModel
+      .findOne({ project_id: new Types.ObjectId(projectId) })
+      .populate('coordinator_id')
+      .lean();
+    const coordinatorName = (coordinatorAssignment as any)?.coordinator_id?.name || '';
+    const coordinatorEmail = (coordinatorAssignment as any)?.coordinator_id?.email || '';
+
+    const facilitatorAssignment = await this.compFacilitatorModel
+      .findOne({ project_id: new Types.ObjectId(projectId) })
+      .populate('facilitator_id')
+      .lean();
+    const facilitatorName = (facilitatorAssignment as any)?.facilitator_id?.name || '';
+
+    const placeholders: Record<string, string> = {
       company_name: companyName,
       rating,
       project_code: project.project_id || '',
       date: new Date().toISOString().split('T')[0],
-    });
+      percentage_score: percentageScore,
+      total_score: totalScore,
+      max_points: maxPoints,
+      coordinator_name: coordinatorName,
+      facilitator_name: facilitatorName,
+      year: String(new Date().getFullYear()),
+    };
+
+    const subject = this.replacePlaceholders(template.subject_template, placeholders);
+    const body = this.replacePlaceholders(template.body_template, placeholders);
+
+    const ccList: string[] = [];
+    if (company.email) ccList.push(company.email);
+    if (coordinatorEmail) ccList.push(coordinatorEmail);
 
     const attachments: string[] = [];
     if (project.certificate_pdf_path) attachments.push(project.certificate_pdf_path);
@@ -492,13 +599,14 @@ export class EnhancedFeaturesService {
       status: 'success',
       data: {
         to: '',
-        cc: [company.email],
+        cc: ccList,
         subject,
         body,
         attachments,
         company_name: companyName,
         rating,
         project_code: project.project_id || '',
+        available_placeholders: Object.keys(placeholders),
       },
     };
   }
@@ -612,6 +720,21 @@ export class EnhancedFeaturesService {
     versionId: string,
     dto: { version_label?: string; checklist_data?: Record<string, any>; change_notes?: string; status?: string; effective_until?: string },
   ) {
+    const existing = await this.checklistVersionModel.findById(versionId).lean();
+    if (!existing) throw new NotFoundException('Checklist version not found');
+
+    const assignedProjects = await this.projectModel
+      .countDocuments({ checklist_version_id: versionId })
+      .exec();
+    if (assignedProjects > 0 && dto.checklist_data !== undefined) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Cannot modify checklist_data after this version has been assigned to projects. Create a new version instead.',
+        code: 'CHECKLIST_VERSION_IMMUTABLE',
+        assigned_projects_count: assignedProjects,
+      });
+    }
+
     const update: any = {};
     if (dto.version_label !== undefined) update.version_label = dto.version_label;
     if (dto.checklist_data !== undefined) update.checklist_data = dto.checklist_data;

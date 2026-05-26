@@ -1,6 +1,7 @@
-import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
+import { Injectable, BadRequestException, NotFoundException, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { DashboardSnapshot, DashboardSnapshotDocument } from '../schemas/dashboard-snapshot.schema';
 import { CompanyProject, CompanyProjectDocument } from '../schemas/company-project.schema';
 import { CompanyActivity, CompanyActivityDocument } from '../schemas/company-activity.schema';
@@ -10,6 +11,8 @@ import { AdminGreencoDashboardService } from './admin-greenco-dashboard.service'
 
 @Injectable()
 export class DashboardFreezeService {
+  private readonly logger = new Logger(DashboardFreezeService.name);
+
   constructor(
     @InjectModel(DashboardSnapshot.name) private readonly snapshotModel: Model<DashboardSnapshotDocument>,
     @InjectModel(CompanyProject.name) private readonly projectModel: Model<CompanyProjectDocument>,
@@ -18,6 +21,28 @@ export class DashboardFreezeService {
     @InjectModel(CompanyInvoice.name) private readonly invoiceModel: Model<CompanyInvoiceDocument>,
     private readonly dashboardService: AdminGreencoDashboardService,
   ) {}
+
+  @Cron('0 0 1 1 *')
+  async handleYearEndAutoFreeze() {
+    const previousYear = new Date().getFullYear() - 1;
+    const alreadyFrozen = await this.isDashboardFrozen(previousYear);
+    if (alreadyFrozen) {
+      this.logger.log(`Year-end auto-freeze: ${previousYear} already frozen, skipping.`);
+      return;
+    }
+
+    this.logger.log(`Year-end auto-freeze: freezing dashboard for ${previousYear}...`);
+    try {
+      await this.freezeDashboard(
+        previousYear,
+        { sub: 'system', name: 'Auto Year-End Freeze' },
+        `Automatic freeze triggered on Jan 1 ${previousYear + 1}`,
+      );
+      this.logger.log(`Year-end auto-freeze: ${previousYear} frozen successfully.`);
+    } catch (err) {
+      this.logger.error(`Year-end auto-freeze failed for ${previousYear}:`, err);
+    }
+  }
 
   async freezeDashboard(
     year: number,

@@ -364,7 +364,7 @@ export class AdminGreencoDashboardService {
     const [
       companies,
       legacy_companies,
-      cii_company,
+      explicit_cii_company,
       facilitator_company,
       yearly_registered_companies,
       inactive_companies,
@@ -383,6 +383,9 @@ export class AdminGreencoDashboardService {
       this.companyModel.countDocuments(inactiveCompanyFilter()),
     ]);
 
+    // Companies without assessment_through default to CII so totals always align
+    const unclassified = Math.max(0, yearly_registered_companies - explicit_cii_company - facilitator_company);
+    const cii_company = explicit_cii_company + unclassified;
     const cii_plus_facilitator = cii_company + facilitator_company;
     const other_registered_companies = Math.max(
       0,

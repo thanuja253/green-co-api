@@ -33,4 +33,10 @@ export class CoordinatorChecklistController {
       body.remarks,
     );
   }
+
+  @Get('api/admin/projects/:projectId/checklist-verification-status')
+  @UseGuards(AdminJwtAuthGuard)
+  async getChecklistVerificationStatus(@Param('projectId') projectId: string) {
+    return this.enhancedFeaturesService.getChecklistVerificationStatus(projectId);
+  }
 }

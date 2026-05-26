@@ -2887,8 +2887,23 @@ export class CompanyProjectsService {
       MILESTONE_STEPS[18].name,
       'CII',
       'step_completed',
-      { milestoneFlow: 18, assessors: true },
+      { milestoneFlow: 18, assessors: true, facilitator: true },
     );
+
+    // Facilitator flow: direct in-app notification for certificate upload
+    if (isFacilitatorProcessType(project as any)) {
+      const facilitatorId = await this.getFacilitatorIdForProject(companyId, projectId);
+      if (facilitatorId) {
+        this.notificationsService
+          .create(
+            'Certificate Uploaded',
+            'GreenCo Team has uploaded the certificate for the project.',
+            'F',
+            facilitatorId,
+          )
+          .catch((e) => console.error('Certificate upload notification to facilitator failed:', e));
+      }
+    }
 
     return {
       status: 'success',
@@ -2962,8 +2977,22 @@ export class CompanyProjectsService {
       MILESTONE_STEPS[23].name,
       'CII',
       'step_completed',
-      { milestoneFlow: 23, assessors: true },
+      { milestoneFlow: 23, assessors: true, facilitator: true },
     );
+
+    if (isFacilitatorProcessType(project as any)) {
+      const facilitatorId = await this.getFacilitatorIdForProject(companyId, projectId);
+      if (facilitatorId) {
+        this.notificationsService
+          .create(
+            'Feedback Report Uploaded',
+            'CII has uploaded the Feedback Report for the project.',
+            'F',
+            facilitatorId,
+          )
+          .catch((e) => console.error('Feedback upload notification to facilitator failed:', e));
+      }
+    }
 
     return {
       status: 'success',
@@ -3355,6 +3384,14 @@ export class CompanyProjectsService {
     const project = await this.projectModel.findById(resolved._id);
     if (!project) {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
+    }
+
+    if (finalSubmit && !(project as any).coordinator_checklist_verified) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Coordinator checklist must be verified before final scoring submission.',
+        code: 'COORDINATOR_CHECKLIST_NOT_VERIFIED',
+      });
     }
 
     const parsed = this.parseAssessmentScoringPayload(body || {});
@@ -10517,7 +10554,8 @@ export class CompanyProjectsService {
 
     // Facilitator flow: notify facilitator when CII uploads proforma/tax invoice
     if (isFacilitatorProcessType(project)) {
-      const invoiceLabel = dto.invoice_type === 'tax' ? 'Tax Invoice' : 'Proforma Invoice';
+      const baseInvoiceLabel = dto.invoice_type === 'tax' ? 'Tax Invoice' : 'Proforma Invoice';
+      const invoiceLabel = currentNext >= 19 ? `2nd ${baseInvoiceLabel}` : baseInvoiceLabel;
       await this.logWorkflowStepNotification(
         projectId,
         companyId,
@@ -10978,9 +11016,11 @@ export class CompanyProjectsService {
     const paymentProject = await this.projectModel.findById(projectId).lean();
     if (paymentProject && isFacilitatorProcessType(paymentProject)) {
       const isReupload = Number((invoice as any).approval_status) === 0 && alreadyPaid > 0;
+      const paymentNext = Number((paymentProject as any).next_activities_id || 0);
+      const invoiceCycleLabel = paymentNext >= 19 ? ' for 2nd Invoice' : '';
       const activityText = isReupload
-        ? 'Facilitator re-uploaded supporting documents – awaiting CII review'
-        : 'Facilitator uploaded supporting documents – awaiting CII review';
+        ? `Facilitator re-uploaded supporting documents${invoiceCycleLabel} – awaiting CII review`
+        : `Facilitator uploaded supporting documents${invoiceCycleLabel} – awaiting CII review`;
       await this.logWorkflowStepNotification(
         projectId,
         companyId,
@@ -11050,7 +11090,9 @@ export class CompanyProjectsService {
     const approvalProject = await this.projectModel.findById(projectId).lean();
     if (approvalProject && isFacilitatorProcessType(approvalProject)) {
       const approvalNum = Number(dto.approval_status);
-      const invoiceType = (invoice as any).invoice_type === 'tax' ? 'Tax Invoice' : 'Proforma Invoice';
+      const approvalNext = Number((approvalProject as any).next_activities_id || 0);
+      const baseInvoiceType = (invoice as any).invoice_type === 'tax' ? 'Tax Invoice' : 'Proforma Invoice';
+      const invoiceType = approvalNext >= 19 ? `2nd ${baseInvoiceType}` : baseInvoiceType;
       if (approvalNum === 1) {
         // Accepted
         await this.logWorkflowStepNotification(
@@ -11061,13 +11103,59 @@ export class CompanyProjectsService {
           'step_completed',
           { facilitator: true, company: true, admin: true },
         ).catch((e) => console.error('[Finance v2] Approval acceptance notification failed:', e?.message || e));
+
+        // Advance milestone: supporting docs accepted → PR done → CII acknowledged → ready for Plaque
+        if (approvalNext >= 19 && approvalNext <= 21) {
+          const project = await this.projectModel.findById(projectId);
+          if (project) {
+            (project as any).next_activities_id = 22;
+            await project.save();
+
+            // Activity: Payment Receipt of 2nd Invoice uploaded (step 20)
+            await this.companyActivityModel.create({
+              company_id: companyId,
+              project_id: projectId,
+              description: MILESTONE_STEPS[20].name,
+              activity_type: 'company',
+              milestone_flow: 20,
+              milestone_completed: true,
+            });
+            await this.logWorkflowStepNotification(
+              projectId, companyId,
+              MILESTONE_STEPS[20].name, 'Company', 'step_completed',
+              { facilitator: true, company: true, admin: true },
+            ).catch((e) => console.error('[Finance v2] PR notification failed:', e?.message || e));
+
+            // Activity: Payment Receipt of 2nd Invoice acknowledged (step 21)
+            await this.companyActivityModel.create({
+              company_id: companyId,
+              project_id: projectId,
+              description: MILESTONE_STEPS[21].name,
+              activity_type: 'cii',
+              milestone_flow: 21,
+              milestone_completed: true,
+            });
+            await this.logWorkflowStepNotification(
+              projectId, companyId,
+              MILESTONE_STEPS[21].name, 'CII', 'step_completed',
+              { facilitator: true, company: true, admin: true },
+            ).catch((e) => console.error('[Finance v2] PR acknowledged notification failed:', e?.message || e));
+
+            // Notify: Plaque & certificate is the next step
+            await this.logWorkflowStepNotification(
+              projectId, companyId,
+              `Next step: ${MILESTONE_STEPS[22].name}`, 'CII', 'step_pending',
+              { facilitator: true, company: true, admin: true },
+            ).catch((e) => console.error('[Finance v2] Plaque pending notification failed:', e?.message || e));
+          }
+        }
       } else if (approvalNum === 2) {
         // Rejected — facilitator must re-upload; loop continues until accepted
         const rejectionRemarks = (invoice as any).remarks ? ` – Remarks: ${(invoice as any).remarks}` : '';
         await this.logWorkflowStepNotification(
           projectId,
           companyId,
-          `CII rejected supporting documents for ${invoiceType}${rejectionRemarks} – Facilitator must re-upload`,
+          `CII rejected supporting documents for ${invoiceType}${rejectionRemarks} – Facilitator needs to re-upload supporting documents`,
           'CII',
           'rejected',
           { facilitator: true, company: true, admin: true },
@@ -11526,6 +11614,20 @@ export class CompanyProjectsService {
 
     (project as any).plaque_details = payload;
     await project.save();
+
+    // Notify facilitator when plaque details are saved
+    const plaqueCompanyId = String((project as any).company_id || '');
+    const plaqueProjectId = String((project as any)._id || '');
+    if (plaqueCompanyId && isFacilitatorProcessType(project as any)) {
+      await this.logWorkflowStepNotification(
+        plaqueProjectId,
+        plaqueCompanyId,
+        'Plaque & certificate details updated by CII',
+        'CII',
+        'step_completed',
+        { facilitator: true, company: true, admin: true },
+      ).catch((e) => console.error('[Plaque] Facilitator notification failed:', e?.message || e));
+    }
 
     return {
       status: 'success',
@@ -16221,6 +16323,21 @@ export class CompanyProjectsService {
       )
       .catch((e) => console.error('Primary data submission notification failed:', e));
 
+    // Facilitator flow: notify facilitator when primary data is submitted
+    if (project && isFacilitatorProcessType(project as any)) {
+      const facilitatorId = await this.getFacilitatorIdForProject(companyId, projectId);
+      if (facilitatorId) {
+        this.notificationsService
+          .create(
+            'Primary Data Submitted',
+            'Company has submitted the Primary Data form. GreenCo Team will review it.',
+            'F',
+            facilitatorId,
+          )
+          .catch((e) => console.error('Primary data submission notification to facilitator failed:', e));
+      }
+    }
+
     const company = await this.companyModel.findById(companyId).lean();
     const pCode = (project as any)?.project_id || projectId;
     await this.logWorkflowStepNotification(
@@ -16276,8 +16393,23 @@ export class CompanyProjectsService {
       'Company re-submitted Primary Form Data Documents',
       'Company',
       'reupload',
-      { assessors: true },
+      { assessors: true, facilitator: true },
     );
+
+    // Facilitator flow: notify facilitator when primary data is re-submitted
+    if (project && isFacilitatorProcessType(project as any)) {
+      const facilitatorId = await this.getFacilitatorIdForProject(companyId, projectId);
+      if (facilitatorId) {
+        this.notificationsService
+          .create(
+            'Primary Data Re-Submitted',
+            'Company has re-submitted the Primary Data Documents. GreenCo Team will review it.',
+            'F',
+            facilitatorId,
+          )
+          .catch((e) => console.error('Primary data re-submission notification to facilitator failed:', e));
+      }
+    }
 
     return { status: 'success', message: 'Success! Primary Data Documents Uploaded Successfully!' };
   }
