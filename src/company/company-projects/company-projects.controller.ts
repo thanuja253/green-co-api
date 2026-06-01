@@ -8,6 +8,7 @@ import {
   Patch,
   Post,
   Put,
+  Query,
   Request,
   Res,
   UseGuards,
@@ -65,6 +66,7 @@ import {
 import {
   LaunchTrainingSessionFiles,
   addLaunchTrainingSessionFromMultipart,
+  launchTrainingLegacyDocumentUploadInterceptor,
   launchTrainingSessionUploadInterceptor,
 } from './launch-training-session-upload.config';
 
@@ -538,6 +540,38 @@ export class CompanyProjectsController {
       mergedFiles,
       isUpdate ? { isUpdate: true, skipMilestone: true } : undefined,
     );
+  }
+
+  @Get(':projectId/registration-info/check-tax-ids')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
+  async checkRegistrationTaxIds(
+    @Request() req,
+    @Param('projectId') projectId: string,
+    @Query('pan') pan?: string,
+    @Query('gstin') gstin?: string,
+    @Query('tan') tan?: string,
+  ): Promise<any> {
+    return this.companyProjectsService.checkRegistrationTaxIds(req.user.userId, projectId, {
+      pan,
+      gstin,
+      tan,
+    });
+  }
+
+  @Get(':projectId/facilitator-registration-info/check-tax-ids')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
+  async checkFacilitatorRegistrationTaxIds(
+    @Request() req,
+    @Param('projectId') projectId: string,
+    @Query('pan') pan?: string,
+    @Query('gstin') gstin?: string,
+    @Query('tan') tan?: string,
+  ): Promise<any> {
+    return this.companyProjectsService.checkRegistrationTaxIds(req.user.userId, projectId, {
+      pan,
+      gstin,
+      tan,
+    });
   }
 
   @Get(':projectId/registration-info')
@@ -1132,50 +1166,7 @@ export class CompanyProjectsController {
    */
   @Post(':projectId/launch-and-training-document')
   @UseGuards(JwtAuthGuard, AccountStatusGuard)
-  @UseInterceptors(
-    FileInterceptor('launch_upload', {
-      storage: diskStorage({
-        destination: (req, file, cb) => {
-          const companyId = (req as any).user?.userId;
-          if (!companyId) {
-            cb(new Error('Unauthorized'), '');
-            return;
-          }
-          const uploadPath = join(
-            process.cwd(),
-            'uploads',
-            'companyproject',
-            'launchAndTraining',
-            companyId,
-          );
-          if (!fs.existsSync(uploadPath)) {
-            fs.mkdirSync(uploadPath, { recursive: true });
-          }
-          cb(null, uploadPath);
-        },
-        filename: (req, file, cb) => {
-          const now = new Date();
-          const ymdhis =
-            now.getFullYear() +
-            String(now.getMonth() + 1).padStart(2, '0') +
-            String(now.getDate()).padStart(2, '0') +
-            String(now.getHours()).padStart(2, '0') +
-            String(now.getMinutes()).padStart(2, '0') +
-            String(now.getSeconds()).padStart(2, '0');
-          const filename = `${ymdhis}_${file.originalname}`;
-          cb(null, filename);
-        },
-      }),
-      limits: { fileSize: 10 * 1024 * 1024 },
-      fileFilter: (req, file, cb) => {
-        if (file.mimetype === 'application/pdf') {
-          cb(null, true);
-        } else {
-          cb(new Error('Invalid file type. Only PDF files are allowed.'), false);
-        }
-      },
-    }),
-  )
+  @UseInterceptors(launchTrainingLegacyDocumentUploadInterceptor())
   @UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
   async uploadLaunchAndTraining(
     @Request() req,

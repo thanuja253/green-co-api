@@ -9,6 +9,7 @@ import { NotificationsModule } from './company/notifications/notifications.modul
 import { FacilitatorsModule } from './company/facilitators/facilitators.module';
 import { RegistrationMastersModule } from './company/registration-masters/registration-masters.module';
 import { MailModule } from './mail/mail.module';
+import { StorageModule } from './storage/storage.module';
 import { HelpDeskModule } from './company/help-desk/help-desk.module';
 import { RoleManagementModule } from './company/role-management/role-management.module';
 import { StaffManagementModule } from './company/staff-management/staff-management.module';
@@ -46,6 +47,7 @@ import { ScheduleModule } from '@nestjs/schedule';
     FacilitatorsModule,
     RegistrationMastersModule,
     MailModule,
+    StorageModule,
     HelpDeskModule,
     RoleManagementModule,
     StaffManagementModule,

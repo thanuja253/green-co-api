@@ -13,14 +13,11 @@ import {
   UsePipes,
   ValidationPipe,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
-import { diskStorage } from 'multer';
-import { join } from 'node:path';
-import * as fs from 'node:fs';
 import { CompanyProjectsService } from './company-projects.service';
 import { UploadLaunchAndTrainingDto } from './dto/upload-launch-and-training.dto';
 import {
   LaunchTrainingSessionFiles,
+  launchTrainingLegacyDocumentUploadInterceptor,
   launchTrainingSessionUploadInterceptor,
 } from './launch-training-session-upload.config';
 import { FacilitatorJwtAuthGuard } from '../facilitator-auth/guards/facilitator-jwt-auth.guard';
@@ -120,42 +117,7 @@ export class FacilitatorLaunchTrainingController {
 
   @Post(':projectId/launch-and-training-document')
   @UseGuards(FacilitatorJwtAuthGuard, FacilitatorAccountStatusGuard)
-  @UseInterceptors(
-    FileInterceptor('launch_upload', {
-      storage: diskStorage({
-        destination: (req, file, cb) => {
-          const pid = (req as any).params?.projectId || '_';
-          const uploadPath = join(
-            process.cwd(),
-            'uploads',
-            'companyproject',
-            'launchAndTraining',
-            pid,
-          );
-          if (!fs.existsSync(uploadPath)) {
-            fs.mkdirSync(uploadPath, { recursive: true });
-          }
-          cb(null, uploadPath);
-        },
-        filename: (req, file, cb) => {
-          const now = new Date();
-          const ymdhis =
-            now.getFullYear() +
-            String(now.getMonth() + 1).padStart(2, '0') +
-            String(now.getDate()).padStart(2, '0') +
-            String(now.getHours()).padStart(2, '0') +
-            String(now.getMinutes()).padStart(2, '0') +
-            String(now.getSeconds()).padStart(2, '0');
-          cb(null, `${ymdhis}_${file.originalname}`);
-        },
-      }),
-      limits: { fileSize: 10 * 1024 * 1024 },
-      fileFilter: (req, file, cb) => {
-        if (file.mimetype === 'application/pdf') cb(null, true);
-        else cb(new Error('Invalid file type. Only PDF files are allowed.'), false);
-      },
-    }),
-  )
+  @UseInterceptors(launchTrainingLegacyDocumentUploadInterceptor())
   @UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
   async uploadLaunchAndTrainingDocument(
     @Request() req,

@@ -45,6 +45,11 @@ import {
   MasterChecklistSectorDocument,
 } from '../schemas/master-checklist-sector.schema';
 import { RegistrationInfoDto } from './dto/registration-info.dto';
+import {
+  extractRegistrationTaxIdsFromDto,
+  findRegistrationTaxIdConflicts,
+  throwIfRegistrationTaxIdConflicts,
+} from './registration-tax-id-uniqueness';
 import { SubmitPaymentDto } from './dto/submit-payment.dto';
 import { UpdateInvoiceApprovalDto } from './dto/update-invoice-approval.dto';
 import { CreateProformaInvoiceV2Dto } from './dto/create-proforma-invoice-v2.dto';
@@ -83,6 +88,7 @@ import {
 } from '../notifications/workflow-milestone.constants';
 import { WorkflowNotificationMeta } from '../notifications/workflow-notification.types';
 import { MailService } from '../../mail/mail.service';
+import { StorageService } from '../../storage/storage.service';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import * as bcrypt from 'bcrypt';
 import { lookupIfscDetails } from '../../common/ifsc-lookup.util';
@@ -524,6 +530,7 @@ export class CompanyProjectsService {
     @InjectConnection() private readonly mongoConnection: Connection,
     private readonly notificationsService: NotificationsService,
     private readonly mailService: MailService,
+    private readonly storageService: StorageService,
   ) {}
 
   private calculateTentativeLevel(percentage: number): string {
@@ -4125,8 +4132,19 @@ export class CompanyProjectsService {
       delete normalizedData.gstin_no;
     }
 
-    // Handle file uploads
     const prevReg = (project.registration_info || {}) as Record<string, unknown>;
+    const taxIdsToValidate = extractRegistrationTaxIdsFromDto({
+      ...prevReg,
+      ...normalizedData,
+    });
+    const taxIdConflicts = await findRegistrationTaxIdConflicts(this.projectModel, {
+      excludeProjectId: projectId,
+      excludeCompanyId: companyId,
+      ...taxIdsToValidate,
+    });
+    throwIfRegistrationTaxIdConflicts(taxIdConflicts);
+
+    // Handle file uploads
     const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-04z5.onrender.com';
     console.log('[Registration Info Service] Processing files:', {
       hasFiles: !!files,
@@ -4343,6 +4361,68 @@ export class CompanyProjectsService {
     }
 
     return response;
+  }
+
+  async checkRegistrationTaxIds(
+    companyId: string,
+    projectId: string,
+    query: { pan?: string; gstin?: string; tan?: string },
+  ) {
+    if (!companyId || !projectId) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Missing company or project context',
+      });
+    }
+    if (!Types.ObjectId.isValid(projectId)) {
+      throw new BadRequestException({
+        status: 'error',
+        message: 'Invalid project id',
+      });
+    }
+
+    const project = await this.projectModel
+      .findOne({
+        _id: new Types.ObjectId(projectId),
+        company_id: new Types.ObjectId(companyId),
+      })
+      .select('_id company_id registration_info')
+      .lean();
+    if (!project) {
+      throw new NotFoundException({
+        status: 'error',
+        message: 'Project not found',
+      });
+    }
+
+    const prevReg = (project.registration_info || {}) as Record<string, unknown>;
+    const taxIdsToValidate = extractRegistrationTaxIdsFromDto({
+      ...prevReg,
+      pan: query.pan,
+      pan_no: query.pan,
+      gstin: query.gstin,
+      gstin_no: query.gstin,
+      tan: query.tan,
+      tan_no: query.tan,
+    });
+    const conflicts = await findRegistrationTaxIdConflicts(this.projectModel, {
+      excludeProjectId: projectId,
+      excludeCompanyId: companyId,
+      ...taxIdsToValidate,
+    });
+
+    const errors: Record<string, string> = {};
+    for (const c of conflicts) {
+      errors[c.errorKey] = c.message;
+    }
+
+    return {
+      status: 'success',
+      data: {
+        valid: conflicts.length === 0,
+        errors,
+      },
+    };
   }
 
   async saveFacilitatorRegistrationInfo(
@@ -9110,14 +9190,9 @@ export class CompanyProjectsService {
   private formatLaunchTrainingSessionForResponse(
     s: { relative_path: string; original_filename?: string; session_date?: Date; uploaded_at?: Date },
     index1: number,
-    baseUrl: string,
   ) {
     const docPath = s.relative_path;
-    const documentUrl = docPath
-      ? docPath.startsWith('http')
-        ? docPath
-        : `${baseUrl}/${docPath.replace(/^\//, '')}`
-      : null;
+    const documentUrl = this.storageService.resolvePublicUrl(docPath);
     return {
       session_index: index1,
       document_url: documentUrl,
@@ -9147,13 +9222,8 @@ export class CompanyProjectsService {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
     const projectAny = project as any;
-    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-04z5.onrender.com';
     const docPath = projectAny.launch_training_document;
-    const legacyDocumentUrl = docPath
-      ? docPath.startsWith('http')
-        ? docPath
-        : `${baseUrl}/${docPath.replace(/^\//, '')}`
-      : null;
+    const legacyDocumentUrl = this.storageService.resolvePublicUrl(docPath);
     const legacyReportDate = projectAny.launch_training_report_date
       ? typeof projectAny.launch_training_report_date === 'string'
         ? projectAny.launch_training_report_date
@@ -9164,7 +9234,7 @@ export class CompanyProjectsService {
       ? projectAny.launch_training_sessions
       : [];
     const sessions = rawSessions.map((s: any, idx: number) =>
-      this.formatLaunchTrainingSessionForResponse(s, idx + 1, baseUrl),
+      this.formatLaunchTrainingSessionForResponse(s, idx + 1),
     );
 
     return {
@@ -9313,7 +9383,7 @@ export class CompanyProjectsService {
       });
     }
 
-    const relativePath = `uploads/companyproject/launchAndTraining/${projectId}/${file.filename}`;
+    const relativePath = await this.storageService.saveLaunchTrainingSessionFile(projectId, file);
     const sessionDate = sessionDateRaw
       ? (() => {
           const d = new Date(sessionDateRaw);
@@ -9331,8 +9401,7 @@ export class CompanyProjectsService {
     (project as any).launch_training_sessions = existing;
     await project.save();
 
-    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com';
-    const fullUrl = `${baseUrl}/${relativePath.replace(/^\//, '')}`;
+    const documentUrl = this.storageService.resolvePublicUrl(relativePath);
 
     const company = await this.companyModel.findById(companyId).lean();
     this.notificationsService
@@ -9378,8 +9447,8 @@ export class CompanyProjectsService {
         project_id: projectId,
         sessions_count: existing.length,
         max_sessions: CompanyProjectsService.MAX_LAUNCH_TRAINING_SESSIONS,
-        session: this.formatLaunchTrainingSessionForResponse(entry, existing.length, baseUrl),
-        document_url: fullUrl,
+        session: this.formatLaunchTrainingSessionForResponse(entry, existing.length),
+        document_url: documentUrl,
       },
     };
   }
@@ -12669,7 +12738,7 @@ export class CompanyProjectsService {
 
   /**
    * Upload Launch And Training (Site Visit Report) – consultant/facilitator upload.
-   * Saves to uploads/companyproject/launchAndTraining/{company_id}/, updates companies_projects,
+   * Saves to uploads/companyproject/launchAndTraining/{projectId}/ (S3 when configured), updates companies_projects,
    * and logs activity 63 (Consultant Uploaded Site Visit Report).
    */
   async uploadLaunchAndTraining(
@@ -12690,9 +12759,8 @@ export class CompanyProjectsService {
       });
     }
 
-    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-04z5.onrender.com';
-    const relativePath = `uploads/companyproject/launchAndTraining/${companyId}/${file.filename}`;
-    const fullUrl = `${baseUrl}/${relativePath}`;
+    const relativePath = await this.storageService.saveLegacyLaunchTrainingFile(projectId, file);
+    const documentUrl = this.storageService.resolvePublicUrl(relativePath);
 
     const reportDate = launchTrainingReportDate
       ? (() => {
@@ -12737,7 +12805,7 @@ export class CompanyProjectsService {
       status: 'success',
       message: 'Launch And Training Program uploaded Successfully!',
       data: {
-        document_url: fullUrl,
+        document_url: documentUrl,
         document_filename: file.originalname,
         project_id: projectId,
         launch_training_report_date: reportDate?.toISOString?.() ?? launchTrainingReportDate ?? null,
@@ -12763,9 +12831,11 @@ export class CompanyProjectsService {
       });
     }
 
-    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com';
-    const relativePath = `uploads/companyproject/launchAndTraining/${resolved.projectId}/${file.filename}`;
-    const fullUrl = `${baseUrl}/${relativePath}`;
+    const relativePath = await this.storageService.saveLegacyLaunchTrainingFile(
+      resolved.projectId,
+      file,
+    );
+    const documentUrl = this.storageService.resolvePublicUrl(relativePath);
     const reportDate = launchTrainingReportDate
       ? (() => {
           const d = new Date(launchTrainingReportDate);
@@ -12807,7 +12877,7 @@ export class CompanyProjectsService {
       status: 'success',
       message: 'Launch And Training Program uploaded Successfully!',
       data: {
-        document_url: fullUrl,
+        document_url: documentUrl,
         document_filename: file.originalname,
         project_id: resolved.projectId,
         launch_training_report_date: reportDate?.toISOString?.() ?? launchTrainingReportDate ?? null,

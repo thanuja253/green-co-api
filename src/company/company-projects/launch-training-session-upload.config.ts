@@ -1,8 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
-import { FileFieldsInterceptor } from '@nestjs/platform-express';
-import { diskStorage } from 'multer';
-import { extname, join } from 'path';
-import * as fs from 'fs';
+import { FileFieldsInterceptor, FileInterceptor } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
 import type { CompanyProjectsService } from './company-projects.service';
 import type { UploadLaunchAndTrainingDto } from './dto/upload-launch-and-training.dto';
 
@@ -16,6 +14,21 @@ export type LaunchTrainingSessionFiles = {
   launch_upload?: Express.Multer.File[];
 };
 
+/** Legacy consultant site-visit upload (`launch_upload` field, PDF only). Buffered for S3 PutObject. */
+export function launchTrainingLegacyDocumentUploadInterceptor() {
+  return FileInterceptor('launch_upload', {
+    storage: memoryStorage(),
+    limits: { fileSize: 10 * 1024 * 1024 },
+    fileFilter: (_req, file, cb) => {
+      if (file.mimetype === 'application/pdf') {
+        cb(null, true);
+        return;
+      }
+      cb(new BadRequestException('Invalid file type. Only PDF files are allowed.'), false);
+    },
+  });
+}
+
 export function launchTrainingSessionUploadInterceptor() {
   return FileFieldsInterceptor(
     [
@@ -27,27 +40,7 @@ export function launchTrainingSessionUploadInterceptor() {
       { name: 'launch_upload', maxCount: 1 },
     ],
     {
-      storage: diskStorage({
-        destination: (req, file, cb) => {
-          const pid = (req as { params?: { projectId?: string } }).params?.projectId;
-          const uploadPath = join(
-            process.cwd(),
-            'uploads',
-            'companyproject',
-            'launchAndTraining',
-            pid || '_',
-          );
-          if (!fs.existsSync(uploadPath)) {
-            fs.mkdirSync(uploadPath, { recursive: true });
-          }
-          cb(null, uploadPath);
-        },
-        filename: (req, file, cb) => {
-          const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-          cb(null, `launch-session-${unique}${extname(file.originalname)}`);
-        },
-      }),
-      limits: { fileSize: 10 * 1024 * 1024 },
+      storage: memoryStorage(),
       fileFilter: (req, file, cb) => {
         const ok = [
           'application/pdf',
@@ -56,9 +49,13 @@ export function launchTrainingSessionUploadInterceptor() {
           'image/jpg',
           'image/webp',
         ].includes(file.mimetype);
-        if (ok) cb(null, true);
-        else cb(new BadRequestException('Only PDF or image files are allowed.'), false);
+        if (!ok) {
+          cb(new BadRequestException('Only PDF or image files are allowed.'), false);
+          return;
+        }
+        cb(null, true);
       },
+      limits: { fileSize: 10 * 1024 * 1024 },
     },
   );
 }
