@@ -111,7 +111,9 @@ export class RoleManagementService implements OnModuleInit {
       });
     }
 
-    const permissionIds = this.normalizePermissionIds(dto.permissions);
+    const permissionIds = this.normalizePermissionIds(
+      (dto.permissions as any) ?? (dto.permission_ids as any) ?? (dto.permission as any),
+    );
     if (!permissionIds.length) {
       throw new BadRequestException({
         status: 'error',

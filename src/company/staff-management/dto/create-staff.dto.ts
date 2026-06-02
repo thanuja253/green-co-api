@@ -1,8 +1,16 @@
+import { Transform } from 'class-transformer';
 import { IsEmail, IsOptional, IsString } from 'class-validator';
 
 export class CreateStaffDto {
+  @Transform(({ value }) => (value == null ? value : String(value)))
   @IsString()
   employee_code: string;
+
+  /** Legacy payload key used by some admin UIs. */
+  @IsOptional()
+  @Transform(({ value }) => (value == null ? value : String(value)))
+  @IsString()
+  employeecode?: string;
 
   @IsString()
   name: string;

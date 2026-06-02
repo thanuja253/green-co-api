@@ -59,7 +59,7 @@ export class StaffManagementService {
   }
 
   async createStaff(dto: CreateStaffDto) {
-    const employeeCode = (dto.employee_code || '').trim();
+    const employeeCode = (dto.employee_code || dto.employeecode || '').trim();
     const name = (dto.name || '').trim();
     const email = (dto.email || '').trim().toLowerCase();
     const mobile = (dto.mobile || dto.mobile_number || '').trim();
@@ -114,6 +114,16 @@ export class StaffManagementService {
       throw new BadRequestException({
         status: 'validations',
         errors: { mobile: ['The mobile has already been taken.'] },
+      });
+    }
+
+    const existingName = await this.staffModel
+      .findOne({ name: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') })
+      .lean();
+    if (existingName) {
+      throw new BadRequestException({
+        status: 'validations',
+        errors: { name: ['The name has already been taken.'] },
       });
     }
 
