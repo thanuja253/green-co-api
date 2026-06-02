@@ -74,6 +74,13 @@ export class AdminJwtAuthGuard implements CanActivate {
     if (/^\/?admin\/group_data$/i.test(path)) {
       return true;
     }
+    // Sector datatable legacy endpoint — public (frontend without admin token).
+    if (/^\/?api\/admin\/sector_data$/i.test(path)) {
+      return true;
+    }
+    if (/^\/?admin\/sector_data$/i.test(path)) {
+      return true;
+    }
     // Masters industries list — public (used by frontend without admin token).
     if (/^\/?api\/admin\/masters\/industries$/i.test(path)) {
       return true;
