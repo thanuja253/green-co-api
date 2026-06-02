@@ -96,11 +96,19 @@ export class AdminJwtAuthGuard implements CanActivate {
     if (/^\/?admin\/dashboard\/(registration-summary|enrollment-summary|growth-trends|certification-distribution|pipeline-by-stage|company-status-overview|recent-activity|inert-companies|assessor-facilitator)$/i.test(path)) {
       return true;
     }
-    // Role/staff admin UI — public list + form metadata (frontend without admin token).
-    if (/^\/?api\/admin\/(roles_data|staff_data|permissions|staff\/form-data)$/i.test(path)) {
+    // Role/staff admin UI — public list, form metadata, create (frontend without admin token).
+    if (
+      /^\/?api\/admin\/(roles_data|staff_data|permissions|staff\/form-data|staff|roles|staff\/create|roles\/create)$/i.test(
+        path,
+      )
+    ) {
       return true;
     }
-    if (/^\/?admin\/(roles_data|staff_data|permissions|staff\/form-data)$/i.test(path)) {
+    if (
+      /^\/?admin\/(roles_data|staff_data|permissions|staff\/form-data|staff|roles|staff\/create|roles\/create)$/i.test(
+        path,
+      )
+    ) {
       return true;
     }
     // Legacy data list (not :id or /import).

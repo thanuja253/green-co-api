@@ -19,6 +19,7 @@ import { SectorManagementModule } from './company/sector-management/sector-manag
 import { ParameterManagementModule } from './company/parameter-management/parameter-management.module';
 import { CreditManagementModule } from './company/credit-management/credit-management.module';
 import { AssessmentChecklistDocumentsModule } from './company/assessment-checklist-documents/assessment-checklist-documents.module';
+import { ChecklistVersioningModule } from './company/checklist-versioning/checklist-versioning.module';
 import { AppController } from './app.controller';
 import { ScheduleModule } from '@nestjs/schedule';
 
@@ -57,6 +58,7 @@ import { ScheduleModule } from '@nestjs/schedule';
     ParameterManagementModule,
     CreditManagementModule,
     AssessmentChecklistDocumentsModule,
+    ChecklistVersioningModule,
   ],
   controllers: [AppController],
 })

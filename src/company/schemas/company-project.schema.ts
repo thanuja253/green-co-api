@@ -150,6 +150,10 @@ export class CompanyProject {
   @Prop()
   checklist_version_number?: number;
 
+  /** When true, checklist_version_id cannot be changed (SOW version lock). */
+  @Prop({ default: false })
+  version_locked?: boolean;
+
   /** Whether coordinator has verified the project checklist. */
   @Prop({ default: false })
   coordinator_checklist_verified?: boolean;

@@ -16,10 +16,22 @@ export class MasterChecklistSector {
   @Prop({ required: true, index: true })
   group_id: string;
 
+  /** When set, parameter mapping applies only to this checklist version. */
+  @Prop({ index: true })
+  checklist_version_id?: string;
+
   @Prop()
   from_date?: Date;
 }
 
 export const MasterChecklistSectorSchema =
   SchemaFactory.createForClass(MasterChecklistSector);
-MasterChecklistSectorSchema.index({ criterian_id: 1, group_id: 1 }, { unique: true });
+// Non-unique: multiple rows per group when checklist_version_id differs.
+MasterChecklistSectorSchema.index({ criterian_id: 1, group_id: 1 });
+MasterChecklistSectorSchema.index(
+  { criterian_id: 1, group_id: 1, checklist_version_id: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { checklist_version_id: { $type: 'string' } },
+  },
+);

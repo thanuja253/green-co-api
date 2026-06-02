@@ -8,6 +8,7 @@ import { CompanyProject, CompanyProjectDocument } from '../schemas/company-proje
 import { CompanyWorkOrder, CompanyWorkOrderDocument } from '../schemas/company-workorder.schema';
 import { CreateGroupDto } from './dto/create-group.dto';
 import { ListGroupsQueryDto } from './dto/list-groups-query.dto';
+import { ChecklistVersioningService } from '../checklist-versioning/checklist-versioning.service';
 
 @Injectable()
 export class GroupManagementService {
@@ -28,6 +29,7 @@ export class GroupManagementService {
     private readonly projectModel: Model<CompanyProjectDocument>,
     @InjectModel(CompanyWorkOrder.name)
     private readonly companyWorkOrderModel: Model<CompanyWorkOrderDocument>,
+    private readonly checklistVersioningService: ChecklistVersioningService,
   ) {}
 
   private toAbsoluteFileUrl(path?: string): string {
@@ -157,6 +159,13 @@ export class GroupManagementService {
       status: this.resolveStatus(payload),
       sample_document: sampleDocumentPath || '',
     });
+
+    const groupId = String((created as any)._id);
+    await this.checklistVersioningService
+      .ensureInitialVersionForGroup(groupId, sampleDocumentPath || '')
+      .catch((err) =>
+        console.error('[Group] Initial checklist version V1 failed:', err?.message || err),
+      );
 
     return {
       status: 'success',

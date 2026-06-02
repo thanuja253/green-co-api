@@ -25,6 +25,13 @@ export class CreditManagement {
 
   @Prop({ default: '1', trim: true })
   status: string;
+
+  /** Optional: scope credit/scoring row to a group checklist version. */
+  @Prop({ index: true })
+  group_id?: string;
+
+  @Prop({ index: true })
+  checklist_version_id?: string;
 }
 
 export const CreditManagementSchema = SchemaFactory.createForClass(CreditManagement);

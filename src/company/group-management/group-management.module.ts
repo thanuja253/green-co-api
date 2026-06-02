@@ -7,9 +7,11 @@ import { Sector, SectorSchema } from '../schemas/sector.schema';
 import { Company, CompanySchema } from '../schemas/company.schema';
 import { CompanyProject, CompanyProjectSchema } from '../schemas/company-project.schema';
 import { CompanyWorkOrder, CompanyWorkOrderSchema } from '../schemas/company-workorder.schema';
+import { ChecklistVersioningModule } from '../checklist-versioning/checklist-versioning.module';
 
 @Module({
   imports: [
+    ChecklistVersioningModule,
     MongooseModule.forFeature([
       { name: GroupManagement.name, schema: GroupManagementSchema },
       { name: Sector.name, schema: SectorSchema },
