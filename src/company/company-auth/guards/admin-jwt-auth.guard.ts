@@ -67,6 +67,13 @@ export class AdminJwtAuthGuard implements CanActivate {
     if (/^\/?admin\/facilitators$/i.test(path)) {
       return true;
     }
+    // Group datatable legacy endpoint — public (used by frontend without admin token).
+    if (/^\/?api\/admin\/group_data$/i.test(path)) {
+      return true;
+    }
+    if (/^\/?admin\/group_data$/i.test(path)) {
+      return true;
+    }
     const authHeader = req.headers?.authorization || req.headers?.Authorization;
     const token = this.extractBearerToken(authHeader);
 
