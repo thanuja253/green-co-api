@@ -1,23 +1,46 @@
-import { Transform } from 'class-transformer';
-import { IsEmail, IsNotEmpty, IsOptional, IsString } from 'class-validator';
+import { Expose, Transform } from 'class-transformer';
+import {
+  IsEmail,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  Validate,
+  ValidationArguments,
+  ValidatorConstraint,
+  ValidatorConstraintInterface,
+} from 'class-validator';
 
 function toTrimmedString(value: unknown): string {
   if (value === undefined || value === null) return '';
   return String(value).trim();
 }
 
+/** Runs after transforms; accepts `employee_code` or `employeecode` on the raw body. */
+@ValidatorConstraint({ name: 'hasEmployeeCode', async: false })
+class HasEmployeeCodeConstraint implements ValidatorConstraintInterface {
+  validate(_value: unknown, args: ValidationArguments) {
+    const o = args.object as Record<string, unknown>;
+    return toTrimmedString(o.employee_code ?? o.employeecode).length > 0;
+  }
+
+  defaultMessage() {
+    return 'The employee code field is required.';
+  }
+}
+
 export class CreateStaffDto {
   /**
-   * Accepts `employee_code`, `employeecode`, or legacy numeric values (coerced to string).
+   * Maps JSON key `employeecode` → `employee_code` (class-transformer skips @Transform when the target key is absent).
    */
-  @Transform(({ obj, value }) =>
-    toTrimmedString(value ?? obj?.employeecode ?? obj?.employee_code),
+  @Expose({ name: 'employeecode' })
+  @Transform(({ value, obj }) =>
+    toTrimmedString(value ?? obj?.employee_code ?? obj?.employeecode),
   )
+  @Validate(HasEmployeeCodeConstraint)
   @IsString()
   @IsNotEmpty({ message: 'The employee code field is required.' })
   employee_code: string;
 
-  /** Legacy key — whitelisted; value is merged into employee_code above. */
   @IsOptional()
   employeecode?: string | number;
 
@@ -30,8 +53,9 @@ export class CreateStaffDto {
   @IsEmail()
   email: string;
 
+  @Expose({ name: 'mobile' })
   @IsOptional()
-  @Transform(({ obj, value }) =>
+  @Transform(({ value, obj }) =>
     toTrimmedString(value ?? obj?.mobile ?? obj?.mobile_number),
   )
   @IsString()
