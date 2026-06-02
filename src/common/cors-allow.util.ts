@@ -39,7 +39,8 @@ export function getAllowedCorsOrigin(origin: string | undefined): string | false
 
   const allowed = new Set([...defaultOrigins, ...envOrigins]);
   if (allowed.has(origin)) return origin;
-  if (/^https:\/\/[a-z0-9-]+\.vercel\.app$/i.test(origin)) return origin;
+  // Some browsers/proxies may append a port in the Origin header (rare, but breaks strict regexes).
+  if (/^https:\/\/[a-z0-9-]+\.vercel\.app(?::\d+)?$/i.test(origin)) return origin;
   if (origin.startsWith('http://localhost:') || origin.startsWith('https://localhost:'))
     return origin;
   if (origin.startsWith('http://127.0.0.1:') || origin.startsWith('https://127.0.0.1:'))
