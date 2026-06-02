@@ -59,11 +59,13 @@ export class StaffManagementService {
   }
 
   async createStaff(dto: CreateStaffDto) {
-    const employeeCode = (dto.employee_code || dto.employeecode || '').trim();
-    const name = (dto.name || '').trim();
-    const email = (dto.email || '').trim().toLowerCase();
-    const mobile = (dto.mobile || dto.mobile_number || '').trim();
-    const address = (dto.address || '').trim();
+    const employeeCode = String(dto.employee_code ?? dto.employeecode ?? '').trim();
+    const name = String(dto.name ?? '').trim();
+    const email = String(dto.email ?? '')
+      .trim()
+      .toLowerCase();
+    const mobile = String(dto.mobile ?? dto.mobile_number ?? '').trim();
+    const address = String(dto.address ?? '').trim();
     const roleId = this.resolveRoleId(dto.role ?? dto.role_id);
     const status = String(dto.status ?? '1').trim();
 

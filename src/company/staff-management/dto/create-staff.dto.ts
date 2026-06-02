@@ -1,35 +1,50 @@
 import { Transform } from 'class-transformer';
-import { IsEmail, IsOptional, IsString } from 'class-validator';
+import { IsEmail, IsNotEmpty, IsOptional, IsString } from 'class-validator';
+
+function toTrimmedString(value: unknown): string {
+  if (value === undefined || value === null) return '';
+  return String(value).trim();
+}
 
 export class CreateStaffDto {
-  @Transform(({ value }) => (value == null ? value : String(value)))
+  /**
+   * Accepts `employee_code`, `employeecode`, or legacy numeric values (coerced to string).
+   */
+  @Transform(({ obj, value }) =>
+    toTrimmedString(value ?? obj?.employeecode ?? obj?.employee_code),
+  )
   @IsString()
+  @IsNotEmpty({ message: 'The employee code field is required.' })
   employee_code: string;
 
-  /** Legacy payload key used by some admin UIs. */
+  /** Legacy key — whitelisted; value is merged into employee_code above. */
   @IsOptional()
-  @Transform(({ value }) => (value == null ? value : String(value)))
-  @IsString()
-  employeecode?: string;
+  employeecode?: string | number;
 
+  @Transform(({ value }) => toTrimmedString(value))
   @IsString()
+  @IsNotEmpty({ message: 'The name field is required.' })
   name: string;
 
+  @Transform(({ value }) => toTrimmedString(value).toLowerCase())
   @IsEmail()
   email: string;
 
   @IsOptional()
+  @Transform(({ obj, value }) =>
+    toTrimmedString(value ?? obj?.mobile ?? obj?.mobile_number),
+  )
   @IsString()
   mobile_number?: string;
 
   @IsOptional()
-  @IsString()
-  mobile?: string;
+  mobile?: string | number;
 
   @IsOptional()
   role?: string | number | Array<string | number>;
 
   @IsOptional()
+  @Transform(({ value }) => toTrimmedString(value))
   @IsString()
   role_id?: string;
 
@@ -37,16 +52,17 @@ export class CreateStaffDto {
   @IsString()
   role_name?: string;
 
-  @IsOptional()
+  @Transform(({ value }) => toTrimmedString(value))
   @IsString()
-  address?: string;
+  @IsNotEmpty({ message: 'The address field is required.' })
+  address: string;
 
   @IsOptional()
   @IsString()
   designation?: string;
 
   @IsOptional()
+  @Transform(({ value }) => toTrimmedString(value))
   @IsString()
   status?: string;
 }
-
