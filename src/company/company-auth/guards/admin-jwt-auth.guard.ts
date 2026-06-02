@@ -89,6 +89,26 @@ export class AdminJwtAuthGuard implements CanActivate {
     if (/^\/?admin\/dashboard\/(registration-summary|enrollment-summary|growth-trends|certification-distribution|pipeline-by-stage|company-status-overview|recent-activity|inert-companies|assessor-facilitator)$/i.test(path)) {
       return true;
     }
+    // Role/staff admin UI — public list + form metadata (frontend without admin token).
+    if (/^\/?api\/admin\/(roles_data|staff_data|permissions|staff\/form-data)$/i.test(path)) {
+      return true;
+    }
+    if (/^\/?admin\/(roles_data|staff_data|permissions|staff\/form-data)$/i.test(path)) {
+      return true;
+    }
+    // Legacy data list (not :id or /import).
+    if (/^\/?api\/admin\/legacyData$/i.test(path)) {
+      return true;
+    }
+    if (/^\/?admin\/legacyData$/i.test(path)) {
+      return true;
+    }
+    if (/^\/?api\/admin\/legacy-data$/i.test(path)) {
+      return true;
+    }
+    if (/^\/?admin\/legacy-data$/i.test(path)) {
+      return true;
+    }
     const authHeader = req.headers?.authorization || req.headers?.Authorization;
     const token = this.extractBearerToken(authHeader);
 
