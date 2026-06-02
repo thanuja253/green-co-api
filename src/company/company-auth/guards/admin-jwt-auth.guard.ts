@@ -83,10 +83,10 @@ export class AdminJwtAuthGuard implements CanActivate {
     }
     // Admin dashboard read endpoints — public (frontend loads these without admin token).
     // Note: these are GETs and are read-only aggregation endpoints.
-    if (/^\/?api\/admin\/dashboard\/(registration-summary|enrollment-summary|growth-trends|certification-distribution|pipeline-by-stage|company-status-overview|recent-activity)$/i.test(path)) {
+    if (/^\/?api\/admin\/dashboard\/(registration-summary|enrollment-summary|growth-trends|certification-distribution|pipeline-by-stage|company-status-overview|recent-activity|inert-companies)$/i.test(path)) {
       return true;
     }
-    if (/^\/?admin\/dashboard\/(registration-summary|enrollment-summary|growth-trends|certification-distribution|pipeline-by-stage|company-status-overview|recent-activity)$/i.test(path)) {
+    if (/^\/?admin\/dashboard\/(registration-summary|enrollment-summary|growth-trends|certification-distribution|pipeline-by-stage|company-status-overview|recent-activity|inert-companies)$/i.test(path)) {
       return true;
     }
     const authHeader = req.headers?.authorization || req.headers?.Authorization;
