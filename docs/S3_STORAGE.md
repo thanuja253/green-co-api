@@ -1,6 +1,8 @@
-# S3 storage (Launch & Training)
+# S3 storage
 
-Launch & Training uploads use `StorageService` (`src/storage/storage.service.ts`).
+File uploads use `S3Service` (`src/s3/s3.service.ts`).
+
+Launch & Training and other flows call `S3Service` directly from domain services. Generic HTTP helpers live under `/s3/*` (`S3Controller`).
 
 ## Render environment variables
 
@@ -16,13 +18,23 @@ AWS_CLOUDFRONT_URL=https://d28zeq7uxkkyjq.cloudfront.net
 
 Redeploy after adding variables.
 
-## Object keys
+## Launch & Training object keys
 
 ```
 uploads/companyproject/launchAndTraining/{projectId}/launch-session-{timestamp}-{random}.{ext}
 ```
 
 MongoDB stores the **key** (not a Render URL). API responses expose `document_url` as the CloudFront URL when `AWS_CLOUDFRONT_URL` is set.
+
+## Generic S3 HTTP API
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/s3/upload` | Multipart upload via API |
+| POST | `/s3/presigned-upload` | Presigned PUT URL + key |
+| GET | `/s3/download-url?key=` | Presigned GET URL |
+| GET | `/s3/list?prefix=` | List objects |
+| DELETE | `/s3?key=` | Delete object |
 
 ## AWS (DevOps)
 

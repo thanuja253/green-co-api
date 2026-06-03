@@ -108,13 +108,10 @@ import {
 } from '../schemas/company-dashboard-resource.schema';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { MailModule } from '../../mail/mail.module';
-import { StorageModule } from '../../storage/storage.module';
-
 @Module({
   imports: [
     NotificationsModule,
     MailModule,
-    StorageModule,
     MongooseModule.forFeature([
       { name: CompanyProject.name, schema: CompanyProjectSchema },
       { name: Company.name, schema: CompanySchema },

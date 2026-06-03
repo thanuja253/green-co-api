@@ -9,7 +9,6 @@ import { NotificationsModule } from './company/notifications/notifications.modul
 import { FacilitatorsModule } from './company/facilitators/facilitators.module';
 import { RegistrationMastersModule } from './company/registration-masters/registration-masters.module';
 import { MailModule } from './mail/mail.module';
-import { StorageModule } from './storage/storage.module';
 import { HelpDeskModule } from './company/help-desk/help-desk.module';
 import { RoleManagementModule } from './company/role-management/role-management.module';
 import { StaffManagementModule } from './company/staff-management/staff-management.module';
@@ -22,6 +21,7 @@ import { AssessmentChecklistDocumentsModule } from './company/assessment-checkli
 import { ChecklistVersioningModule } from './company/checklist-versioning/checklist-versioning.module';
 import { AppController } from './app.controller';
 import { ScheduleModule } from '@nestjs/schedule';
+import { S3Module } from './s3/s3.module';
 
 @Module({
   imports: [
@@ -39,6 +39,7 @@ import { ScheduleModule } from '@nestjs/schedule';
       }),
       inject: [ConfigService],
     }),
+    S3Module,
     CompanyAuthModule,
     AssessorAuthModule,
     FacilitatorAuthModule,
@@ -48,7 +49,6 @@ import { ScheduleModule } from '@nestjs/schedule';
     FacilitatorsModule,
     RegistrationMastersModule,
     MailModule,
-    StorageModule,
     HelpDeskModule,
     RoleManagementModule,
     StaffManagementModule,

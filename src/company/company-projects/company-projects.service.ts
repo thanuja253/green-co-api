@@ -88,7 +88,7 @@ import {
 } from '../notifications/workflow-milestone.constants';
 import { WorkflowNotificationMeta } from '../notifications/workflow-notification.types';
 import { MailService } from '../../mail/mail.service';
-import { StorageService } from '../../storage/storage.service';
+import { S3Service } from '../../s3/s3.service';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import * as bcrypt from 'bcrypt';
 import { lookupIfscDetails } from '../../common/ifsc-lookup.util';
@@ -530,7 +530,7 @@ export class CompanyProjectsService {
     @InjectConnection() private readonly mongoConnection: Connection,
     private readonly notificationsService: NotificationsService,
     private readonly mailService: MailService,
-    private readonly storageService: StorageService,
+    private readonly s3Service: S3Service,
   ) {}
 
   private calculateTentativeLevel(percentage: number): string {
@@ -9192,7 +9192,7 @@ export class CompanyProjectsService {
     index1: number,
   ) {
     const docPath = s.relative_path;
-    const documentUrl = this.storageService.resolvePublicUrl(docPath);
+    const documentUrl = this.s3Service.resolvePublicUrl(docPath);
     return {
       session_index: index1,
       document_url: documentUrl,
@@ -9223,7 +9223,7 @@ export class CompanyProjectsService {
     }
     const projectAny = project as any;
     const docPath = projectAny.launch_training_document;
-    const legacyDocumentUrl = this.storageService.resolvePublicUrl(docPath);
+    const legacyDocumentUrl = this.s3Service.resolvePublicUrl(docPath);
     const legacyReportDate = projectAny.launch_training_report_date
       ? typeof projectAny.launch_training_report_date === 'string'
         ? projectAny.launch_training_report_date
@@ -9383,7 +9383,7 @@ export class CompanyProjectsService {
       });
     }
 
-    const relativePath = await this.storageService.saveLaunchTrainingSessionFile(projectId, file);
+    const relativePath = await this.s3Service.saveLaunchTrainingSessionFile(projectId, file);
     const sessionDate = sessionDateRaw
       ? (() => {
           const d = new Date(sessionDateRaw);
@@ -9401,7 +9401,7 @@ export class CompanyProjectsService {
     (project as any).launch_training_sessions = existing;
     await project.save();
 
-    const documentUrl = this.storageService.resolvePublicUrl(relativePath);
+    const documentUrl = this.s3Service.resolvePublicUrl(relativePath);
 
     const company = await this.companyModel.findById(companyId).lean();
     this.notificationsService
@@ -12759,8 +12759,8 @@ export class CompanyProjectsService {
       });
     }
 
-    const relativePath = await this.storageService.saveLegacyLaunchTrainingFile(projectId, file);
-    const documentUrl = this.storageService.resolvePublicUrl(relativePath);
+    const relativePath = await this.s3Service.saveLegacyLaunchTrainingFile(projectId, file);
+    const documentUrl = this.s3Service.resolvePublicUrl(relativePath);
 
     const reportDate = launchTrainingReportDate
       ? (() => {
@@ -12831,11 +12831,11 @@ export class CompanyProjectsService {
       });
     }
 
-    const relativePath = await this.storageService.saveLegacyLaunchTrainingFile(
+    const relativePath = await this.s3Service.saveLegacyLaunchTrainingFile(
       resolved.projectId,
       file,
     );
-    const documentUrl = this.storageService.resolvePublicUrl(relativePath);
+    const documentUrl = this.s3Service.resolvePublicUrl(relativePath);
     const reportDate = launchTrainingReportDate
       ? (() => {
           const d = new Date(launchTrainingReportDate);
