@@ -11,11 +11,15 @@ type MailPayload = {
   attachments?: Array<{ filename: string; path: string }>;
 };
 
+type MailProviderKind = 'smtp' | 'resend' | 'brevo';
+
 @Injectable()
 export class MailService {
   private readonly transporter: { sendMail: (mailOptions: MailPayload) => Promise<void> };
   private readonly mailProvider: string;
+  private readonly activeProvider: MailProviderKind;
   private readonly resendApiKey: string;
+  private readonly brevoApiKey: string;
   private readonly smtpTransporter?: nodemailer.Transporter;
 
   constructor() {
@@ -23,8 +27,32 @@ export class MailService {
     dotenv.config({ path: '.env' });
     this.mailProvider = (process.env.MAIL_PROVIDER || 'resend').toLowerCase();
     this.resendApiKey = (process.env.RESEND_API_KEY || '').trim();
+    this.brevoApiKey = (
+      process.env.BREVO_API_KEY ||
+      process.env.SENDINBLUE_API_KEY ||
+      ''
+    ).trim();
+    const skipSmtpOnCloud = this.shouldSkipSmtpOnCloudHost();
+    this.activeProvider = this.resolveActiveProvider(skipSmtpOnCloud);
 
-    if (this.mailProvider === 'smtp') {
+    if (skipSmtpOnCloud && this.mailProvider === 'smtp') {
+      console.warn(
+        '[MailService] Render blocks Gmail SMTP. Use MAIL_PROVIDER=brevo (no domain — verify one email in Brevo) ' +
+          'or MAIL_PROVIDER=resend with a verified domain. See docs/RENDER_EMAIL_SETUP.md',
+      );
+    }
+
+    if (this.activeProvider === 'brevo') {
+      this.transporter = {
+        sendMail: async (mailOptions: MailPayload) => {
+          await this.sendViaBrevo(mailOptions);
+        },
+      };
+      this.logProviderReady();
+      return;
+    }
+
+    if (this.activeProvider === 'smtp') {
       const host = (process.env.SMTP_SERVER_HOST || '').trim();
       const port = Number(process.env.SMTP_SERVER_PORT || 587);
       const secure = String(process.env.SMTP_SERVER_SECURE || 'false').toLowerCase() === 'true';
@@ -50,16 +78,19 @@ export class MailService {
           sendMail: async (mailOptions: MailPayload): Promise<void> => {
             try {
               await this.smtpTransporter!.sendMail({
-                from: mailOptions.from || process.env.MAIL_FROM_ADDRESS || user,
+                from: this.resolveFromAddress(mailOptions.from, 'smtp'),
                 to: mailOptions.to,
                 subject: mailOptions.subject,
                 html: mailOptions.html,
               });
             } catch (smtpErr) {
-              // Render/Gmail SMTP can be flaky; transparently fall back to Resend when configured.
+              // Render/Gmail SMTP is often blocked; fall back to Resend only with a verified-domain From.
               if (this.resendApiKey) {
                 console.warn('[MailService] SMTP send failed. Falling back to Resend.');
-                await this.sendViaResend(mailOptions);
+                await this.sendViaResend({
+                  ...mailOptions,
+                  from: this.resolveFromAddress(mailOptions.from, 'resend'),
+                });
                 return;
               }
               throw smtpErr;
@@ -82,16 +113,70 @@ export class MailService {
     // Default/fallback provider is Resend.
     this.transporter = {
       sendMail: async (mailOptions: MailPayload): Promise<void> => {
-        await this.sendViaResend(mailOptions);
+        await this.sendViaResend({
+          ...mailOptions,
+          from: this.resolveFromAddress(mailOptions.from, 'resend'),
+        });
       },
     };
 
-    if (this.mailProvider !== 'resend') {
-      console.warn(`[MailService] MAIL_PROVIDER=${this.mailProvider} not usable. Using resend fallback.`);
+    if (this.mailProvider !== 'resend' && this.activeProvider === 'resend') {
+      console.warn(`[MailService] MAIL_PROVIDER=${this.mailProvider} not usable. Using resend.`);
+    }
+    this.logProviderReady();
+  }
+
+  private resolveActiveProvider(skipSmtpOnCloud: boolean): MailProviderKind {
+    if (this.mailProvider === 'brevo') {
+      if (!this.brevoApiKey) {
+        console.warn('[MailService] MAIL_PROVIDER=brevo but BREVO_API_KEY is missing — using resend.');
+        return 'resend';
+      }
+      return 'brevo';
+    }
+    if (this.mailProvider === 'smtp' && !skipSmtpOnCloud) {
+      return 'smtp';
+    }
+    return 'resend';
+  }
+
+  private logProviderReady(): void {
+    if (this.activeProvider === 'brevo') {
+      const sender = this.resolveBrevoSender();
+      console.log(
+        `[MailService] Ready: provider=brevo, sender=${sender.name} <${sender.email}> (verify this email in Brevo dashboard)`,
+      );
+      return;
+    }
+    if (this.activeProvider === 'smtp') {
+      console.log('[MailService] Ready: provider=smtp');
+      return;
     }
     if (!this.resendApiKey) {
-      console.warn('[MailService] RESEND_API_KEY is missing. Email sending will fail until this environment variable is set.');
+      console.warn(
+        '[MailService] RESEND_API_KEY is missing. Use MAIL_PROVIDER=brevo if you have no domain. See docs/RENDER_EMAIL_SETUP.md',
+      );
+      return;
     }
+    try {
+      const from = this.resolveFromAddress(undefined, 'resend');
+      console.log(`[MailService] Ready: provider=resend, resend_from=${from}`);
+    } catch (e) {
+      console.warn(
+        `[MailService] Resend misconfigured: ${e instanceof Error ? e.message : e}. ` +
+          'Use MAIL_PROVIDER=brevo + verified sender email, or add RESEND_FROM_ADDRESS.',
+      );
+    }
+  }
+
+  /** Render and similar PaaS block outbound SMTP (Gmail port 587). */
+  private shouldSkipSmtpOnCloudHost(): boolean {
+    if (String(process.env.MAIL_USE_RESEND_ONLY || '').toLowerCase() === 'true') {
+      return true;
+    }
+    if (String(process.env.RENDER || '').toLowerCase() === 'true') return true;
+    if (process.env.RENDER_SERVICE_ID) return true;
+    return false;
   }
 
   async sendCompanyRegistrationEmail(
@@ -236,6 +321,75 @@ export class MailService {
     );
   }
 
+  /** Pulls bare email from `"Name" <a@b.com>` or `a@b.com`. */
+  private extractEmailAddress(from: string): string {
+    const trimmed = from.trim();
+    const match = trimmed.match(/<([^>]+)>/);
+    return (match ? match[1] : trimmed).trim();
+  }
+
+  private isPublicMailboxDomain(email: string): boolean {
+    const domain = email.split('@')[1]?.toLowerCase() || '';
+    return [
+      'gmail.com',
+      'googlemail.com',
+      'yahoo.com',
+      'hotmail.com',
+      'outlook.com',
+      'live.com',
+    ].includes(domain);
+  }
+
+  /**
+   * SMTP may use Gmail (local dev). Resend (Render/production) needs a verified domain — not @gmail.com.
+   * Set RESEND_FROM_ADDRESS or RESEND_DOMAIN on Render.
+   */
+  private resolveFromAddress(preferred?: string, provider: 'smtp' | 'resend' = 'smtp'): string {
+    if (provider === 'smtp') {
+      return (
+        preferred?.trim() ||
+        process.env.SMTP_FROM_ADDRESS?.trim() ||
+        process.env.MAIL_FROM_ADDRESS?.trim() ||
+        'noreply@greenco.com'
+      );
+    }
+
+    const explicit = process.env.RESEND_FROM_ADDRESS?.trim();
+    if (explicit) return explicit;
+
+    const fromEmail = process.env.RESEND_FROM_EMAIL?.trim();
+    if (fromEmail) {
+      const displayName = process.env.RESEND_FROM_NAME?.trim() || 'Green Co';
+      return `${displayName} <${fromEmail}>`;
+    }
+
+    const domainOnly = process.env.RESEND_DOMAIN?.trim();
+    if (domainOnly && !domainOnly.includes('@')) {
+      const local = process.env.RESEND_FROM_LOCAL?.trim() || 'noreply';
+      const displayName = process.env.RESEND_FROM_NAME?.trim() || 'Green Co';
+      return `${displayName} <${local}@${domainOnly}>`;
+    }
+
+    const sandbox =
+      String(process.env.MAIL_ALLOW_RESEND_SANDBOX || '').toLowerCase() === 'true';
+    if (sandbox) {
+      return 'Green Co <onboarding@resend.dev>';
+    }
+
+    const candidate =
+      preferred?.trim() || process.env.MAIL_FROM_ADDRESS?.trim() || 'noreply@greenco.com';
+    const email = this.extractEmailAddress(candidate);
+    if (email && !this.isPublicMailboxDomain(email)) {
+      return candidate;
+    }
+
+    throw new Error(
+      `Resend cannot send from "${candidate}" — gmail.com/yahoo.com cannot be used as the sender on Resend. ` +
+        'On Render set RESEND_FROM_ADDRESS=Green Co <noreply@your-verified-domain.com> ' +
+        '(verify domain at https://resend.com/domains). See docs/RENDER_EMAIL_SETUP.md',
+    );
+  }
+
   private async sendViaResend(mailOptions: MailPayload): Promise<void> {
     if (!this.resendApiKey) {
       throw new Error('RESEND_API_KEY is not configured.');
@@ -254,7 +408,7 @@ export class MailService {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          from: mailOptions.from || process.env.MAIL_FROM_ADDRESS || 'noreply@greenco.com',
+          from: this.resolveFromAddress(mailOptions.from, 'resend'),
           to: [mailOptions.to],
           subject: mailOptions.subject,
           html: mailOptions.html,
@@ -273,6 +427,79 @@ export class MailService {
     if (!response.ok) {
       const responseText = await response.text();
       throw new Error(`Resend API error ${response.status}: ${responseText}`);
+    }
+  }
+
+  /**
+   * Brevo: verify a single sender email in the dashboard (no custom domain required).
+   * https://app.brevo.com/senders — free tier ~300 emails/day.
+   */
+  private resolveBrevoSender(preferred?: string): { email: string; name: string } {
+    const raw =
+      preferred?.trim() ||
+      process.env.BREVO_SENDER_EMAIL?.trim() ||
+      process.env.SMTP_SERVER_USER?.trim() ||
+      this.extractEmailAddress(process.env.MAIL_FROM_ADDRESS?.trim() || '');
+
+    const email = this.extractEmailAddress(raw);
+    if (!email) {
+      throw new Error(
+        'Brevo sender email is not configured. Set BREVO_SENDER_EMAIL to an address you verified in Brevo (Senders & IP).',
+      );
+    }
+
+    const name =
+      process.env.BREVO_SENDER_NAME?.trim() ||
+      (process.env.MAIL_FROM_ADDRESS?.includes('<')
+        ? process.env.MAIL_FROM_ADDRESS.split('<')[0].replace(/"/g, '').trim()
+        : '') ||
+      'Green Co';
+
+    return { email, name };
+  }
+
+  private async sendViaBrevo(mailOptions: MailPayload): Promise<void> {
+    if (!this.brevoApiKey) {
+      throw new Error('BREVO_API_KEY is not configured.');
+    }
+
+    const sender = this.resolveBrevoSender(mailOptions.from);
+    const timeoutMs = this.getOutboundMailTimeoutMs();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    let response: Response;
+    try {
+      response = await fetch('https://api.brevo.com/v3/smtp/email', {
+        method: 'POST',
+        headers: {
+          'api-key': this.brevoApiKey,
+          'Content-Type': 'application/json',
+          accept: 'application/json',
+        },
+        body: JSON.stringify({
+          sender: { email: sender.email, name: sender.name },
+          to: [{ email: mailOptions.to }],
+          subject: mailOptions.subject,
+          htmlContent: mailOptions.html,
+        }),
+        signal: controller.signal,
+      });
+    } catch (e) {
+      if ((e as Error)?.name === 'AbortError') {
+        throw new Error(`Brevo request timed out after ${timeoutMs}ms`);
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!response.ok) {
+      const responseText = await response.text();
+      throw new Error(
+        `Brevo API error ${response.status}: ${responseText}. ` +
+          'Ensure BREVO_SENDER_EMAIL is verified at https://app.brevo.com/senders',
+      );
     }
   }
 
@@ -313,10 +540,8 @@ export class MailService {
     }
 
     await this.sendViaResend({
-      from: mailOptions.from,
-      to: mailOptions.to,
-      subject: mailOptions.subject,
-      html: mailOptions.html,
+      ...mailOptions,
+      from: this.resolveFromAddress(mailOptions.from, 'resend'),
     });
   }
 
