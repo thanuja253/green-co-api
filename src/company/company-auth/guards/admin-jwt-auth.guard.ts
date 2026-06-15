@@ -81,6 +81,21 @@ export class AdminJwtAuthGuard implements CanActivate {
     if (/^\/?admin\/sector_data$/i.test(path)) {
       return true;
     }
+    // Criteria datatable legacy endpoint — public (frontend without admin token).
+    if (/^\/?api\/admin\/criteria_data$/i.test(path)) {
+      return true;
+    }
+    if (/^\/?admin\/criteria_data$/i.test(path)) {
+      return true;
+    }
+    // Scoring list legacy endpoint — public GET only (frontend without admin token).
+    const method = String(req?.method || 'GET').toUpperCase();
+    if (method === 'GET' && /^\/?api\/admin\/scoring$/i.test(path)) {
+      return true;
+    }
+    if (method === 'GET' && /^\/?admin\/scoring$/i.test(path)) {
+      return true;
+    }
     // Masters industries list — public (used by frontend without admin token).
     if (/^\/?api\/admin\/masters\/industries$/i.test(path)) {
       return true;

@@ -13630,12 +13630,7 @@ export class CompanyProjectsService {
 
     this.assertProjectHasCodeForAssignments(project as any);
 
-    if ((project as any).process_type !== 'f') {
-      throw new BadRequestException({
-        status: 'error',
-        message: 'Facilitator can only be assigned for projects with process type CI + Facilitator.',
-      });
-    }
+    const wasCiiOnly = String((project as any).process_type || 'c').toLowerCase() !== 'f';
 
     // Validate facilitator exists
     const facilitator = await this.facilitatorModel.findById(facilitatorId);
@@ -13680,11 +13675,17 @@ export class CompanyProjectsService {
       });
     }
 
+    if (wasCiiOnly) {
+      (project as any).process_type = 'f';
+      await project.save();
+    }
+
     console.log('[Assign Facilitator] Facilitator assigned:', {
       projectId: projectId.toString(),
       facilitatorId: facilitatorId,
       facilitatorName: facilitator.name,
       contractFee: contractFee,
+      process_type: (project as any).process_type,
     });
 
     // LOG ACTIVITY: CII Assigned A Facilitator
@@ -13749,7 +13750,9 @@ export class CompanyProjectsService {
 
     return {
       status: 'success',
-      message: 'Facilitator assigned successfully',
+      message: wasCiiOnly
+        ? 'Facilitator assigned successfully. Project is now CI + Facilitator (process_type f).'
+        : 'Facilitator assigned successfully',
       data: {
         facilitator: {
           id: facilitator._id.toString(),
@@ -13758,7 +13761,9 @@ export class CompanyProjectsService {
         },
         contract_fee: contractFee || 0,
         contract_document: contractDocumentPath,
-        contract_doc_status: 0, // Not signed yet
+        contract_doc_status: 0,
+        process_type: (project as any).process_type,
+        next_activities_id: (project as any).next_activities_id,
       },
     };
   }
@@ -13781,7 +13786,7 @@ export class CompanyProjectsService {
     const code = project.project_id != null ? String(project.project_id).trim() : '';
     const assignment_section_enabled = !!code;
     const processType = (project as any).process_type || 'c';
-    const show_add_facilitator = processType === 'f';
+    const show_add_facilitator = assignment_section_enabled;
 
     const coordinatorsDocs = await this.companyCoordinatorModel
       .find({ company_id: companyId, project_id: projectId })
