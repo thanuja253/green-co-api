@@ -5,7 +5,7 @@ export type CompanyDocument = Company & Document;
 
 @Schema({ timestamps: true })
 export class Company {
-  @Prop({ required: true, unique: true, lowercase: true, trim: true })
+  @Prop({ required: true, unique: true, trim: true })
   email: string;
 
   @Prop({ required: true, select: false })

@@ -35,6 +35,10 @@ import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { RegistrationMastersService } from '../registration-masters/registration-masters.service';
 
+function trimCompanyEmail(email: string): string {
+  return String(email || '').trim();
+}
+
 @Injectable()
 export class CompanyAuthService {
   private async resolveFacilitatorForRegistration(input: {
@@ -83,15 +87,26 @@ export class CompanyAuthService {
     private registrationMastersService: RegistrationMastersService,
   ) {}
 
+  /** Exact email match (case-sensitive); only trims surrounding whitespace. */
+  private async findCompanyByEmail(
+    email: string,
+    selectPassword = false,
+  ): Promise<CompanyDocument | null> {
+    const exact = trimCompanyEmail(email);
+    if (!exact) return null;
+
+    const query = this.companyModel.findOne({ email: exact });
+    if (selectPassword) query.select('+password');
+    return query.exec();
+  }
+
   async register(registerDto: RegisterDto) {
     const assessmentInput = String(registerDto.assessment || '').trim().toLowerCase();
     const normalizedAssessment =
       assessmentInput === 'facilitator' || assessmentInput === 'f' ? 'facilitator' : 'cii';
 
-    // Check if email already exists
-    const existingEmail = await this.companyModel.findOne({
-      email: registerDto.email.toLowerCase(),
-    });
+    // Check if email already exists (exact case match)
+    const existingEmail = await this.findCompanyByEmail(registerDto.email);
     if (existingEmail) {
       throw new ConflictException({
         status: 'error',
@@ -145,7 +160,7 @@ export class CompanyAuthService {
 
     // Create company
     const company = new this.companyModel({
-      email: registerDto.email.toLowerCase(),
+      email: trimCompanyEmail(registerDto.email),
       password: hashedPassword,
       mobile: registerDto.mobileno,
       name: registerDto.company_name,
@@ -259,10 +274,10 @@ export class CompanyAuthService {
   }
 
   async login(loginDto: LoginDto) {
-    const email = loginDto.email.trim().toLowerCase();
+    const email = trimCompanyEmail(loginDto.email);
     const password = loginDto.password.trim();
 
-    const company = await this.companyModel.findOne({ email }).select('+password');
+    const company = await this.findCompanyByEmail(email, true);
 
     if (!company) {
       throw new UnauthorizedException({
@@ -328,9 +343,7 @@ export class CompanyAuthService {
   }
 
   async forgotPassword(forgotPasswordDto: ForgotPasswordDto) {
-    const company = await this.companyModel.findOne({
-      email: forgotPasswordDto.email.toLowerCase(),
-    });
+    const company = await this.findCompanyByEmail(forgotPasswordDto.email);
 
     if (!company) {
       throw new BadRequestException({
