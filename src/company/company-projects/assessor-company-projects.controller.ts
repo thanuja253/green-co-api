@@ -77,10 +77,7 @@ export class AssessorCompanyProjectsController {
     @Param('projectId') projectId: string,
   ): Promise<any> {
     const assessorId = String(req?.user?.assessorId || '').trim();
-    if (assessorId) {
-      return this.companyProjectsService.getQuickviewDataForAssessor(assessorId, projectId);
-    }
-    return this.companyProjectsService.getQuickviewDataPublicByProject(projectId);
+    return this.companyProjectsService.getQuickviewDataForAssessor(assessorId, projectId);
   }
 
   /**
