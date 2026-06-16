@@ -4952,20 +4952,6 @@ export class CompanyProjectsService {
       .lean();
   }
 
-  /** Company dashboard: project must belong to the logged-in company (404 if not). */
-  async assertCompanyOwnsProject(companyId: string, projectId: string): Promise<void> {
-    if (!companyId || !Types.ObjectId.isValid(projectId)) {
-      throw new NotFoundException({ status: 'error', message: 'Project not found' });
-    }
-    const owned = await this.projectModel.exists({
-      _id: projectId,
-      company_id: companyId,
-    });
-    if (!owned) {
-      throw new NotFoundException({ status: 'error', message: 'Project not found' });
-    }
-  }
-
   /** Company/admin quickview: accept Mongo project id or company id (latest project). */
   async resolveProjectForQuickview(projectOrCompanyId: string): Promise<any | null> {
     return this.resolveProjectForAdmin(projectOrCompanyId);
@@ -15203,9 +15189,12 @@ export class CompanyProjectsService {
    * Get Primary Data Form (company): master checklist + saved data grouped by info_type.
    * Sections and info_type keys are derived dynamically from master_primary_data_checklist.
    */
-  async getPrimaryData(companyId: string, projectId: string) {
-    await this.assertCompanyOwnsProject(companyId, projectId);
-    const project = await this.projectModel.findOne({ _id: projectId, company_id: companyId }).lean();
+  async getPrimaryData(companyId: string | undefined, projectId: string) {
+    const projectQuery: Record<string, any> = { _id: projectId };
+    if (companyId) {
+      projectQuery.company_id = companyId;
+    }
+    const project = await this.projectModel.findOne(projectQuery).lean();
     if (!project) {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
@@ -15410,9 +15399,12 @@ export class CompanyProjectsService {
     };
   }
 
-  async getPrimaryDataEe(companyId: string, projectId: string) {
-    await this.assertCompanyOwnsProject(companyId, projectId);
-    const project = await this.projectModel.findOne({ _id: projectId, company_id: companyId }).lean();
+  async getPrimaryDataEe(companyId: string | undefined, projectId: string) {
+    const projectQuery: Record<string, any> = { _id: projectId };
+    if (companyId) {
+      projectQuery.company_id = companyId;
+    }
+    const project = await this.projectModel.findOne(projectQuery).lean();
     if (!project) {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
@@ -16001,12 +15993,15 @@ export class CompanyProjectsService {
   }
 
   async savePrimaryDataEeByCompanyProjectId(
-    companyId: string,
+    companyId: string | undefined,
     projectId: string,
     body: { form_type?: string; formType?: string; ee?: Record<string, any> | any[]; [key: string]: any },
   ) {
-    await this.assertCompanyOwnsProject(companyId, projectId);
-    const project = await this.projectModel.findOne({ _id: projectId, company_id: companyId }).lean();
+    const projectQuery: Record<string, any> = { _id: projectId };
+    if (companyId) {
+      projectQuery.company_id = companyId;
+    }
+    const project = await this.projectModel.findOne(projectQuery).lean();
     if (!project) {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
