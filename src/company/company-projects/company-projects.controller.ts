@@ -2169,11 +2169,15 @@ export class CompanyProjectsController {
    * GET /api/company/projects/:projectId/work-order-document
    */
   @Get(':projectId/work-order-document')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+  @Header('Pragma', 'no-cache')
   async getWorkOrderDocument(@Param('projectId') projectId: string): Promise<any> {
     return this.companyProjectsService.getWorkOrderDocumentByProjectId(projectId);
   }
 
   @Get(':projectId/facilitator-contract-document')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+  @Header('Pragma', 'no-cache')
   async getFacilitatorContractDocument(@Param('projectId') projectId: string): Promise<any> {
     return this.companyProjectsService.getWorkOrderDocumentByProjectId(projectId);
   }

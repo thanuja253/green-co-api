@@ -6517,8 +6517,11 @@ export class CompanyProjectsService {
     return null;
   }
 
-  /** Latest/next for admin + company panels after proposal upload or re-upload. */
-  private async getProposalQuickviewSnippet(companyId: string, projectId: string) {
+  /**
+   * Single source for Latest/Next across Quick view, Proposal, and Work Order tabs.
+   * Always derived from getQuickviewData so tab switches do not show conflicting steps.
+   */
+  private async getUnifiedQuickviewSnippet(companyId: string, projectId: string) {
     const qv = await this.getQuickviewData(companyId, projectId);
     const d = qv.data || {};
     return {
@@ -6527,6 +6530,36 @@ export class CompanyProjectsService {
       latest_step: d.latest_step ?? null,
       next_step: d.next_step ?? null,
       proposal_review: d.proposal_review ?? null,
+      work_order_review: d.work_order_review ?? null,
+      synced_at: new Date().toISOString(),
+    };
+  }
+
+  private applyQuickviewStepLabels<T extends Record<string, unknown>>(
+    target: T,
+    quickview: {
+      latest_step?: { name?: string } | null;
+      next_step?: { name?: string } | null;
+    },
+  ): T {
+    if (quickview.latest_step?.name) {
+      (target as Record<string, unknown>).latest_step_label = quickview.latest_step.name;
+      (target as Record<string, unknown>).next_step_label =
+        quickview.next_step?.name ?? null;
+    }
+    return target;
+  }
+
+  /** Latest/next for admin + company panels after proposal upload or re-upload. */
+  private async getProposalQuickviewSnippet(companyId: string, projectId: string) {
+    const u = await this.getUnifiedQuickviewSnippet(companyId, projectId);
+    return {
+      quickview_phase: u.quickview_phase,
+      quickview_display: u.quickview_display,
+      latest_step: u.latest_step,
+      next_step: u.next_step,
+      proposal_review: u.proposal_review,
+      synced_at: u.synced_at,
     };
   }
 
@@ -7946,6 +7979,15 @@ export class CompanyProjectsService {
       ? isCiiWorkOrderRejectedByAdmin(workOrderAny)
       : false;
 
+    const quickview = await this.getUnifiedQuickviewSnippet(companyId, projectId);
+    if (response.proposal_document) {
+      this.applyQuickviewStepLabels(response.proposal_document, quickview);
+    }
+    if (response.work_order) {
+      this.applyQuickviewStepLabels(response.work_order, quickview);
+    }
+    response.quickview = quickview;
+
     return {
       status: 'success',
       message: 'Documents retrieved successfully',
@@ -8391,14 +8433,14 @@ export class CompanyProjectsService {
   }
 
   private async getWorkOrderQuickviewSnippet(companyId: string, projectId: string) {
-    const qv = await this.getQuickviewData(companyId, projectId);
-    const d = qv.data || {};
+    const u = await this.getUnifiedQuickviewSnippet(companyId, projectId);
     return {
-      quickview_phase: d.quickview_phase ?? 'normal',
-      quickview_display: d.quickview_display ?? null,
-      latest_step: d.latest_step ?? null,
-      next_step: d.next_step ?? null,
-      work_order_review: d.work_order_review ?? null,
+      quickview_phase: u.quickview_phase,
+      quickview_display: u.quickview_display,
+      latest_step: u.latest_step,
+      next_step: u.next_step,
+      work_order_review: u.work_order_review,
+      synced_at: u.synced_at,
     };
   }
 
@@ -8780,29 +8822,33 @@ export class CompanyProjectsService {
       resolveProposalReviewStatus(project, workOrder) === PROPOSAL_REVIEW_STATUS.ACCEPTED;
 
     const extras = this.workOrderStatusExtras(workOrder as any);
+    const quickview = await this.getUnifiedQuickviewSnippet(companyId, projectId);
 
     if (!workOrder || !(workOrder as any).wo_doc) {
       const woAny = workOrder as any;
+      const data = {
+        has_document: false,
+        document_url: null,
+        document_filename: null,
+        wo_status: woAny?.wo_status ?? null,
+        wo_remarks: woAny?.wo_remarks ?? null,
+        wo_doc_status_updated_at:
+          woAny?.wo_doc_status_updated_at?.toISOString?.() ?? null,
+        work_order_id: extras.work_order_id,
+        wo_status_label: extras.wo_status_label,
+        can_reupload_work_order: extras.can_reupload_work_order ?? false,
+        awaiting_cii_review: extras.awaiting_cii_review ?? false,
+        ...this.workOrderAcceptancePayload(woAny || null),
+        ...reviewUi,
+        can_company_upload_work_order:
+          proposalAccepted && (reviewUi.can_company_upload_work_order ?? true),
+        quickview,
+      };
+      this.applyQuickviewStepLabels(data, quickview);
       return {
         status: 'success',
         message: 'Work order document not uploaded yet',
-        data: {
-          has_document: false,
-          document_url: null,
-          document_filename: null,
-          wo_status: woAny?.wo_status ?? null,
-          wo_remarks: woAny?.wo_remarks ?? null,
-          wo_doc_status_updated_at:
-            woAny?.wo_doc_status_updated_at?.toISOString?.() ?? null,
-          work_order_id: extras.work_order_id,
-          wo_status_label: extras.wo_status_label,
-          can_reupload_work_order: extras.can_reupload_work_order ?? false,
-          awaiting_cii_review: extras.awaiting_cii_review ?? false,
-          ...this.workOrderAcceptancePayload(woAny || null),
-          ...reviewUi,
-          can_company_upload_work_order:
-            proposalAccepted && (reviewUi.can_company_upload_work_order ?? true),
-        },
+        data,
       };
     }
 
@@ -8816,31 +8862,34 @@ export class CompanyProjectsService {
       fileMtimeMs ?? workOrderAny.wo_doc_status_updated_at ?? workOrderAny.updatedAt,
     );
     const acceptance = this.workOrderAcceptancePayload(workOrderAny);
+    const data = {
+      has_document: onServer,
+      is_work_order_pdf_on_server: onServer,
+      document_url: onServer ? document_url : null,
+      document_cache_bust: onServer ? document_cache_bust : null,
+      s3_key: storageKey,
+      path: storageKey,
+      document_filename: storageKey.split('/').pop() || 'workorder.pdf',
+      wo_status: workOrderAny.wo_status ?? 0,
+      wo_remarks: workOrderAny.wo_remarks || null,
+      wo_doc_status_updated_at:
+        workOrderAny.wo_doc_status_updated_at?.toISOString?.() ??
+        workOrderAny.updatedAt?.toISOString?.() ??
+        workOrderAny.createdAt?.toISOString?.() ??
+        null,
+      work_order_id: extras.work_order_id,
+      wo_status_label: extras.wo_status_label,
+      can_reupload_work_order: extras.can_reupload_work_order,
+      awaiting_cii_review: extras.awaiting_cii_review,
+      ...acceptance,
+      ...reviewUi,
+      quickview,
+    };
+    this.applyQuickviewStepLabels(data, quickview);
     return {
       status: 'success',
       message: 'Work order document retrieved successfully',
-      data: {
-        has_document: onServer,
-        is_work_order_pdf_on_server: onServer,
-        document_url: onServer ? document_url : null,
-        document_cache_bust: onServer ? document_cache_bust : null,
-        s3_key: storageKey,
-        path: storageKey,
-        document_filename: storageKey.split('/').pop() || 'workorder.pdf',
-        wo_status: workOrderAny.wo_status ?? 0,
-        wo_remarks: workOrderAny.wo_remarks || null,
-        wo_doc_status_updated_at:
-          workOrderAny.wo_doc_status_updated_at?.toISOString?.() ??
-          workOrderAny.updatedAt?.toISOString?.() ??
-          workOrderAny.createdAt?.toISOString?.() ??
-          null,
-        work_order_id: extras.work_order_id,
-        wo_status_label: extras.wo_status_label,
-        can_reupload_work_order: extras.can_reupload_work_order,
-        awaiting_cii_review: extras.awaiting_cii_review,
-        ...acceptance,
-        ...reviewUi,
-      },
+      data,
     };
   }
 
