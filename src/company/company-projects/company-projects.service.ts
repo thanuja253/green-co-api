@@ -89,6 +89,7 @@ import {
 import { WorkflowNotificationMeta } from '../notifications/workflow-notification.types';
 import { MailService } from '../../mail/mail.service';
 import { S3Service } from '../../s3/s3.service';
+import { buildWorkOrderDocumentViewUrl } from '../../s3/project-document-storage.util';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import * as bcrypt from 'bcrypt';
 import { lookupIfscDetails } from '../../common/ifsc-lookup.util';
@@ -6756,7 +6757,8 @@ export class CompanyProjectsService {
   async uploadProposalDocument(
     companyId: string,
     projectId: string,
-    file: Express.Multer.File,
+    file?: Express.Multer.File,
+    body?: Record<string, unknown>,
   ) {
     const project = await this.projectModel.findOne({
       _id: projectId,
@@ -6770,9 +6772,12 @@ export class CompanyProjectsService {
       });
     }
 
-    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-04z5.onrender.com';
-    // Use Laravel-compatible path: uploads/company/{projectId}/
-    const relativePath = `uploads/company/${projectId}/${file.filename}`;
+    const relativePath = await this.s3Service.resolveProjectDocumentKey(
+      projectId,
+      file,
+      body,
+      'proposal',
+    );
     const hadExistingProposal = !!String((project as any).proposal_document || '').trim();
 
     const latestWoForGate = await this.companyWorkOrderModel
@@ -6905,7 +6910,11 @@ export class CompanyProjectsService {
     };
   }
 
-  async uploadProposalDocumentByProjectId(projectId: string, file: Express.Multer.File) {
+  async uploadProposalDocumentByProjectId(
+    projectId: string,
+    file?: Express.Multer.File,
+    body?: Record<string, unknown>,
+  ) {
     const project = await this.resolveProjectForAdmin(projectId);
     if (!project?.company_id) {
       throw new NotFoundException({
@@ -6914,7 +6923,12 @@ export class CompanyProjectsService {
       });
     }
     const effectiveProjectId = String(project._id);
-    return this.uploadProposalDocument(String(project.company_id), effectiveProjectId, file);
+    return this.uploadProposalDocument(
+      String(project.company_id),
+      effectiveProjectId,
+      file,
+      body,
+    );
   }
 
   /**
@@ -6925,7 +6939,8 @@ export class CompanyProjectsService {
   async replaceProposalDocument(
     companyId: string,
     projectId: string,
-    file: Express.Multer.File,
+    file?: Express.Multer.File,
+    body?: Record<string, unknown>,
   ) {
     const project = await this.projectModel.findOne({
       _id: projectId,
@@ -6987,17 +7002,12 @@ export class CompanyProjectsService {
       }
     }
 
-    const absoluteMulterPath =
-      (file as Express.Multer.File & { path?: string }).path ||
-      join(String((file as any).destination || ''), file.filename);
-    let relativePath = `uploads/company/${projectId}/${file.filename}`;
-    const cwd = process.cwd();
-    if (absoluteMulterPath && fs.existsSync(absoluteMulterPath)) {
-      const rel = relative(cwd, absoluteMulterPath).replace(/\\/g, '/');
-      if (rel && !rel.startsWith('..')) {
-        relativePath = rel.replace(/^\/+/, '');
-      }
-    }
+    const relativePath = await this.s3Service.resolveProjectDocumentKey(
+      projectId,
+      file,
+      body,
+      'proposal',
+    );
     project.proposal_document = relativePath;
     (project as any).proposal_review_status = PROPOSAL_REVIEW_STATUS.PENDING;
     (project as any).proposal_review_remarks = undefined;
@@ -7065,7 +7075,11 @@ export class CompanyProjectsService {
     };
   }
 
-  async replaceProposalDocumentByProjectId(projectId: string, file: Express.Multer.File) {
+  async replaceProposalDocumentByProjectId(
+    projectId: string,
+    file?: Express.Multer.File,
+    body?: Record<string, unknown>,
+  ) {
     const resolved = await this.resolveProjectForAdmin(projectId);
     if (!resolved?.company_id) {
       throw new NotFoundException({
@@ -7073,7 +7087,12 @@ export class CompanyProjectsService {
         message: 'Project not found',
       });
     }
-    return this.replaceProposalDocument(String(resolved.company_id), String(resolved._id), file);
+    return this.replaceProposalDocument(
+      String(resolved.company_id),
+      String(resolved._id),
+      file,
+      body,
+    );
   }
 
   /**
@@ -7169,13 +7188,18 @@ export class CompanyProjectsService {
     const canReplaceProposalPdf = reviewUi.can_cii_reupload_proposal;
 
     const proposalRaw = String(project.proposal_document || '');
-    const filename = proposalRaw.split('/').pop() || 'proposal.pdf';
+    const storageKey =
+      this.s3Service.normalizeStorageKey(proposalRaw) || proposalRaw.replace(/^\/+/, '');
+    const onServer = await this.s3Service.storageKeyExists(storageKey);
+    const filename = storageKey.split('/').pop() || 'proposal.pdf';
+    const fileMtimeMs =
+      (await this.s3Service.getStorageMtimeMs(storageKey)) ??
+      proposalDocumentFileMtimeMs(proposalRaw);
     const { document_url, document_cache_bust } = buildProposalDocumentViewUrl(
       projectId,
       proposalRaw,
-      (project as any).updatedAt,
+      fileMtimeMs ? new Date(fileMtimeMs) : (project as any).updatedAt,
     );
-    const fileMtimeMs = proposalDocumentFileMtimeMs(proposalRaw);
     const proposal_file_updated_at = fileMtimeMs
       ? new Date(fileMtimeMs).toISOString()
       : (project as any).updatedAt?.toISOString?.() ?? null;
@@ -7184,9 +7208,11 @@ export class CompanyProjectsService {
       status: 'success',
       message: 'Proposal document retrieved successfully',
       data: {
-        has_document: true,
+        has_document: onServer,
         /** Explicit boolean so UIs never treat numeric `0` workflow as “no file”. */
-        is_proposal_pdf_on_server: true,
+        is_proposal_pdf_on_server: onServer,
+        s3_key: storageKey,
+        path: storageKey,
         /**
          * Workflow as string (same as `proposal_status_label`). Never numeric `0` — many clients wrongly treat `0` as “not uploaded”.
          */
@@ -7198,9 +7224,9 @@ export class CompanyProjectsService {
         proposal_status_updated_at: proposalStatusUpdatedAt,
         /** When the PDF on disk was last modified (best for showing “latest file” after reupload). */
         proposal_file_updated_at,
-        document_url,
+        document_url: onServer ? document_url : null,
         /** Same as `v` on `document_url` — use to force-refresh embedded PDF viewers. */
-        document_cache_bust,
+        document_cache_bust: onServer ? document_cache_bust : null,
         document_filename: filename,
         work_order: workOrder
           ? {
@@ -7369,12 +7395,17 @@ export class CompanyProjectsService {
     }
 
     const filename = proposalRaw.split('/').pop() || 'proposal.pdf';
+    const storageKey =
+      this.s3Service.normalizeStorageKey(proposalRaw) || proposalRaw.replace(/^\/+/, '');
+    const onServer = await this.s3Service.storageKeyExists(storageKey);
+    const fileMtimeMs =
+      (await this.s3Service.getStorageMtimeMs(storageKey)) ??
+      proposalDocumentFileMtimeMs(proposalRaw);
     const { document_url, document_cache_bust } = buildProposalDocumentViewUrl(
       effectiveProjectId,
       proposalRaw,
-      (project as any).updatedAt,
+      fileMtimeMs ? new Date(fileMtimeMs) : (project as any).updatedAt,
     );
-    const fileMtimeMs = proposalDocumentFileMtimeMs(proposalRaw);
     const proposal_file_updated_at = fileMtimeMs
       ? new Date(fileMtimeMs).toISOString()
       : (project as any).updatedAt
@@ -7385,10 +7416,12 @@ export class CompanyProjectsService {
       status: 'success' as const,
       message: 'Proposal document file retrieved successfully',
       data: {
-        has_document: true,
-        is_proposal_pdf_on_server: true,
-        document_url,
-        document_cache_bust,
+        has_document: onServer,
+        is_proposal_pdf_on_server: onServer,
+        s3_key: storageKey,
+        path: storageKey,
+        document_url: onServer ? document_url : null,
+        document_cache_bust: onServer ? document_cache_bust : null,
         document_filename: filename,
         proposal_file_updated_at,
         reupload_allowed,
@@ -7406,31 +7439,32 @@ export class CompanyProjectsService {
       throw new NotFoundException({ status: 'error', message: 'Proposal document not uploaded yet' });
     }
 
-    const normalized = proposalRaw.startsWith('http')
-      ? (uploadsRelativePathFromUrl(proposalRaw) || '')
-      : proposalRaw.replace(/^\/+/, '');
-    const fullPath = join(process.cwd(), normalized);
-    if (!normalized || !fs.existsSync(fullPath)) {
-      throw new NotFoundException({ status: 'error', message: 'File not found' });
-    }
-
+    const normalized = this.s3Service.normalizeStorageKey(proposalRaw) || proposalRaw.replace(/^\/+/, '');
     const filename = normalized.split('/').pop() || 'proposal.pdf';
     const contentType = contentTypeForRegistrationFilename(filename, 'application/pdf');
-    try {
-      const st = fs.statSync(fullPath);
-      res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate, max-age=0');
-      res.setHeader('Pragma', 'no-cache');
-      res.setHeader('Expires', '0');
-      res.setHeader('ETag', `W/"${st.size}-${Math.round(st.mtimeMs)}"`);
-    } catch {
-      res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate, max-age=0');
+    await this.s3Service.streamStorageKeyToResponse(res, normalized, filename, contentType);
+  }
+
+  async streamWorkOrderDocumentByProjectId(projectOrCompanyId: string, res: Response): Promise<void> {
+    const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
+    if (!resolved?.company_id) {
+      throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
-    await this.streamRegistrationFileToResponse(res, {
-      kind: 'disk',
-      fullPath,
-      filename,
-      contentType,
-    });
+    const workOrder = await this.companyWorkOrderModel
+      .findOne({
+        company_id: String(resolved.company_id),
+        project_id: String(resolved._id),
+      })
+      .sort({ createdAt: -1 })
+      .lean();
+    const woRaw = String((workOrder as any)?.wo_doc || '').trim();
+    if (!woRaw) {
+      throw new NotFoundException({ status: 'error', message: 'Work order document not uploaded yet' });
+    }
+    const normalized = this.s3Service.normalizeStorageKey(woRaw) || woRaw.replace(/^\/+/, '');
+    const filename = normalized.split('/').pop() || 'workorder.pdf';
+    const contentType = contentTypeForRegistrationFilename(filename, 'application/pdf');
+    await this.s3Service.streamStorageKeyToResponse(res, normalized, filename, contentType);
   }
 
   /**
@@ -7772,7 +7806,6 @@ export class CompanyProjectsService {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
     }
 
-    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-04z5.onrender.com';
     const response: any = { proposal_document: null, work_order: null };
     const projectAny = project as any;
     const workOrderAny = workOrder as any;
@@ -7823,21 +7856,26 @@ export class CompanyProjectsService {
 
     if (hasProposalDoc) {
       const proposalRaw = String(proposalDocValue).trim();
-      const storageFilename = proposalRaw.split('/').pop() || 'proposal.pdf';
+      const storageKey =
+        this.s3Service.normalizeStorageKey(proposalRaw) || proposalRaw.replace(/^\/+/, '');
+      const onServer = await this.s3Service.storageKeyExists(storageKey);
+      const storageFilename = storageKey.split('/').pop() || 'proposal.pdf';
+      const fileMtimeMs = await this.s3Service.getStorageMtimeMs(storageKey);
       const { document_url, document_cache_bust } = buildProposalDocumentViewUrl(
         projectId,
         proposalRaw,
-        projectAny.updatedAt,
+        fileMtimeMs ? new Date(fileMtimeMs) : projectAny.updatedAt,
       );
       response.proposal_document = {
-        has_document: true,
-        is_proposal_pdf_on_server: true,
+        has_document: onServer,
+        is_proposal_pdf_on_server: onServer,
         /** Same viewer URL as GET …/proposal-document (`/proposal-document/file?v=…`), not raw `/uploads/…`. */
-        document_url,
-        document_cache_bust,
+        document_url: onServer ? document_url : null,
+        document_cache_bust: onServer ? document_cache_bust : null,
+        s3_key: storageKey,
         /** Always use this for UI labels — do not derive a name from `document_url` (last path segment is `file`). */
         document_filename: storageFilename,
-        path: proposalRaw,
+        path: storageKey,
         uploaded_at: projectAny.updatedAt?.toISOString?.() ?? projectAny.createdAt?.toISOString?.() ?? new Date().toISOString(),
         ...proposalUploadHints,
       };
@@ -7853,13 +7891,29 @@ export class CompanyProjectsService {
     }
 
     if (workOrderAny?.wo_doc) {
-      const woDocPath = workOrderAny.wo_doc.startsWith('/') ? workOrderAny.wo_doc.substring(1) : workOrderAny.wo_doc;
-      const woPath = woDocPath.startsWith('http') ? woDocPath : `${baseUrl}/${woDocPath}`;
+      const woDocPath = workOrderAny.wo_doc.startsWith('/')
+        ? workOrderAny.wo_doc.substring(1)
+        : workOrderAny.wo_doc;
+      const storageKey =
+        this.s3Service.normalizeStorageKey(String(woDocPath)) ||
+        String(woDocPath).replace(/^\/+/, '');
+      const onServer = await this.s3Service.storageKeyExists(storageKey);
+      const fileMtimeMs = await this.s3Service.getStorageMtimeMs(storageKey);
+      const { document_url, document_cache_bust } = buildWorkOrderDocumentViewUrl(
+        projectId,
+        fileMtimeMs ?? workOrderAny.wo_doc_status_updated_at ?? workOrderAny.updatedAt,
+      );
       const woExtras = this.workOrderStatusExtras(workOrderAny);
       const woAccept = this.workOrderAcceptancePayload(workOrderAny);
       response.work_order = {
         wo_doc: workOrderAny.wo_doc,
-        wo_doc_url: woPath,
+        wo_doc_url: onServer ? document_url : null,
+        document_url: onServer ? document_url : null,
+        document_cache_bust: onServer ? document_cache_bust : null,
+        s3_key: storageKey,
+        path: storageKey,
+        has_document: onServer,
+        is_work_order_pdf_on_server: onServer,
         wo_status: workOrderAny.wo_status ?? 0,
         wo_remarks: workOrderAny.wo_remarks || null,
         wo_doc_status_updated_at: workOrderAny.wo_doc_status_updated_at?.toISOString?.() ?? workOrderAny.updatedAt?.toISOString?.() ?? workOrderAny.createdAt?.toISOString?.() ?? new Date().toISOString(),
@@ -8351,7 +8405,12 @@ export class CompanyProjectsService {
   /**
    * CII uploads work order PDF (company must have accepted proposal first).
    */
-  async uploadWorkOrderDocumentByCii(companyId: string, projectId: string, file: Express.Multer.File) {
+  async uploadWorkOrderDocumentByCii(
+    companyId: string,
+    projectId: string,
+    file?: Express.Multer.File,
+    body?: Record<string, unknown>,
+  ) {
     const project = await this.projectModel.findOne({ _id: projectId, company_id: companyId });
     if (!project) {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
@@ -8384,7 +8443,12 @@ export class CompanyProjectsService {
       });
     }
 
-    const relativePath = `uploads/companyproject/${projectId}/${file.filename}`;
+    const relativePath = await this.s3Service.resolveProjectDocumentKey(
+      projectId,
+      file,
+      body,
+      'work-order',
+    );
     let workOrder;
     if (existing && canReplaceExisting) {
       existing.wo_doc = relativePath;
@@ -8444,7 +8508,11 @@ export class CompanyProjectsService {
     };
   }
 
-  async uploadWorkOrderDocumentByCiiByProjectId(projectOrCompanyId: string, file: Express.Multer.File) {
+  async uploadWorkOrderDocumentByCiiByProjectId(
+    projectOrCompanyId: string,
+    file?: Express.Multer.File,
+    body?: Record<string, unknown>,
+  ) {
     const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
     if (!resolved?.company_id) {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
@@ -8453,10 +8521,16 @@ export class CompanyProjectsService {
       String(resolved.company_id),
       String(resolved._id),
       file,
+      body,
     );
   }
 
-  async replaceWorkOrderDocumentByCii(companyId: string, projectId: string, file: Express.Multer.File) {
+  async replaceWorkOrderDocumentByCii(
+    companyId: string,
+    projectId: string,
+    file?: Express.Multer.File,
+    body?: Record<string, unknown>,
+  ) {
     const project = await this.projectModel.findOne({ _id: projectId, company_id: companyId });
     if (!project) {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
@@ -8480,10 +8554,14 @@ export class CompanyProjectsService {
         data: { wo_company_review_status: reviewStatus, wo_status: latest.wo_status },
       });
     }
-    return this.uploadWorkOrderDocumentByCii(companyId, projectId, file);
+    return this.uploadWorkOrderDocumentByCii(companyId, projectId, file, body);
   }
 
-  async replaceWorkOrderDocumentByCiiByProjectId(projectOrCompanyId: string, file: Express.Multer.File) {
+  async replaceWorkOrderDocumentByCiiByProjectId(
+    projectOrCompanyId: string,
+    file?: Express.Multer.File,
+    body?: Record<string, unknown>,
+  ) {
     const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
     if (!resolved?.company_id) {
       throw new NotFoundException({ status: 'error', message: 'Project not found' });
@@ -8492,6 +8570,7 @@ export class CompanyProjectsService {
       String(resolved.company_id),
       String(resolved._id),
       file,
+      body,
     );
   }
 
@@ -8700,7 +8779,6 @@ export class CompanyProjectsService {
     const proposalAccepted =
       resolveProposalReviewStatus(project, workOrder) === PROPOSAL_REVIEW_STATUS.ACCEPTED;
 
-    const baseUrl = (process.env.API_BASE_URL || 'https://green-co-api-admin.onrender.com').replace(/\/+$/, '');
     const extras = this.workOrderStatusExtras(workOrder as any);
 
     if (!workOrder || !(workOrder as any).wo_doc) {
@@ -8730,15 +8808,25 @@ export class CompanyProjectsService {
 
     const workOrderAny = workOrder as any;
     const woDocPath = String(workOrderAny.wo_doc || '').replace(/^\/+/, '');
-    const url = woDocPath.startsWith('http') ? woDocPath : `${baseUrl}/${woDocPath}`;
+    const storageKey = this.s3Service.normalizeStorageKey(woDocPath) || woDocPath;
+    const onServer = await this.s3Service.storageKeyExists(storageKey);
+    const fileMtimeMs = await this.s3Service.getStorageMtimeMs(storageKey);
+    const { document_url, document_cache_bust } = buildWorkOrderDocumentViewUrl(
+      projectId,
+      fileMtimeMs ?? workOrderAny.wo_doc_status_updated_at ?? workOrderAny.updatedAt,
+    );
     const acceptance = this.workOrderAcceptancePayload(workOrderAny);
     return {
       status: 'success',
       message: 'Work order document retrieved successfully',
       data: {
-        has_document: true,
-        document_url: url,
-        document_filename: woDocPath.split('/').pop() || 'workorder.pdf',
+        has_document: onServer,
+        is_work_order_pdf_on_server: onServer,
+        document_url: onServer ? document_url : null,
+        document_cache_bust: onServer ? document_cache_bust : null,
+        s3_key: storageKey,
+        path: storageKey,
+        document_filename: storageKey.split('/').pop() || 'workorder.pdf',
         wo_status: workOrderAny.wo_status ?? 0,
         wo_remarks: workOrderAny.wo_remarks || null,
         wo_doc_status_updated_at:
@@ -8934,7 +9022,8 @@ export class CompanyProjectsService {
    */
   async uploadWorkOrderDocumentByProjectId(
     projectOrCompanyId: string,
-    file: Express.Multer.File,
+    file?: Express.Multer.File,
+    body?: Record<string, unknown>,
   ) {
     const resolved = await this.resolveProjectForQuickview(projectOrCompanyId);
     if (!resolved?.company_id) {
@@ -8944,6 +9033,8 @@ export class CompanyProjectsService {
       String(resolved.company_id),
       String(resolved._id),
       file,
+      undefined,
+      body,
     );
   }
 
@@ -8952,7 +9043,8 @@ export class CompanyProjectsService {
    */
   async uploadFacilitatorContractDocumentByProjectId(
     projectOrCompanyId: string,
-    file: Express.Multer.File,
+    file?: Express.Multer.File,
+    body?: Record<string, unknown>,
   ) {
     const resolved = await this.resolveProjectForQuickview(projectOrCompanyId);
     if (!resolved?.company_id) {
@@ -8963,6 +9055,7 @@ export class CompanyProjectsService {
       String(resolved._id),
       file,
       { facilitatorContract: true },
+      body,
     );
   }
 
@@ -8971,17 +9064,19 @@ export class CompanyProjectsService {
    */
   async reuploadWorkOrderDocumentByProjectId(
     projectOrCompanyId: string,
-    file: Express.Multer.File,
+    file?: Express.Multer.File,
+    body?: Record<string, unknown>,
   ) {
-    return this.uploadWorkOrderDocumentByProjectId(projectOrCompanyId, file);
+    return this.uploadWorkOrderDocumentByProjectId(projectOrCompanyId, file, body);
   }
 
   /** Facilitator flow re-upload (same gate as first facilitator contract upload). */
   async reuploadFacilitatorContractDocumentByProjectId(
     projectOrCompanyId: string,
-    file: Express.Multer.File,
+    file?: Express.Multer.File,
+    body?: Record<string, unknown>,
   ) {
-    return this.uploadFacilitatorContractDocumentByProjectId(projectOrCompanyId, file);
+    return this.uploadFacilitatorContractDocumentByProjectId(projectOrCompanyId, file, body);
   }
 
   /**
@@ -12550,8 +12645,9 @@ export class CompanyProjectsService {
   async uploadWorkOrderDocument(
     companyId: string,
     projectId: string,
-    file: Express.Multer.File,
+    file?: Express.Multer.File,
     options?: { facilitatorContract?: boolean },
+    body?: Record<string, unknown>,
   ) {
     const project = await this.projectModel.findOne({
       _id: projectId,
@@ -12610,10 +12706,12 @@ export class CompanyProjectsService {
       })
       .sort({ createdAt: -1 });
 
-    const baseUrl = process.env.API_BASE_URL || 'https://green-co-api-04z5.onrender.com';
-    // Use Laravel-compatible path: uploads/companyproject/{projectId}/
-    const relativePath = `uploads/companyproject/${projectId}/${file.filename}`;
-    const fullUrl = `${baseUrl}/${relativePath}`;
+    const relativePath = await this.s3Service.resolveProjectDocumentKey(
+      projectId,
+      file,
+      body,
+      'work-order',
+    );
 
     // Create or update work order document
     let workOrder;
@@ -12688,9 +12786,14 @@ export class CompanyProjectsService {
       })
       .sort({ createdAt: -1 });
 
+    const { document_url, document_cache_bust } = buildWorkOrderDocumentViewUrl(
+      projectId,
+      workOrder.wo_doc_status_updated_at ?? workOrder.updatedAt,
+    );
+
     console.log('[Work Order Upload] Document uploaded successfully:', {
       projectId: projectId.toString(),
-      documentUrl: fullUrl,
+      storageKey: relativePath,
       isReUpload,
       next_activities_id: project.next_activities_id,
     });
@@ -12723,8 +12826,12 @@ export class CompanyProjectsService {
         ? 'Work Order Document re-uploaded successfully' 
         : 'Work Order Document uploaded successfully',
       data: {
-        document_url: fullUrl,
-        document_filename: file.originalname,
+        document_url,
+        document_cache_bust,
+        s3_key: relativePath,
+        path: relativePath,
+        document_filename:
+          file?.originalname || relativePath.split('/').pop() || 'workorder.pdf',
         project_id: projectId,
         wo_status: 0,
         next_activities_id: project.next_activities_id,

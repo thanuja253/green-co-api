@@ -57,6 +57,7 @@ import {
   ReviewWorkOrderDocumentDto,
   normalizeWorkOrderReviewAction,
 } from './dto/review-work-order-document.dto';
+import { pickS3KeyFromBody } from '../../s3/project-document-storage.util';
 import {
   REGISTRATION_INFO_FILE_FIELDS,
   createRegistrationInfoValidationPipe,
@@ -723,16 +724,17 @@ export class CompanyProjectsController {
       proposalDocument?: Express.Multer.File[];
       file?: Express.Multer.File[];
     },
+    @Body() body?: Record<string, unknown>,
   ): Promise<any> {
     const file = pickProposalMultipartPdf(files);
-    if (!file) {
+    if (!file && !pickS3KeyFromBody(body)) {
       throw new BadRequestException({
         status: 'error',
         message: 'No file uploaded. Use proposal_document, proposalDocument, or file.',
       });
     }
-    assertNonEmptyProposalPdf(file);
-    return this.companyProjectsService.replaceProposalDocumentByProjectId(projectId, file);
+    if (file) assertNonEmptyProposalPdf(file);
+    return this.companyProjectsService.replaceProposalDocumentByProjectId(projectId, file, body);
   }
 
   /**
@@ -743,6 +745,9 @@ export class CompanyProjectsController {
   @Post(':projectId/proposal-document')
   @Put(':projectId/proposal-document')
   @Patch(':projectId/proposal-document')
+  @Post(':projectId/admin/proposal-document')
+  @Put(':projectId/admin/proposal-document')
+  @Patch(':projectId/admin/proposal-document')
   @UseGuards()
   @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
   @UseInterceptors(
@@ -795,24 +800,26 @@ export class CompanyProjectsController {
       proposalDocument?: Express.Multer.File[];
       file?: Express.Multer.File[];
     },
+    @Body() body?: Record<string, unknown>,
   ): Promise<any> {
     const file = pickProposalMultipartPdf(files);
 
-    if (!file) {
+    if (!file && !pickS3KeyFromBody(body)) {
       throw new BadRequestException({
         status: 'error',
         message: 'No file uploaded. Use proposal_document, proposalDocument, or file.',
       });
     }
-    assertNonEmptyProposalPdf(file);
+    if (file) assertNonEmptyProposalPdf(file);
 
     console.log('[Proposal Document Controller] Upload request:', {
       projectId,
-      filename: file.originalname,
-      size: file.size,
+      filename: file?.originalname,
+      size: file?.size,
+      s3_key: pickS3KeyFromBody(body),
     });
 
-    return this.companyProjectsService.uploadProposalDocumentByProjectId(projectId, file);
+    return this.companyProjectsService.uploadProposalDocumentByProjectId(projectId, file, body);
   }
 
   /**
@@ -902,6 +909,14 @@ export class CompanyProjectsController {
     @Res() res: Response,
   ): Promise<void> {
     await this.companyProjectsService.streamProposalDocumentByProjectId(projectId, res);
+  }
+
+  @Get(':projectId/work-order-document/file')
+  async viewWorkOrderDocument(
+    @Param('projectId') projectId: string,
+    @Res() res: Response,
+  ): Promise<void> {
+    await this.companyProjectsService.streamWorkOrderDocumentByProjectId(projectId, res);
   }
 
   /**
@@ -1930,14 +1945,15 @@ export class CompanyProjectsController {
   async reuploadWorkOrderDocument(
     @Param('projectId') projectId: string,
     @UploadedFile() file: Express.Multer.File,
+    @Body() body?: Record<string, unknown>,
   ): Promise<any> {
-    if (!file) {
+    if (!file && !pickS3KeyFromBody(body)) {
       throw new BadRequestException({
         status: 'error',
-        message: 'No file uploaded. Use field workorderdocument (PDF).',
+        message: 'No file uploaded. Use field workorderdocument (PDF) or s3_key after presigned upload.',
       });
     }
-    return this.companyProjectsService.reuploadWorkOrderDocumentByProjectId(projectId, file);
+    return this.companyProjectsService.reuploadWorkOrderDocumentByProjectId(projectId, file, body);
   }
 
   /**
@@ -2064,21 +2080,23 @@ export class CompanyProjectsController {
   async uploadWorkOrderDocument(
     @Param('projectId') projectId: string,
     @UploadedFile() file: Express.Multer.File,
+    @Body() body?: Record<string, unknown>,
   ): Promise<any> {
-    if (!file) {
+    if (!file && !pickS3KeyFromBody(body)) {
       throw new BadRequestException({
         status: 'error',
-        message: 'No file uploaded. Please select a PDF file.',
+        message: 'No file uploaded. Please select a PDF file or provide s3_key.',
       });
     }
 
     console.log('[Work Order Upload Controller] Upload request:', {
       projectId,
-      filename: file.originalname,
-      size: file.size,
+      filename: file?.originalname,
+      size: file?.size,
+      s3_key: pickS3KeyFromBody(body),
     });
 
-    return this.companyProjectsService.uploadWorkOrderDocumentByProjectId(projectId, file);
+    return this.companyProjectsService.uploadWorkOrderDocumentByProjectId(projectId, file, body);
   }
 
   /**
@@ -2115,11 +2133,12 @@ export class CompanyProjectsController {
   async uploadWorkOrderDocumentAsCompany(
     @Param('projectId') projectId: string,
     @UploadedFile() file: Express.Multer.File,
+    @Body() body?: Record<string, unknown>,
   ): Promise<any> {
-    if (!file) {
+    if (!file && !pickS3KeyFromBody(body)) {
       throw new BadRequestException({
         status: 'error',
-        message: 'No file uploaded. Use field workorderdocument (PDF).',
+        message: 'No file uploaded. Use field workorderdocument (PDF) or s3_key.',
       });
     }
     const resolved = await this.companyProjectsService.resolveProjectForQuickview(projectId);
@@ -2130,6 +2149,8 @@ export class CompanyProjectsController {
       String(resolved.company_id),
       String(resolved._id),
       file,
+      undefined,
+      body,
     );
   }
 

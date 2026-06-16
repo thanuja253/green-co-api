@@ -3,14 +3,26 @@ import {
   PutObjectCommand,
   DeleteObjectCommand,
   GetObjectCommand,
+  HeadObjectCommand,
   ListObjectsV2Command,
 } from '@aws-sdk/client-s3';
-import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { extname, join, dirname } from 'node:path';
 import { promises as fs } from 'node:fs';
-import type { Express } from 'express';
+import * as fsSync from 'node:fs';
+import { Readable } from 'node:stream';
+import type { Express, Response } from 'express';
+import { pickS3KeyFromBody } from './project-document-storage.util';
+
+export { pickS3KeyFromBody };
 
 const LAUNCH_TRAINING_PREFIX = 'uploads/companyproject/launchAndTraining';
 
@@ -154,6 +166,186 @@ export class S3Service {
       }),
     );
     return result.Contents || [];
+  }
+
+  /** Normalize DB / URL / presign values to an object key under `uploads/…`. */
+  normalizeStorageKey(raw: string): string | null {
+    const trimmed = String(raw || '').trim();
+    if (!trimmed) return null;
+    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+      try {
+        const u = new URL(trimmed);
+        const path = decodeURIComponent(u.pathname.replace(/^\/+/, ''));
+        const uploadsIdx = path.indexOf('uploads/');
+        if (uploadsIdx >= 0) return path.slice(uploadsIdx);
+        return path || null;
+      } catch {
+        return null;
+      }
+    }
+    if (trimmed.startsWith('uploads/')) return trimmed.replace(/^\/+/, '');
+    const idx = trimmed.indexOf('/uploads/');
+    if (idx >= 0) return trimmed.slice(idx + 1);
+    if (trimmed.startsWith('/uploads/')) return trimmed.replace(/^\/+/, '');
+    return trimmed.replace(/^\/+/, '');
+  }
+
+  buildProposalDocumentKey(projectId: string, originalname: string): string {
+    const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+    const ext = extname(originalname || '') || '.pdf';
+    return `uploads/company/${projectId}/proposal-${uniqueSuffix}${ext}`;
+  }
+
+  buildWorkOrderDocumentKey(projectId: string, originalname: string): string {
+    const timestamp = Date.now();
+    const safeName = String(originalname || 'workorder.pdf').replace(/[/\\]+/g, '_');
+    return `uploads/companyproject/${projectId}/${timestamp}_${safeName}`;
+  }
+
+  /**
+   * Resolve storage key from presigned client upload (body fields) or multer file bytes.
+   */
+  async resolveProjectDocumentKey(
+    projectId: string,
+    file: Express.Multer.File | undefined,
+    body: Record<string, unknown> | undefined,
+    kind: 'proposal' | 'work-order',
+  ): Promise<string> {
+    const fromBody = pickS3KeyFromBody(body);
+    if (fromBody) {
+      const normalized = this.normalizeStorageKey(fromBody);
+      if (!normalized) {
+        throw new BadRequestException({
+          status: 'error',
+          message: 'Invalid s3_key in request body.',
+        });
+      }
+      const exists = await this.storageKeyExists(normalized);
+      if (!exists) {
+        throw new BadRequestException({
+          status: 'error',
+          message: `Uploaded file not found in storage for key: ${normalized}. Complete the S3 PUT before calling this API.`,
+        });
+      }
+      return normalized;
+    }
+    if (!file) {
+      throw new BadRequestException({
+        status: 'error',
+        message:
+          kind === 'proposal'
+            ? 'No file uploaded. Use proposal_document, proposalDocument, or file.'
+            : 'No file uploaded. Use workorderdocument (PDF) or s3_key after presigned upload.',
+      });
+    }
+    const key =
+      kind === 'proposal'
+        ? this.buildProposalDocumentKey(projectId, file.originalname)
+        : this.buildWorkOrderDocumentKey(projectId, file.originalname);
+    return this.saveMulterFileToStorage(file, key);
+  }
+
+  async saveMulterFileToStorage(file: Express.Multer.File, key: string): Promise<string> {
+    await this.persistFile(key, file);
+    const diskPath = (file as Express.Multer.File & { path?: string }).path;
+    if (diskPath && fsSync.existsSync(diskPath)) {
+      try {
+        await fs.unlink(diskPath);
+      } catch {
+        /* ignore temp cleanup */
+      }
+    }
+    return key;
+  }
+
+  async storageKeyExists(key: string): Promise<boolean> {
+    const normalized = this.normalizeStorageKey(key);
+    if (!normalized) return false;
+    const diskPath = join(process.cwd(), normalized);
+    if (fsSync.existsSync(diskPath)) return true;
+    if (!this.useS3 || !this.s3Client) return false;
+    try {
+      await this.s3Client.send(
+        new HeadObjectCommand({ Bucket: this.bucket, Key: normalized }),
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async getStorageMtimeMs(key: string): Promise<number | null> {
+    const normalized = this.normalizeStorageKey(key);
+    if (!normalized) return null;
+    const diskPath = join(process.cwd(), normalized);
+    try {
+      if (fsSync.existsSync(diskPath)) {
+        return fsSync.statSync(diskPath).mtimeMs;
+      }
+    } catch {
+      /* ignore */
+    }
+    if (!this.useS3 || !this.s3Client) return null;
+    try {
+      const head = await this.s3Client.send(
+        new HeadObjectCommand({ Bucket: this.bucket, Key: normalized }),
+      );
+      return head.LastModified ? head.LastModified.getTime() : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async streamStorageKeyToResponse(
+    res: Response,
+    key: string,
+    filename: string,
+    contentType = 'application/pdf',
+  ): Promise<void> {
+    const normalized = this.normalizeStorageKey(key);
+    if (!normalized) {
+      throw new NotFoundException({ status: 'error', message: 'File not found' });
+    }
+
+    const diskPath = join(process.cwd(), normalized);
+    if (fsSync.existsSync(diskPath)) {
+      res.setHeader('Content-Type', contentType);
+      const safeName = String(filename).replace(/"/g, "'");
+      res.setHeader('Content-Disposition', `inline; filename="${safeName}"`);
+      res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate, max-age=0');
+      await new Promise<void>((resolve, reject) => {
+        res.status(200).sendFile(diskPath, (err) => (err ? reject(err) : resolve()));
+      });
+      return;
+    }
+
+    if (this.useS3 && this.s3Client) {
+      try {
+        const out = await this.s3Client.send(
+          new GetObjectCommand({ Bucket: this.bucket, Key: normalized }),
+        );
+        res.setHeader('Content-Type', contentType);
+        const safeName = String(filename).replace(/"/g, "'");
+        res.setHeader('Content-Disposition', `inline; filename="${safeName}"`);
+        res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate, max-age=0');
+        if (out.ContentLength != null) {
+          res.setHeader('Content-Length', String(out.ContentLength));
+        }
+        const body = out.Body;
+        if (body instanceof Readable) {
+          await new Promise<void>((resolve, reject) => {
+            body.on('error', reject);
+            res.on('close', resolve);
+            body.pipe(res);
+          });
+          return;
+        }
+      } catch (err: any) {
+        this.logger.warn(`S3 get failed for ${normalized}: ${err?.message || err}`);
+      }
+    }
+
+    throw new NotFoundException({ status: 'error', message: 'File not found' });
   }
 
   private async persistFile(key: string, file: Express.Multer.File): Promise<void> {

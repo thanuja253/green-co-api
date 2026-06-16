@@ -139,6 +139,14 @@ export class AdminJwtAuthGuard implements CanActivate {
     if (/^\/?admin\/legacy-data$/i.test(path)) {
       return true;
     }
+    // Company registered/submitted list search — public for admin UI (greenco-one) compatibility.
+    if (
+      /^\/?api\/company\/auth\/(companies-list|submitted[-_]companies?|registered[-_]companies?|registerd[-_]companies?)$/i.test(
+        path,
+      )
+    ) {
+      return true;
+    }
     const authHeader = req.headers?.authorization || req.headers?.Authorization;
     const token = this.extractBearerToken(authHeader);
 
