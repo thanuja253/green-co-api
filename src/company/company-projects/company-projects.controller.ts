@@ -119,6 +119,16 @@ export class CompanyProjectsController {
     private readonly companyProjectsService: CompanyProjectsService,
   ) {}
 
+  /** Require company JWT and verify the project belongs to that company (404 if not). */
+  private async requireCompanyProject(
+    req: { user?: { userId?: string } },
+    projectId: string,
+  ): Promise<string> {
+    const companyId = String(req?.user?.userId || '').trim();
+    await this.companyProjectsService.assertCompanyOwnsProject(companyId, projectId);
+    return companyId;
+  }
+
   /**
    * List all active coordinators (for admin dropdown).
    * GET /api/company/projects/coordinators
@@ -213,9 +223,11 @@ export class CompanyProjectsController {
   @Get(':projectId/certificate-document')
   @UseGuards(JwtAuthGuard, AccountStatusGuard)
   async getCertificateDocument(
+    @Request() req,
     @Param('projectId') projectId: string,
     @Res() res: Response,
   ) {
+    await this.requireCompanyProject(req, projectId);
     const file = await this.companyProjectsService.getCertificateDocumentDownloadByProjectId(projectId);
 
     res.setHeader('Content-Type', 'application/pdf');
@@ -228,10 +240,13 @@ export class CompanyProjectsController {
   }
 
   @Get(':projectId/feedback-document')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   async getFeedbackDocument(
+    @Request() req,
     @Param('projectId') projectId: string,
     @Res() res: Response,
   ) {
+    await this.requireCompanyProject(req, projectId);
     const file = await this.companyProjectsService.getFeedbackDocumentDownloadByProjectId(
       projectId,
     );
@@ -373,32 +388,15 @@ export class CompanyProjectsController {
   }
 
   @Get(':projectId/quickview')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
   @Header('Pragma', 'no-cache')
   async getQuickview(
     @Request() req,
     @Param('projectId') projectId: string,
   ): Promise<any> {
-    const resolved = await this.companyProjectsService.resolveProjectForQuickview(projectId);
-    if (!resolved?.company_id) {
-      throw new NotFoundException({
-        status: 'error',
-        message: 'Project not found or quickview not available.',
-      });
-    }
-    const resolvedCompanyId = String(resolved.company_id);
-    const resolvedProjectId = String(resolved._id);
-    const jwtCompanyId = String(req?.user?.userId || '').trim();
-    if (jwtCompanyId && jwtCompanyId !== resolvedCompanyId) {
-      throw new NotFoundException({
-        status: 'error',
-        message: 'Project not found or quickview not available.',
-      });
-    }
-    return this.companyProjectsService.getQuickviewData(
-      resolvedCompanyId,
-      resolvedProjectId,
-    );
+    const companyId = await this.requireCompanyProject(req, projectId);
+    return this.companyProjectsService.getQuickviewData(companyId, projectId);
   }
 
   @Post(':projectId/milestones')
@@ -647,11 +645,14 @@ export class CompanyProjectsController {
   }
 
   @Get(':projectId/registration-files/:fileType')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   async getRegistrationFile(
+    @Request() req,
     @Param('projectId') projectId: string,
     @Param('fileType') fileType: string,
     @Res() res: Response,
   ) {
+    await this.requireCompanyProject(req, projectId);
     const project = await this.companyProjectsService.getProjectForRegistrationFile(projectId);
 
     const download = await this.companyProjectsService.resolveRegistrationFileDownload(
@@ -827,9 +828,14 @@ export class CompanyProjectsController {
    * GET /api/company/projects/:projectId/proposal-document/reload
    */
   @Get(':projectId/proposal-document/reload')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
-  async reloadProposalDocumentState(@Param('projectId') projectId: string): Promise<any> {
-    return this.companyProjectsService.getProposalDocumentByProjectId(projectId);
+  async reloadProposalDocumentState(
+    @Request() req,
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    const companyId = await this.requireCompanyProject(req, projectId);
+    return this.companyProjectsService.getProposalDocument(companyId, projectId);
   }
 
   /**
@@ -837,7 +843,12 @@ export class CompanyProjectsController {
    * GET /api/company/projects/:projectId/proposal-document/document
    */
   @Get(':projectId/proposal-document/document')
-  async getProposalDocumentFileInfo(@Param('projectId') projectId: string): Promise<any> {
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
+  async getProposalDocumentFileInfo(
+    @Request() req,
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    await this.requireCompanyProject(req, projectId);
     return this.companyProjectsService.getProposalDocumentFileInfoByProjectId(projectId);
   }
 
@@ -846,11 +857,14 @@ export class CompanyProjectsController {
    * GET /api/company/projects/:projectId/proposal-document
    */
   @Get(':projectId/proposal-document')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
   async getProposalDocument(
+    @Request() req,
     @Param('projectId') projectId: string,
   ): Promise<any> {
-    return this.companyProjectsService.getProposalDocumentByProjectId(projectId);
+    const companyId = await this.requireCompanyProject(req, projectId);
+    return this.companyProjectsService.getProposalDocument(companyId, projectId);
   }
 
   /**
@@ -858,10 +872,13 @@ export class CompanyProjectsController {
    * GET /api/company/projects/:projectId/proposal-document/workflow
    */
   @Get(':projectId/proposal-document/workflow')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
   async getProposalDocumentWorkflow(
+    @Request() req,
     @Param('projectId') projectId: string,
   ): Promise<any> {
+    await this.requireCompanyProject(req, projectId);
     return this.companyProjectsService.getProposalDocumentWorkflowByProjectId(projectId);
   }
 
@@ -872,6 +889,7 @@ export class CompanyProjectsController {
    */
   @Patch(':projectId/proposal-document/review')
   @Post(':projectId/proposal-document/review')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
   @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
   async reviewProposalDocument(
@@ -887,16 +905,9 @@ export class CompanyProjectsController {
       });
     }
     const remarks = dto.remarks ?? dto.remark;
-    const companyId = String(req?.user?.userId || '').trim();
-    if (companyId) {
-      return this.companyProjectsService.reviewProposalDocument(
-        companyId,
-        projectId,
-        action,
-        remarks,
-      );
-    }
-    return this.companyProjectsService.reviewProposalDocumentByProjectId(
+    const companyId = await this.requireCompanyProject(req, projectId);
+    return this.companyProjectsService.reviewProposalDocument(
+      companyId,
       projectId,
       action,
       remarks,
@@ -904,18 +915,24 @@ export class CompanyProjectsController {
   }
 
   @Get(':projectId/proposal-document/file')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   async viewProposalDocument(
+    @Request() req,
     @Param('projectId') projectId: string,
     @Res() res: Response,
   ): Promise<void> {
+    await this.requireCompanyProject(req, projectId);
     await this.companyProjectsService.streamProposalDocumentByProjectId(projectId, res);
   }
 
   @Get(':projectId/work-order-document/file')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   async viewWorkOrderDocument(
+    @Request() req,
     @Param('projectId') projectId: string,
     @Res() res: Response,
   ): Promise<void> {
+    await this.requireCompanyProject(req, projectId);
     await this.companyProjectsService.streamWorkOrderDocumentByProjectId(projectId, res);
   }
 
@@ -1058,9 +1075,14 @@ export class CompanyProjectsController {
    * GET /api/company/projects/:projectId/proposal-workorder-documents/refresh
    */
   @Get(':projectId/proposal-workorder-documents/refresh')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
-  async refreshProposalWorkOrderDocuments(@Param('projectId') projectId: string): Promise<any> {
-    return this.companyProjectsService.getProposalWorkOrderDocumentsByProjectId(projectId);
+  async refreshProposalWorkOrderDocuments(
+    @Request() req,
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    const companyId = await this.requireCompanyProject(req, projectId);
+    return this.companyProjectsService.getProposalWorkOrderDocuments(companyId, projectId);
   }
 
   /**
@@ -1069,11 +1091,14 @@ export class CompanyProjectsController {
    * GET /api/company/projects/:projectId/proposal-workorder-documents
    */
   @Get(':projectId/proposal-workorder-documents')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
   async getProposalWorkOrderDocuments(
+    @Request() req,
     @Param('projectId') projectId: string,
   ): Promise<any> {
-    return this.companyProjectsService.getProposalWorkOrderDocumentsByProjectId(projectId);
+    const companyId = await this.requireCompanyProject(req, projectId);
+    return this.companyProjectsService.getProposalWorkOrderDocuments(companyId, projectId);
   }
 
   /**
@@ -1224,11 +1249,12 @@ export class CompanyProjectsController {
    * GET /api/company/projects/:projectId/primary-data
    */
   @Get(':projectId/primary-data')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   async getPrimaryData(
     @Request() req,
     @Param('projectId') projectId: string,
   ): Promise<any> {
-    const companyId = req?.user?.userId;
+    const companyId = await this.requireCompanyProject(req, projectId);
     return this.companyProjectsService.getPrimaryData(companyId, projectId);
   }
 
@@ -1237,11 +1263,12 @@ export class CompanyProjectsController {
    * GET /api/company/projects/:projectId/primary-data/ee
    */
   @Get(':projectId/primary-data/ee')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   async getPrimaryDataEe(
     @Request() req,
     @Param('projectId') projectId: string,
   ): Promise<any> {
-    const companyId = req?.user?.userId;
+    const companyId = await this.requireCompanyProject(req, projectId);
     return this.companyProjectsService.getPrimaryDataEe(companyId, projectId);
   }
 
@@ -1284,12 +1311,13 @@ export class CompanyProjectsController {
    * Body supports: form_type=ee, ee[6], ee[7], ... (same as legacy /company/primary_data/:projectId).
    */
   @Post(':projectId/primary-data/ee')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   async savePrimaryDataEe(
     @Request() req,
     @Param('projectId') projectId: string,
     @Body() body: { form_type?: string; formType?: string; ee?: Record<string, any> | any[]; [key: string]: any },
   ): Promise<any> {
-    const companyId = req?.user?.userId;
+    const companyId = await this.requireCompanyProject(req, projectId);
     return this.companyProjectsService.savePrimaryDataEeByCompanyProjectId(
       companyId,
       projectId,
@@ -2159,8 +2187,13 @@ export class CompanyProjectsController {
    * GET /api/company/projects/:projectId/work-order-document/workflow
    */
   @Get(':projectId/work-order-document/workflow')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
-  async getWorkOrderDocumentWorkflow(@Param('projectId') projectId: string): Promise<any> {
+  async getWorkOrderDocumentWorkflow(
+    @Request() req,
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    await this.requireCompanyProject(req, projectId);
     return this.companyProjectsService.getWorkOrderDocumentWorkflowByProjectId(projectId);
   }
 
@@ -2169,17 +2202,27 @@ export class CompanyProjectsController {
    * GET /api/company/projects/:projectId/work-order-document
    */
   @Get(':projectId/work-order-document')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
   @Header('Pragma', 'no-cache')
-  async getWorkOrderDocument(@Param('projectId') projectId: string): Promise<any> {
-    return this.companyProjectsService.getWorkOrderDocumentByProjectId(projectId);
+  async getWorkOrderDocument(
+    @Request() req,
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    const companyId = await this.requireCompanyProject(req, projectId);
+    return this.companyProjectsService.getWorkOrderDocument(companyId, projectId);
   }
 
   @Get(':projectId/facilitator-contract-document')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
   @Header('Pragma', 'no-cache')
-  async getFacilitatorContractDocument(@Param('projectId') projectId: string): Promise<any> {
-    return this.companyProjectsService.getWorkOrderDocumentByProjectId(projectId);
+  async getFacilitatorContractDocument(
+    @Request() req,
+    @Param('projectId') projectId: string,
+  ): Promise<any> {
+    const companyId = await this.requireCompanyProject(req, projectId);
+    return this.companyProjectsService.getWorkOrderDocument(companyId, projectId);
   }
 
   @Post(':projectId/facilitator-contract-document')
