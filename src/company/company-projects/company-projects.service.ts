@@ -86,6 +86,7 @@ import {
   MILESTONE_STEPS,
   WorkflowEventType,
 } from '../notifications/workflow-milestone.constants';
+import { getQuickviewDisplayText } from './cii-flow-quickview-labels';
 import { WorkflowNotificationMeta } from '../notifications/workflow-notification.types';
 import { MailService } from '../../mail/mail.service';
 import { S3Service } from '../../s3/s3.service';
@@ -5754,6 +5755,14 @@ export class CompanyProjectsService {
       ? milestoneSteps[latestCompletedMilestoneNumber]
       : null;
     const latestCompletedMilestoneName = latestCompletedMilestone?.name || null;
+    // Display text only — ids/flow unchanged; Latest=current_activity, Next=next_activity from PHP labels.
+    const quickviewTextForCompleted =
+      latestCompletedMilestoneNumber > 0
+        ? getQuickviewDisplayText(latestCompletedMilestoneNumber)
+        : null;
+    const quickviewTextForNext = getQuickviewDisplayText(
+      latestCompletedMilestoneNumber > 0 ? latestCompletedMilestoneNumber : 1,
+    );
 
     // Next step: at least (latest + 1), use project.next_activities_id only if it's ahead (so stale DB still shows correct next)
     const derivedNext = latestCompletedMilestoneNumber >= 24 ? 24 : latestCompletedMilestoneNumber + 1;
@@ -5827,7 +5836,7 @@ export class CompanyProjectsService {
               ? 'Recertification started – open your new project'
               : isAtCloseOutNoRecertify
                 ? 'Certificate created'
-                : nextActivityInfo.name;
+                : quickviewTextForNext?.nextText ?? nextActivityInfo.name;
     const nextStepDisplayStatus =
       contractFlowQv ||
       proposalReviewQv ||
@@ -5858,7 +5867,7 @@ export class CompanyProjectsService {
               ? primaryDataReuploadAccepted.nextResp
               : isAtCloseOutNoRecertify
                 ? 'CII'
-                : nextActivityInfo.responsibility;
+                : quickviewTextForNext?.nextResp ?? nextActivityInfo.responsibility;
 
     // Build profile object
     const projectCodeStr =
@@ -5957,11 +5966,13 @@ export class CompanyProjectsService {
                 }
               : latestCompletedMilestoneName
           ? {
-              activity: latestCompletedMilestoneName,
-              activity_status: 'Completed',
+              activity:
+                quickviewTextForCompleted?.latestText ?? latestCompletedMilestoneName,
+              activity_status: 'Done',
               responsibility:
-                latestCompletedMilestone?.responsibility ||
-                milestoneResponsibilityMap[latestCompletedMilestoneNumber] ||
+                quickviewTextForCompleted?.latestResp ??
+                latestCompletedMilestone?.responsibility ??
+                milestoneResponsibilityMap[latestCompletedMilestoneNumber] ??
                 'Company',
             }
           : currentActivity
@@ -6142,10 +6153,13 @@ export class CompanyProjectsService {
               }
             : {
                 id: latestCompletedMilestoneNumber || 0,
-                name: latestCompletedMilestoneName || currentActivityData.activity,
+                name:
+                  (quickviewTextForCompleted?.latestText ??
+                    latestCompletedMilestoneName) ||
+                  currentActivityData.activity,
               status:
                 latestCompletedMilestoneNumber != null && latestCompletedMilestoneNumber > 0
-                  ? 'Completed'
+                  ? 'Done'
                   : currentActivityData.activity_status === 'Done'
                     ? 'Done'
                     : 'Pending',
