@@ -1,6 +1,7 @@
 import { BadRequestException } from '@nestjs/common';
 import { FileFieldsInterceptor, FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
+import { pickLaunchTrainingS3KeyFromBody } from '../../s3/project-document-storage.util';
 import type { CompanyProjectsService } from './company-projects.service';
 import type { UploadLaunchAndTrainingDto } from './dto/upload-launch-and-training.dto';
 
@@ -73,16 +74,18 @@ export function addLaunchTrainingSessionFromMultipart(
     files?.document_file?.[0] ||
     files?.upload?.[0] ||
     files?.launch_upload?.[0];
-  if (!file) {
+  const body = dto as Record<string, unknown>;
+  if (!file && !pickLaunchTrainingS3KeyFromBody(body)) {
     throw new BadRequestException({
       status: 'error',
       message:
-        'No file uploaded. Use multipart field launch_session_file, file, document, document_file, upload, or launch_upload (PDF or image, max 10MB).',
+        'No file uploaded. Use multipart field launch_session_file, file, document, document_file, upload, or launch_upload (PDF or image, max 10MB), or provide launch_session_file_s3_key / s3_key after presigned upload.',
     });
   }
   return companyProjectsService.addLaunchTrainingSessionForAdmin(
     projectId,
     file,
     dto.session_date || dto.launch_training_report_date,
+    body,
   );
 }

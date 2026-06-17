@@ -9468,21 +9468,24 @@ export class CompanyProjectsService {
   async addLaunchTrainingSessionForFacilitator(
     facilitatorId: string,
     projectId: string,
-    file: Express.Multer.File,
+    file: Express.Multer.File | undefined,
     sessionDateRaw?: string,
+    body?: Record<string, unknown>,
   ) {
     const resolved = await this.resolveFacilitatorLaunchTrainingProject(facilitatorId, projectId);
     return this.addLaunchTrainingSessionForAdmin(
       resolved.projectId,
       file,
       sessionDateRaw,
+      body,
     );
   }
 
   async addLaunchTrainingSessionForAdmin(
     projectOrCompanyId: string,
-    file: Express.Multer.File,
+    file: Express.Multer.File | undefined,
     sessionDateRaw?: string,
+    body?: Record<string, unknown>,
   ) {
     const resolved = await this.resolveProjectForAdmin(projectOrCompanyId);
     if (!resolved) {
@@ -9527,7 +9530,8 @@ export class CompanyProjectsService {
       });
     }
 
-    const relativePath = await this.s3Service.saveLaunchTrainingSessionFile(projectId, file);
+    const { key: relativePath, originalFilename } =
+      await this.s3Service.resolveLaunchTrainingSessionKey(projectId, file, body);
     const sessionDate = sessionDateRaw
       ? (() => {
           const d = new Date(sessionDateRaw);
@@ -9537,7 +9541,7 @@ export class CompanyProjectsService {
 
     const entry = {
       relative_path: relativePath,
-      original_filename: file.originalname,
+      original_filename: originalFilename,
       session_date: sessionDate,
       uploaded_at: new Date(),
     };

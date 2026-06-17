@@ -15,14 +15,17 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { extname, join, dirname } from 'node:path';
+import { basename, extname, join, dirname } from 'node:path';
 import { promises as fs } from 'node:fs';
 import * as fsSync from 'node:fs';
 import { Readable } from 'node:stream';
 import type { Express, Response } from 'express';
-import { pickS3KeyFromBody } from './project-document-storage.util';
+import {
+  pickLaunchTrainingS3KeyFromBody,
+  pickS3KeyFromBody,
+} from './project-document-storage.util';
 
-export { pickS3KeyFromBody };
+export { pickLaunchTrainingS3KeyFromBody, pickS3KeyFromBody };
 
 const LAUNCH_TRAINING_PREFIX = 'uploads/companyproject/launchAndTraining';
 
@@ -86,6 +89,46 @@ export class S3Service {
     const key = this.buildLaunchTrainingSessionKey(projectId, file.originalname);
     await this.persistFile(key, file);
     return key;
+  }
+
+  /**
+   * Resolve Launch & Training session key from presigned client upload (body fields) or multer file bytes.
+   */
+  async resolveLaunchTrainingSessionKey(
+    projectId: string,
+    file: Express.Multer.File | undefined,
+    body: Record<string, unknown> | undefined,
+  ): Promise<{ key: string; originalFilename: string }> {
+    const fromBody = pickLaunchTrainingS3KeyFromBody(body);
+    if (fromBody) {
+      const normalized = this.normalizeStorageKey(fromBody);
+      if (!normalized) {
+        throw new BadRequestException({
+          status: 'error',
+          message: 'Invalid s3_key in request body.',
+        });
+      }
+      const exists = await this.storageKeyExists(normalized);
+      if (!exists) {
+        throw new BadRequestException({
+          status: 'error',
+          message: `Uploaded file not found in storage for key: ${normalized}. Complete the S3 PUT before calling this API.`,
+        });
+      }
+      return {
+        key: normalized,
+        originalFilename: basename(normalized) || 'launch-training-session',
+      };
+    }
+    if (!file) {
+      throw new BadRequestException({
+        status: 'error',
+        message:
+          'No file uploaded. Use multipart field launch_session_file, file, document, document_file, upload, or launch_upload (PDF or image, max 10MB), or provide launch_session_file_s3_key / s3_key after presigned upload.',
+      });
+    }
+    const key = await this.saveLaunchTrainingSessionFile(projectId, file);
+    return { key, originalFilename: file.originalname };
   }
 
   async saveLegacyLaunchTrainingFile(

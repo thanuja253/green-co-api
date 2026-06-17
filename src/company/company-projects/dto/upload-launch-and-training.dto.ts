@@ -29,4 +29,34 @@ export class UploadLaunchAndTrainingDto {
   )
   @IsString()
   session_index?: string;
+
+  /** Optional session time (UI metadata; not persisted separately from session_date). */
+  @IsOptional()
+  @IsString()
+  session_time?: string;
+
+  /** Presigned S3 upload — same pattern as proposal / work order. */
+  @IsOptional()
+  @IsString()
+  launch_session_file_s3_key?: string;
+
+  @IsOptional()
+  @IsString()
+  launch_training_document_s3_key?: string;
+
+  @IsOptional()
+  @IsString()
+  launch_and_training_document_s3_key?: string;
+
+  @IsOptional()
+  @IsString()
+  document_s3_key?: string;
+
+  @IsOptional()
+  @IsString()
+  file_s3_key?: string;
+
+  @IsOptional()
+  @IsString()
+  s3_key?: string;
 }
