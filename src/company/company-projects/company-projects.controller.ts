@@ -373,6 +373,7 @@ export class CompanyProjectsController {
   }
 
   @Get(':projectId/quickview')
+  @UseGuards(JwtAuthGuard, AccountStatusGuard)
   @Header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
   @Header('Pragma', 'no-cache')
   async getQuickview(
@@ -388,8 +389,8 @@ export class CompanyProjectsController {
     }
     const resolvedCompanyId = String(resolved.company_id);
     const resolvedProjectId = String(resolved._id);
-    const jwtCompanyId = String(req?.user?.userId || '').trim();
-    if (jwtCompanyId && jwtCompanyId !== resolvedCompanyId) {
+    const jwtCompanyId = String(req.user.userId).trim();
+    if (jwtCompanyId !== resolvedCompanyId) {
       throw new NotFoundException({
         status: 'error',
         message: 'Project not found or quickview not available.',
