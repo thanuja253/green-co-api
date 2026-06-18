@@ -21,6 +21,11 @@ import { CreateProformaInvoiceV2Dto } from './dto/create-proforma-invoice-v2.dto
 import { UpdateProformaInvoiceV2Dto } from './dto/update-proforma-invoice-v2.dto';
 import { SubmitFinanceV2PaymentDto } from './dto/submit-finance-v2-payment.dto';
 import { UpdateFinanceV2ApprovalDto } from './dto/update-finance-v2-approval.dto';
+import {
+  assertFinanceV2InvoiceCreateUpload,
+  FinanceV2PaymentFiles,
+  pickFinanceV2PaymentMultipartFile,
+} from './finance-v2-upload.config';
 
 @Controller(['api/facilitator/projects', 'api/facilitators/projects'])
 export class FacilitatorFinanceV2Controller {
@@ -58,14 +63,9 @@ export class FacilitatorFinanceV2Controller {
   async createFinanceV2Invoice(
     @Param('projectId') projectId: string,
     @Body() dto: CreateProformaInvoiceV2Dto,
-    @UploadedFile() file: Express.Multer.File,
+    @UploadedFile() file?: Express.Multer.File,
   ): Promise<any> {
-    if (!file) {
-      throw new BadRequestException({
-        status: 'error',
-        message: 'No file uploaded. Use field name "invoice_document".',
-      });
-    }
+    assertFinanceV2InvoiceCreateUpload(file, dto);
     return this.companyProjectsService.createFinanceV2InvoiceByProjectId(projectId, dto, file);
   }
 
@@ -158,33 +158,9 @@ export class FacilitatorFinanceV2Controller {
     @Param('projectId') projectId: string,
     @Param('invoiceId') invoiceId: string,
     @Body() dto: SubmitFinanceV2PaymentDto,
-    @UploadedFiles()
-    files?: {
-      supportingdocument?: Express.Multer.File[];
-      supporting_document?: Express.Multer.File[];
-      supportingDocument?: Express.Multer.File[];
-      'supporting-document'?: Express.Multer.File[];
-      supporting_doc?: Express.Multer.File[];
-      supportingDoc?: Express.Multer.File[];
-      document?: Express.Multer.File[];
-      payment_document?: Express.Multer.File[];
-      offline_tran_doc?: Express.Multer.File[];
-      offlineTranDoc?: Express.Multer.File[];
-      file?: Express.Multer.File[];
-    },
+    @UploadedFiles() files?: FinanceV2PaymentFiles,
   ): Promise<any> {
-    const file =
-      files?.supportingdocument?.[0] ||
-      files?.supporting_document?.[0] ||
-      files?.supportingDocument?.[0] ||
-      files?.['supporting-document']?.[0] ||
-      files?.supporting_doc?.[0] ||
-      files?.supportingDoc?.[0] ||
-      files?.document?.[0] ||
-      files?.payment_document?.[0] ||
-      files?.offline_tran_doc?.[0] ||
-      files?.offlineTranDoc?.[0] ||
-      files?.file?.[0];
+    const file = pickFinanceV2PaymentMultipartFile(files);
     return this.companyProjectsService.submitFinanceV2PaymentByProjectId(
       projectId,
       invoiceId,
@@ -263,14 +239,9 @@ export class FacilitatorFinanceV2Controller {
   async createFinanceV2ProformaInvoice(
     @Param('projectId') projectId: string,
     @Body() dto: CreateProformaInvoiceV2Dto,
-    @UploadedFile() file: Express.Multer.File,
+    @UploadedFile() file?: Express.Multer.File,
   ): Promise<any> {
-    if (!file) {
-      throw new BadRequestException({
-        status: 'error',
-        message: 'No file uploaded. Use field name "invoice_document".',
-      });
-    }
+    assertFinanceV2InvoiceCreateUpload(file, dto);
     return this.companyProjectsService.createFinanceV2InvoiceByProjectId(
       projectId,
       { ...dto, invoice_type: 'proforma', payment_for: 'per_inv', payment_type: 'proforma' },
@@ -383,33 +354,9 @@ export class FacilitatorFinanceV2Controller {
     @Param('projectId') projectId: string,
     @Param('invoiceId') invoiceId: string,
     @Body() dto: SubmitFinanceV2PaymentDto,
-    @UploadedFiles()
-    files?: {
-      supportingdocument?: Express.Multer.File[];
-      supporting_document?: Express.Multer.File[];
-      supportingDocument?: Express.Multer.File[];
-      'supporting-document'?: Express.Multer.File[];
-      supporting_doc?: Express.Multer.File[];
-      supportingDoc?: Express.Multer.File[];
-      document?: Express.Multer.File[];
-      payment_document?: Express.Multer.File[];
-      offline_tran_doc?: Express.Multer.File[];
-      offlineTranDoc?: Express.Multer.File[];
-      file?: Express.Multer.File[];
-    },
+    @UploadedFiles() files?: FinanceV2PaymentFiles,
   ): Promise<any> {
-    const file =
-      files?.supportingdocument?.[0] ||
-      files?.supporting_document?.[0] ||
-      files?.supportingDocument?.[0] ||
-      files?.['supporting-document']?.[0] ||
-      files?.supporting_doc?.[0] ||
-      files?.supportingDoc?.[0] ||
-      files?.document?.[0] ||
-      files?.payment_document?.[0] ||
-      files?.offline_tran_doc?.[0] ||
-      files?.offlineTranDoc?.[0] ||
-      files?.file?.[0];
+    const file = pickFinanceV2PaymentMultipartFile(files);
     return this.companyProjectsService.submitFinanceV2PaymentByProjectId(projectId, invoiceId, dto, file);
   }
 
@@ -448,14 +395,9 @@ export class FacilitatorFinanceV2Controller {
   async createFinanceV2TaxInvoice(
     @Param('projectId') projectId: string,
     @Body() dto: CreateProformaInvoiceV2Dto,
-    @UploadedFile() file: Express.Multer.File,
+    @UploadedFile() file?: Express.Multer.File,
   ): Promise<any> {
-    if (!file) {
-      throw new BadRequestException({
-        status: 'error',
-        message: 'No file uploaded. Use field name "invoice_document".',
-      });
-    }
+    assertFinanceV2InvoiceCreateUpload(file, dto);
     return this.companyProjectsService.createFinanceV2InvoiceByProjectId(
       projectId,
       { ...dto, invoice_type: 'tax', payment_for: 'inv', payment_type: 'tax' },
@@ -591,19 +533,9 @@ export class FacilitatorFinanceV2Controller {
     @Param('projectId') projectId: string,
     @Param('invoiceId') invoiceId: string,
     @Body() dto: SubmitFinanceV2PaymentDto,
-    @UploadedFiles()
-    files?: {
-      supportingdocument?: Express.Multer.File[];
-      supporting_document?: Express.Multer.File[];
-      supportingDocument?: Express.Multer.File[];
-      file?: Express.Multer.File[];
-    },
+    @UploadedFiles() files?: FinanceV2PaymentFiles,
   ): Promise<any> {
-    const file =
-      files?.supportingdocument?.[0] ||
-      files?.supporting_document?.[0] ||
-      files?.supportingDocument?.[0] ||
-      files?.file?.[0];
+    const file = pickFinanceV2PaymentMultipartFile(files);
     return this.companyProjectsService.submitFinanceV2PaymentByProjectId(projectId, invoiceId, dto, file);
   }
 }

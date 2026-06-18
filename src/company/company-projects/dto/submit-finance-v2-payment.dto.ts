@@ -58,4 +58,25 @@ export class SubmitFinanceV2PaymentDto {
   @IsString()
   @IsNotEmpty()
   remarks?: string;
+
+  /** Presigned S3 upload — same pattern as proposal / work order. */
+  @IsOptional()
+  @IsString()
+  supportingdocument_s3_key?: string;
+
+  @IsOptional()
+  @IsString()
+  supporting_document_s3_key?: string;
+
+  @IsOptional()
+  @IsString()
+  document_s3_key?: string;
+
+  @IsOptional()
+  @IsString()
+  file_s3_key?: string;
+
+  @IsOptional()
+  @IsString()
+  s3_key?: string;
 }

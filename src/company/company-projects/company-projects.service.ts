@@ -89,6 +89,10 @@ import {
 import { WorkflowNotificationMeta } from '../notifications/workflow-notification.types';
 import { MailService } from '../../mail/mail.service';
 import { S3Service } from '../../s3/s3.service';
+import {
+  pickFinanceV2InvoiceS3KeyFromBody,
+  pickFinanceV2PaymentS3KeyFromBody,
+} from '../../s3/project-document-storage.util';
 import { buildWorkOrderDocumentViewUrl } from '../../s3/project-document-storage.util';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import * as bcrypt from 'bcrypt';
@@ -10464,7 +10468,7 @@ export class CompanyProjectsService {
     facilitatorId: string,
     projectId: string,
     dto: CreateProformaInvoiceV2Dto,
-    file: Express.Multer.File,
+    file?: Express.Multer.File,
   ) {
     return this.withFinanceV2MongoRetry(async () => {
       const resolved = await this.resolveFacilitatorFinanceProject(facilitatorId, projectId);
@@ -10655,7 +10659,7 @@ export class CompanyProjectsService {
   async createFinanceV2InvoiceByProjectId(
     projectId: string,
     dto: CreateProformaInvoiceV2Dto,
-    file: Express.Multer.File,
+    file?: Express.Multer.File,
   ) {
     return this.withFinanceV2MongoRetry(async () => {
       const resolved = await this.resolveProjectForAdmin(projectId);
@@ -10670,7 +10674,7 @@ export class CompanyProjectsService {
     companyId: string,
     projectId: string,
     dto: CreateProformaInvoiceV2Dto,
-    file: Express.Multer.File,
+    file?: Express.Multer.File,
   ) {
     const project = await this.projectModel.findOne({ _id: projectId, company_id: companyId });
     if (!project) {
@@ -10710,7 +10714,12 @@ export class CompanyProjectsService {
       }
     }
 
-    const relativePath = `uploads/company/${projectId}/finance-v2/${file.filename}`;
+    const { key: relativePath, originalFilename } =
+      await this.s3Service.resolveFinanceV2InvoiceKey(
+        projectId,
+        file,
+        dto as unknown as Record<string, unknown>,
+      );
     const reminderDate =
       Number(dto.send_reminder) === 1
         ? new Date(Date.now() + FINANCE_V2_REMINDER_INTERVAL_DAYS * 24 * 60 * 60 * 1000)
@@ -10723,9 +10732,9 @@ export class CompanyProjectsService {
       invoice_type: dto.invoice_type,
       invoice_title: dto.invoice_title,
       invoice_document: relativePath,
-      invoice_document_filename: file.originalname,
+      invoice_document_filename: originalFilename,
       invoice_document_history: [
-        { path: relativePath, filename: file.originalname, uploaded_at: new Date() },
+        { path: relativePath, filename: originalFilename, uploaded_at: new Date() },
       ],
       payable_amount: payable,
       sgst: gst.sgst_rate,
@@ -10917,14 +10926,19 @@ export class CompanyProjectsService {
       existing.send_invoice_to = dto.send_invoice_to;
     }
 
-    if (file) {
-      const relativePath = `uploads/company/${projectId}/finance-v2/${file.filename}`;
+    if (file || pickFinanceV2InvoiceS3KeyFromBody(dto as unknown as Record<string, unknown>)) {
+      const { key: relativePath, originalFilename } =
+        await this.s3Service.resolveFinanceV2InvoiceKey(
+        projectId,
+        file,
+        dto as unknown as Record<string, unknown>,
+      );
       const hist = Array.isArray((existing as any).invoice_document_history)
         ? [...(existing as any).invoice_document_history]
         : [];
-      hist.push({ path: relativePath, filename: file.originalname, uploaded_at: new Date() });
+      hist.push({ path: relativePath, filename: originalFilename, uploaded_at: new Date() });
       existing.invoice_document = relativePath;
-      existing.invoice_document_filename = file.originalname;
+      existing.invoice_document_filename = originalFilename;
       (existing as any).invoice_document_history = hist;
     }
 
@@ -11163,10 +11177,13 @@ export class CompanyProjectsService {
           message: 'Transaction ID is required when payment mode is Offline',
         });
       }
-      if (!file) {
+      const hasPaymentDoc =
+        !!file || !!pickFinanceV2PaymentS3KeyFromBody(dto as Record<string, unknown>);
+      if (!hasPaymentDoc) {
         throw new BadRequestException({
           status: 'error',
-          message: 'Supporting document is required when payment mode is Offline',
+          message:
+            'Supporting document is required when payment mode is Offline. Use supportingdocument or provide supportingdocument_s3_key / s3_key after presigned upload.',
         });
       }
     }
@@ -11195,9 +11212,17 @@ export class CompanyProjectsService {
       });
     }
 
-    const relativePath = file
-      ? `uploads/company/${projectId}/finance-v2-payments/${file.filename}`
-      : undefined;
+    let relativePath: string | undefined;
+    let paymentFilename: string | undefined;
+    if (file || pickFinanceV2PaymentS3KeyFromBody(dto as Record<string, unknown>)) {
+      const resolved = await this.s3Service.resolveFinanceV2PaymentKey(
+        projectId,
+        file,
+        dto as Record<string, unknown>,
+      );
+      relativePath = resolved.key;
+      paymentFilename = resolved.originalFilename;
+    }
     (invoice as any).payment_type = normalizedPaymentType;
     (invoice as any).trans_id = normalizedPaymentType === 'Offline' ? normalizedTransId : undefined;
     if (relativePath) {
@@ -11216,8 +11241,8 @@ export class CompanyProjectsService {
         appendIfNew(prev, { path: oldDoc, filename: oldName, uploaded_at: new Date() });
       }
       (invoice as any).offline_tran_doc = relativePath;
-      (invoice as any).offline_tran_doc_filename = file!.originalname;
-      appendIfNew(prev, { path: relativePath, filename: file!.originalname, uploaded_at: new Date() });
+      (invoice as any).offline_tran_doc_filename = paymentFilename;
+      appendIfNew(prev, { path: relativePath, filename: paymentFilename, uploaded_at: new Date() });
       (invoice as any).offline_tran_doc_history = prev;
     }
     (invoice as any).paid_amount = nextPaid;

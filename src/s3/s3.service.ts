@@ -21,13 +21,21 @@ import * as fsSync from 'node:fs';
 import { Readable } from 'node:stream';
 import type { Express, Response } from 'express';
 import {
+  pickFinanceV2InvoiceS3KeyFromBody,
+  pickFinanceV2PaymentS3KeyFromBody,
   pickLaunchTrainingS3KeyFromBody,
   pickS3KeyFromBody,
 } from './project-document-storage.util';
 
-export { pickLaunchTrainingS3KeyFromBody, pickS3KeyFromBody };
+export {
+  pickFinanceV2InvoiceS3KeyFromBody,
+  pickFinanceV2PaymentS3KeyFromBody,
+  pickLaunchTrainingS3KeyFromBody,
+  pickS3KeyFromBody,
+};
 
 const LAUNCH_TRAINING_PREFIX = 'uploads/companyproject/launchAndTraining';
+const FINANCE_V2_PROJECT_PREFIX = 'uploads/companyproject';
 
 @Injectable()
 export class S3Service {
@@ -243,6 +251,100 @@ export class S3Service {
     const timestamp = Date.now();
     const safeName = String(originalname || 'workorder.pdf').replace(/[/\\]+/g, '_');
     return `uploads/companyproject/${projectId}/${timestamp}_${safeName}`;
+  }
+
+  buildFinanceV2InvoiceKey(projectId: string, originalname: string): string {
+    const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+    const ext = extname(originalname || '') || '.pdf';
+    return `${FINANCE_V2_PROJECT_PREFIX}/${projectId}/finance-v2/finance-v2-${uniqueSuffix}${ext}`;
+  }
+
+  buildFinanceV2PaymentKey(projectId: string, originalname: string): string {
+    const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+    const ext = extname(originalname || '') || '.pdf';
+    return `${FINANCE_V2_PROJECT_PREFIX}/${projectId}/finance-v2-payments/finance-v2-payment-${uniqueSuffix}${ext}`;
+  }
+
+  /**
+   * Resolve Finance v2 invoice key from presigned client upload (body fields) or multer file bytes.
+   */
+  async resolveFinanceV2InvoiceKey(
+    projectId: string,
+    file: Express.Multer.File | undefined,
+    body: Record<string, unknown> | undefined,
+  ): Promise<{ key: string; originalFilename: string }> {
+    const fromBody = pickFinanceV2InvoiceS3KeyFromBody(body);
+    if (fromBody) {
+      const normalized = this.normalizeStorageKey(fromBody);
+      if (!normalized) {
+        throw new BadRequestException({
+          status: 'error',
+          message: 'Invalid s3_key in request body.',
+        });
+      }
+      const exists = await this.storageKeyExists(normalized);
+      if (!exists) {
+        throw new BadRequestException({
+          status: 'error',
+          message: `Uploaded file not found in storage for key: ${normalized}. Complete the S3 PUT before calling this API.`,
+        });
+      }
+      return {
+        key: normalized,
+        originalFilename: basename(normalized) || 'finance-v2-invoice.pdf',
+      };
+    }
+    if (!file) {
+      throw new BadRequestException({
+        status: 'error',
+        message:
+          'No file uploaded. Use field name "invoice_document" or provide invoice_document_s3_key / s3_key after presigned upload.',
+      });
+    }
+    const key = this.buildFinanceV2InvoiceKey(projectId, file.originalname);
+    await this.saveMulterFileToStorage(file, key);
+    return { key, originalFilename: file.originalname };
+  }
+
+  /**
+   * Resolve Finance v2 payment supporting-document key from presigned upload or multer file bytes.
+   */
+  async resolveFinanceV2PaymentKey(
+    projectId: string,
+    file: Express.Multer.File | undefined,
+    body: Record<string, unknown> | undefined,
+  ): Promise<{ key: string; originalFilename: string }> {
+    const fromBody = pickFinanceV2PaymentS3KeyFromBody(body);
+    if (fromBody) {
+      const normalized = this.normalizeStorageKey(fromBody);
+      if (!normalized) {
+        throw new BadRequestException({
+          status: 'error',
+          message: 'Invalid s3_key in request body.',
+        });
+      }
+      const exists = await this.storageKeyExists(normalized);
+      if (!exists) {
+        throw new BadRequestException({
+          status: 'error',
+          message: `Uploaded file not found in storage for key: ${normalized}. Complete the S3 PUT before calling this API.`,
+        });
+      }
+      return {
+        key: normalized,
+        originalFilename: basename(normalized) || 'finance-v2-payment.pdf',
+      };
+    }
+    if (!file) {
+      throw new BadRequestException({
+        status: 'error',
+        message:
+          'Supporting document is required when payment mode is Offline. Use supportingdocument or provide supportingdocument_s3_key / s3_key after presigned upload.',
+      });
+    }
+    const key = this.buildFinanceV2PaymentKey(projectId, file.originalname);
+    await this.saveMulterFileToStorage(file, key);
+    return { key, originalFilename: file.originalname };
   }
 
   /**

@@ -38,6 +38,44 @@ export function pickLaunchTrainingS3KeyFromBody(
   return null;
 }
 
+/** Finance v2 invoice document (presigned S3 flow). */
+export function pickFinanceV2InvoiceS3KeyFromBody(
+  body?: Record<string, unknown> | null,
+): string | null {
+  if (!body || typeof body !== 'object') return null;
+  const candidates = [
+    body.invoice_document_s3_key,
+    body.regFeeInvoice_s3_key,
+    body.document_s3_key,
+    body.file_s3_key,
+    body.s3_key,
+  ];
+  for (const c of candidates) {
+    const s = String(c ?? '').trim();
+    if (s) return s;
+  }
+  return null;
+}
+
+/** Finance v2 payment supporting document (presigned S3 flow). */
+export function pickFinanceV2PaymentS3KeyFromBody(
+  body?: Record<string, unknown> | null,
+): string | null {
+  if (!body || typeof body !== 'object') return null;
+  const candidates = [
+    body.supportingdocument_s3_key,
+    body.supporting_document_s3_key,
+    body.document_s3_key,
+    body.file_s3_key,
+    body.s3_key,
+  ];
+  for (const c of candidates) {
+    const s = String(c ?? '').trim();
+    if (s) return s;
+  }
+  return null;
+}
+
 export function buildWorkOrderDocumentViewUrl(
   projectId: string,
   cacheBust?: number | string | null,

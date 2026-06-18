@@ -129,4 +129,25 @@ export class UpdateProformaInvoiceV2Dto {
   @IsEmail()
   @Transform(({ value }) => (typeof value === 'string' ? value.trim().toLowerCase() : value))
   send_invoice_to?: string;
+
+  /** Presigned S3 upload — same pattern as proposal / work order. */
+  @IsOptional()
+  @IsString()
+  invoice_document_s3_key?: string;
+
+  @IsOptional()
+  @IsString()
+  regFeeInvoice_s3_key?: string;
+
+  @IsOptional()
+  @IsString()
+  document_s3_key?: string;
+
+  @IsOptional()
+  @IsString()
+  file_s3_key?: string;
+
+  @IsOptional()
+  @IsString()
+  s3_key?: string;
 }

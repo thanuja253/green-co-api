@@ -26,6 +26,30 @@ uploads/companyproject/launchAndTraining/{projectId}/launch-session-{timestamp}-
 
 MongoDB stores the **key** (not a Render URL). API responses expose `document_url` as the CloudFront URL when `AWS_CLOUDFRONT_URL` is set.
 
+## Finance v2 — backend must match proposal
+
+Finance invoice create/update and payment submit use the same presigned S3 flow as proposal documents.
+
+| Step | Proposal | Finance v2 |
+|------|----------|------------|
+| 1. Upload bytes | Presigned S3 PUT | Presigned S3 PUT |
+| 2. S3 folder | `uploads/companyproject/{projectId}/` (proposal PDF) | `uploads/companyproject/{projectId}/finance-v2/` (invoice) or `…/finance-v2-payments/` (payment proof) |
+| 3. Register on API | Multipart with `s3_key` only | Multipart with `invoice_document_s3_key` / `supportingdocument_s3_key` |
+| 4. View | CloudFront | CloudFront |
+
+**Invoice routes** (`POST`/`PATCH` `…/finance-v2/invoices` and aliases) accept:
+
+- `s3_key`
+- `invoice_document_s3_key`
+- `regFeeInvoice_s3_key`
+
+**Payment submit** (`POST` `…/invoices/:id/submit-payment`) accepts:
+
+- `s3_key`
+- `supportingdocument_s3_key`
+
+Do **not** store under `uploads/company/…` (CloudFront returns 403 there). Use `uploads/companyproject/{projectId}/finance-v2/` and `…/finance-v2-payments/`.
+
 ## Generic S3 HTTP API
 
 | Method | Path | Purpose |
