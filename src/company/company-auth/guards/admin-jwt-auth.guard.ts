@@ -168,16 +168,28 @@ export class AdminJwtAuthGuard implements CanActivate {
       });
     }
 
-    // Admin compat tokens use sub=admin and role=A.
     const isAdmin = payload?.sub === 'admin' || payload?.role === 'A';
-    if (!isAdmin) {
+    const isPrimaryDataAdminCompatRoute =
+      /^\/?api\/admin\/projects\/[^/]+\/primary-data(\/approval)?$/i.test(path) ||
+      /^\/?admin\/projects\/[^/]+\/primary-data(\/approval)?$/i.test(path);
+    const isCompanyBearer =
+      isPrimaryDataAdminCompatRoute &&
+      typeof payload?.sub === 'string' &&
+      /^[a-f0-9]{24}$/i.test(payload.sub) &&
+      payload.sub !== 'admin';
+
+    if (!isAdmin && !isCompanyBearer) {
       throw new UnauthorizedException({
         status: 'error',
         message: 'Admin token is required for this endpoint.',
       });
     }
 
-    req.admin = payload;
+    if (isAdmin) {
+      req.admin = payload;
+    } else if (isCompanyBearer) {
+      req.user = { userId: payload.sub, email: payload.email };
+    }
     return true;
   }
 
